@@ -1,6 +1,7 @@
 [English](README.md) | 日本語 | [简体中文](README.zh-CN.md)
 
-# 4 台または 8 台の DGX Spark で動かすフルサイズの GLM-5.3
+# 4 / 8 台のDGX Spark用　GLM-5.3-full
+
 
 フルサイズの GLM-5.3（755B、`glm_moe_dsa`）を、GB10 を 1 基ずつ搭載した NVIDIA DGX Spark 4 台または 8 台で、テンソル並列 4 または 8 で動かします。リクエストは一度に 1 件ずつ、高速に、エージェントやコーディング向けの長いコンテキストで処理します。エンジンは Zig と素の CUDA カーネルで書かれており、実行時に Python は不要です。
 
