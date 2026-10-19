@@ -13,8 +13,11 @@ other models, weights and machines. For TensorFold itself, see its repository.
 
 ## What it does
 
-- Tensor parallelism 8 or 4 with the KV cache split across rank pairs (decode context parallelism 2): kept in FP8 on
-  eight nodes, so a request may reach 819,200 positions, and in 4 bits on four nodes, where it may reach 737,280.
+- Tensor parallelism 8 or 4 with the KV cache split across rank pairs (decode context parallelism 2). The engine and
+  the model take up to 1M tokens (1,048,576); the DGX Spark's memory sets the context: **1M on eight nodes** (FP8 KV
+  cache) and **about 800K (819,200) on four** (4-bit KV cache). The conf examples ship with 819,200 and 737,280; with
+  the same memory, eight nodes take `CONTEXT=1048576` `STORE=589824` and four nodes `CONTEXT=819200` `STORE=18080`
+  (the KV pool holds `CONTEXT` + `STORE` positions).
 - Long prompts read in sequence-parallel parts; decode-step collectives over RoCE.
 - One conversation cache for all conversations, in blocks of 256 positions: a request resumes from the longest cached
   prefix of any conversation, and conversations that begin alike (an agent's system prompt, its sub-agents) hold the
