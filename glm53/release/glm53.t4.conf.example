@@ -1,0 +1,48 @@
+# Four nodes (tensor parallelism 4): the settings of T4.md. Copy to glm53.conf next to tf-glm53 and set NODES, the
+# network devices and the paths; the rest is the measured configuration.
+
+# The four nodes in rank order, by the address of the RDMA network; run tf-glm53 on the first one.
+NODES=(192.0.2.11 192.0.2.12 192.0.2.13 192.0.2.14)
+
+# The network interface and RDMA device of that network on every node (`ip -br addr`, `ibv_devices`).
+SOCKET_IFNAME=enp1s0f1np1
+IB_HCA=rocep1s0f1
+GID_INDEX=
+
+# NCCL 2.30.7 at this path on every node (RUNTIME.md, "Before the first start").
+NCCL_LIB=~/nccl-2.30.7/nvidia/nccl/lib/libnccl.so.2
+
+# The four-node checkpoint, fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks on Hugging Face (the 3 / 4-bit expert mix, T4.md),
+# the same path on every node.
+WEIGHTS=~/models/GLM-5.3-EXL3-4x-DGX-Sparks
+
+# The checkpoint's own MTP layer, or DFlash2 (DRAFTER_KIND=dflash2; not included: CC BY-NC-ND 4.0 for research and
+# evaluation, with commercial licensing from Inco AI; RUNTIME.md, "Using DFlash2").
+DRAFTER_KIND=mtp
+MTP_K=3
+DRAFTER=
+#DRAFTER=~/models/GLM-5.3-DFlash2
+
+# The server. HOST other than loopback needs API_KEY_FILE; put TLS or a closed network in front.
+NAME=glm-5.3
+HOST=127.0.0.1
+PORT=8000
+API_KEY_FILE=
+
+# The measured configuration: 737,280 positions a request (prompt + reply), 100,000 more kept for earlier
+# conversations (the pool holds 837,280 positions in blocks of 256 that every conversation shares), decode context
+# parallelism 2, prompt chunks of 16,384 rows in 4 sequence-parallel parts, the 4-bit KV cache.
+CONTEXT=737280
+STORE=100000
+CACHE=pool
+DCP=2
+ROWS=16384
+SP_PARTS=4
+KV=fp4
+# The memory a node must have available before the start: tf-glm53 check asks NEED_GB minus 2.7 GiB for each
+# 100,000 positions of STORE below 819,200 (the eight-node measure), plus 3 with DFlash2; 131 makes it 112 GiB here
+# (115 with DFlash2), what four nodes use.
+NEED_GB=131
+
+MASTER_PORT=29551
+READY_TIMEOUT=900

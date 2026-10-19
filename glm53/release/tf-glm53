@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+# tf-glm53: full GLM-5.3 on eight or four DGX Sparks (tensor parallel 8 or 4) from this release directory.
+#
+#   tf-glm53 [-c CONF] deploy     copy this directory to every node (same path) and check SHA256SUMS there
+#   tf-glm53 [-c CONF] check      nodes, files, weights, libraries, RDMA devices, GPUs and memory, before a start
+#   tf-glm53 [-c CONF] verify     the weights against their SHA256SUMS on every node at once (a few minutes)
+#   tf-glm53 [-c CONF] up         check, start the last rank .. rank 0, wait for the server, run the smoke test
+#   tf-glm53 [-c CONF] down       stop every rank (TERM, then KILL after 30 s)
+#   tf-glm53 [-c CONF] status     ranks, free memory, the conversation cache and the server's /health
+#   tf-glm53 [-c CONF] smoke      three requests whose answers are checked, the last one reusing the cached prompt
+#   tf-glm53 [-c CONF] logs [R]   follow rank R's log (default 0)
+#   -d KIND, before the command: the drafter for this start (mtp, dflash2 or none) instead of DRAFTER_KIND in CONF
+#
+# Run it on the first node of NODES (rank 0). Settings: glm53.conf next to this script (see glm53.conf.example;
+# glm53.t4.conf.example and T4.md for four nodes).
+set -uo pipefail
+PKG=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SELF="$PKG/$(basename "${BASH_SOURCE[0]}")"
+CONF=$PKG/glm53.conf
+DRAFTER_KIND_ARG=
+while [ $# -gt 0 ]; do
+  case $1 in
+    -c) CONF=${2:?-c needs a settings file}; shift 2 ;;
+    -d) DRAFTER_KIND_ARG=${2:?-d needs mtp, dflash2 or none}; shift 2 ;;
+    *) break ;;
+  esac
+done
+[ -f "$CONF" ] || { echo "no settings file $CONF: copy glm53.conf.example to glm53.conf and edit it"; exit 2; }
+# shellcheck source=/dev/null
+. "$CONF"
+[ -n "$DRAFTER_KIND_ARG" ] && DRAFTER_KIND=$DRAFTER_KIND_ARG
+
+NAME=${NAME:-glm-5.3}
+HOST=${HOST:-127.0.0.1}
+PORT=${PORT:-8000}
+API_KEY_FILE=${API_KEY_FILE:-}
+DRAFTER_KIND=${DRAFTER_KIND:-mtp}
+MTP_K=${MTP_K:-3}
+DRAFTER=${DRAFTER:-}
+NCCL_LIB=${NCCL_LIB:-$HOME/nccl-2.30.7/nvidia/nccl/lib/libnccl.so.2}
+CONTEXT=${CONTEXT:-819200}
+STORE=${STORE:-819200}
+CACHE=${CACHE:-pool}       # pool: every conversation's KV in shared blocks of 256; slots: one store per conversation
+KV=${KV:-fp8}              # the KV cache's format: fp8, or fp4 (four nodes)
+DRAFT_SAVES=${DRAFT_SAVES:-8}  # pool with DFlash2: the conversations whose drafter state is kept
+ROWS=${ROWS:-8192}
+SP_PARTS=${SP_PARTS:-4}
+MASTER_PORT=${MASTER_PORT:-29551}
+GID_INDEX=${GID_INDEX:-}
+READY_TIMEOUT=${READY_TIMEOUT:-900}
+EXTRA_ENV=${EXTRA_ENV:-}
+LOGS=$PKG/logs
+BIN=$PKG/bin/tensorfold-native
+# 4 nodes (TP=4) or 8 (TP=8); the checkpoint keeps the experts cut for 8 either way (TF_GLM53_STORED_WORLD=8)
+WORLD=${#NODES[@]}
+[ "$WORLD" -eq 8 ] || [ "$WORLD" -eq 4 ] || { echo "NODES must list 4 or 8 nodes (rank 0 first)"; exit 2; }
+LAST=$((WORLD - 1))
+[ -n "${WEIGHTS:-}" ] && [ -n "${SOCKET_IFNAME:-}" ] && [ -n "${IB_HCA:-}" ] || { echo "set WEIGHTS, SOCKET_IFNAME and IB_HCA in $CONF"; exit 2; }
+case $CACHE in pool|slots) ;; *) echo "CACHE must be pool or slots"; exit 2 ;; esac
+case $KV in fp8|fp4) ;; *) echo "KV must be fp8 or fp4"; exit 2 ;; esac
+case $DRAFTER_KIND in
+  mtp) [[ $MTP_K =~ ^[1-7]$ ]] || { echo "MTP_K must be 1 .. 7"; exit 2; } ;;
+  dflash2) [ -n "$DRAFTER" ] || { echo "DRAFTER_KIND=dflash2 needs DRAFTER (the DFlash2 model's directory)"; exit 2; } ;;
+  none) ;;
+  *) echo "DRAFTER_KIND must be mtp, dflash2 or none"; exit 2 ;;
+esac
+drafter_line() { case $DRAFTER_KIND in mtp) echo "mtp (the checkpoint's MTP layer), $MTP_K drafts a round" ;; dflash2) echo "dflash2 ($DRAFTER)" ;; *) echo none ;; esac; }
+
+on() { ssh -n -o ConnectTimeout=8 -o BatchMode=yes "$1" "$2"; }
+loopback() { case $1 in 127.*|localhost|::1) return 0 ;; *) return 1 ;; esac; }
+# where this script reaches the server: loopback when it listens there or on every address, else HOST itself
+url() { case $HOST in 0.0.0.0|127.*|localhost) echo "http://127.0.0.1:$PORT" ;; ::|::1) echo "http://[::1]:$PORT" ;; *:*) echo "http://[$HOST]:$PORT" ;; *) echo "http://$HOST:$PORT" ;; esac; }
+# the first key of API_KEY_FILE, without its label (lines are KEY or LABEL: KEY; # starts a comment)
+api_key() { grep -v -m1 -E '^[[:space:]]*(#|$)' "$API_KEY_FILE" | sed 's/^[^:]*://; s/^[[:space:]]*//; s/[[:space:]]*$//'; }
+# this directory's ranks only: processes whose executable is $BIN
+PIDS="for p in \$(pgrep -x tensorfold-nati); do e=\$(readlink /proc/\$p/exe); [ \"\${e% (deleted)}\" = $BIN ] && echo \$p; done"
+alive() { local r; r=$(on "$1" "[ -n \"\$($PIDS)\" ] && echo 1 || echo 0" 2>/dev/null); case $r in 0|1) echo "$r" ;; *) echo U ;; esac; }
+# the GID index of the last RoCE v2 entry with an IPv4 address on the node's RDMA device
+GID_PROBE="d=/sys/class/infiniband/$IB_HCA/ports/1; g=; for i in \$(seq 0 15); do t=\$(cat \$d/gid_attrs/types/\$i 2>/dev/null); a=\$(cat \$d/gids/\$i 2>/dev/null); case \"\$t:\$a\" in 'RoCE v2:0000:0000:0000:0000:0000:ffff:'*) g=\$i ;; esac; done; echo \$g"
+
+rank_env() {
+  local r=$1 gid=$2
+  local e="TF_NCCL_LIB=$NCCL_LIB NCCL_SOCKET_IFNAME=$SOCKET_IFNAME NCCL_IB_HCA=$IB_HCA NCCL_IB_GID_INDEX=$gid"
+  e="$e NCCL_PROTO=Simple NCCL_MAX_NCHANNELS=2 NCCL_DEBUG=WARN TF_GLM53_RANK=$r TF_GLM53_WORLD=$WORLD"
+  e="$e TF_GLM53_MASTER=${NODES[0]}:$MASTER_PORT TF_GLM53_STORED_WORLD=8 TF_GLM53_KV=$KV TF_GLM53_DCP=${DCP:-2}"
+  e="$e TF_GLM53_PROMPT_SP=1 TF_GLM53_SP_DCP=1 TF_GLM53_SP_PARTS=$SP_PARTS TF_GLM53_COMM_PRIORITY=-1"
+  e="$e TF_GLM53_PROMPT_ROWS=$ROWS TF_GLM53_DCP_PROMPT_ROWS=$ROWS TF_GLM53_PREFILL_REDUCE=ring TF_EXL3_PROMPT_EXPERTS=1"
+  e="$e TF_GLM53_ROCE=1 TF_GLM53_DECODE_BF16=1 B12X_ROCE_SPIN_LIMIT=300000000 TF_ROCE_PROXY_LIB=$PKG/lib/libroce_proxy.so"
+  e="$e TF_GLM53_PREFIX=$CACHE TF_GLM53_PREFIX_STORE=$STORE TF_GLM53_TOPK_WORDS=1 TF_GLM53_TOPK_ANY=1 TF_GLM53_FUSE=1"
+  e="$e TF_GLM53_PEER_Q=1 TF_GLM53_INDEX_FP8=0"
+  case $DRAFTER_KIND in
+    mtp) e="$e TF_GLM53_DRAFTER=mtp TF_GLM53_MTP_K=$MTP_K" ;;
+    dflash2) e="$e TF_GLM53_DFLASH=$DRAFTER"; [ "$CACHE" = pool ] && e="$e TF_GLM53_POOL_DRAFT_SAVES=$DRAFT_SAVES" ;;
+  esac
+  [ -n "$EXTRA_ENV" ] && e="$e $EXTRA_ENV"
+  echo "$e"
+}
+
+cmd_deploy() {
+  local n tmp want key=(); tmp=$(mktemp -d)
+  # the API key stays on this node
+  [ -n "$API_KEY_FILE" ] && case $(readlink -f "$API_KEY_FILE") in "$PKG"/*) key=(--exclude "/$(readlink -f "$API_KEY_FILE" | sed "s|^$PKG/||")") ;; esac
+  want=$(cd "$PKG" && sha256sum -c SHA256SUMS --quiet && sha256sum SHA256SUMS | cut -c1-64) || { echo "SHA256SUMS does not match here"; return 1; }
+  for n in "${NODES[@]:1}"; do
+    ( on "$n" "mkdir -p $PKG" && rsync -a --exclude logs --exclude glm53.conf "${key[@]}" "$PKG/" "$n:$PKG/" \
+      && [ "$(on "$n" "cd $PKG && sha256sum -c SHA256SUMS --quiet && sha256sum SHA256SUMS | cut -c1-64")" = "$want" ] \
+      && echo "  ok $n" || { echo "  FAIL $n"; : > "$tmp/fail"; } ) &
+  done; wait
+  if [ -f "$tmp/fail" ]; then rm -rf "$tmp"; echo "deploy: FAIL"; return 1; fi
+  rm -rf "$tmp"; echo "deploy: every node matches SHA256SUMS ${want:0:12}"
+}
+
+cmd_check() {
+  local tmp ng=0 n need; tmp=$(mktemp -d)
+  local sums; sums=$(sha256sum "$PKG/SHA256SUMS" | cut -c1-64)
+  # GiB a node must have available before the start (measured with CONTEXT and STORE 819,200: the ranks use about 108
+  # with MTP or no drafts, 111 with DFlash2), 4 to spare; each 100,000 positions of STORE fewer need 2.7 less
+  need=${NEED_GB:-112}; [ "$DRAFTER_KIND" = dflash2 ] && need=$((need + 3))
+  need=$(( need - (819200 - STORE) * 27 / 1000000 ))
+  local wsum; wsum=$(cd "$WEIGHTS" && { find . -maxdepth 1 -type f -printf '%f %s\n' | LC_ALL=C sort | sha256sum; sha256sum config.json; } | sha256sum | cut -c1-64) || { echo "no weights at $WEIGHTS"; return 1; }
+  if [ "$DRAFTER_KIND" = mtp ] && ! grep -q '\.eh_proj\.weight"' "$WEIGHTS/model.safetensors.index.json" 2>/dev/null; then
+    echo "  the checkpoint at $WEIGHTS has no MTP layer (eh_proj): use one that has it, or set DRAFTER_KIND=none"; ng=1
+  fi
+  if [ "$DRAFTER_KIND" = dflash2 ] && [ ! -f "$DRAFTER/config.json" ]; then echo "  no DFlash2 model at $DRAFTER"; ng=1; fi
+  echo "  drafter: $(drafter_line)"
+  [ -n "$DRAFTER" ] && [ "$DRAFTER_KIND" != dflash2 ] && echo "  (DRAFTER is set but not used: DRAFTER_KIND=$DRAFTER_KIND)"
+  for r in $(seq 0 $LAST); do
+    n=${NODES[$r]}
+    ( o=$(on "$n" "cd $PKG 2>/dev/null && sha256sum -c SHA256SUMS --quiet >/dev/null 2>&1 && echo -n files=\$(sha256sum SHA256SUMS | cut -c1-64) || echo -n files=bad
+        echo -n ' weights='\$(cd $WEIGHTS 2>/dev/null && { find . -maxdepth 1 -type f -printf '%f %s\\n' | LC_ALL=C sort | sha256sum; sha256sum config.json; } | sha256sum | cut -c1-64)
+        echo -n ' nccl='\$([ -r $NCCL_LIB ] && basename \$(readlink -f $NCCL_LIB) || echo missing)
+        echo -n ' cublas='\$(ldconfig -p | grep -c 'libcublasLt.so.13 ')
+        echo -n ' ibverbs='\$(ldconfig -p | grep -c 'libibverbs.so.1 ')
+        echo -n ' hca='\$([ -d /sys/class/infiniband/$IB_HCA ] && echo 1 || echo 0)
+        echo -n ' gid='\$($GID_PROBE)
+        echo -n ' running='\$( { $PIDS; nvidia-smi --query-compute-apps=pid --format=csv,noheader; } | grep -c .)
+        echo -n ' free_gb='\$(free -g | awk '/^Mem/{print \$7}')" 2>/dev/null)
+      [ -n "$GID_INDEX" ] && o=$(echo "$o" | sed "s/gid=[0-9]*/gid=$GID_INDEX/")
+      bad=""
+      [[ $o == *"files=$sums"* ]] || bad="$bad files"
+      [[ $o == *"weights=$wsum"* ]] || bad="$bad weights"
+      [[ $o == *"nccl=missing"* || -z $o ]] && bad="$bad NCCL($NCCL_LIB)"
+      [[ $o == *"cublas=0"* || -z $o ]] && bad="$bad cuBLAS-13"
+      [[ $o == *"ibverbs=0"* ]] && bad="$bad libibverbs"
+      [[ $o == *"hca=0"* ]] && bad="$bad $IB_HCA"
+      [[ $o =~ gid=[0-9] ]] || bad="$bad RoCE-v2-GID"
+      [[ $o == *"running=0"* ]] || bad="$bad GPU-busy"
+      fg=$(echo "$o" | grep -o 'free_gb=[0-9]*' | cut -d= -f2); [ "${fg:-0}" -ge "$need" ] || bad="$bad memory(${fg:-?}<$need GiB)"
+      g=$(echo "$o" | grep -o 'gid=[0-9]*' | cut -d= -f2)
+      nc=$(echo "$o" | grep -o 'nccl=[^ ]*' | cut -d= -f2)
+      if [ -n "$bad" ]; then echo "  rank $r $n: NG:$bad"; : > "$tmp/ng"; else echo "  rank $r $n: ok (GID $g, $fg GiB available, $nc)"; fi ) > "$tmp/$r" &
+  done; wait
+  cat $(for r in $(seq 0 $LAST); do echo "$tmp/$r"; done); [ -f "$tmp/ng" ] && ng=1; rm -rf "$tmp"
+  if ! loopback "$HOST" && [ -z "$API_KEY_FILE" ]; then echo "  HOST $HOST is not loopback: set API_KEY_FILE (refusing an open server)"; ng=1; fi
+  if [ -n "$API_KEY_FILE" ]; then                  # what the server requires of it, or it refuses to start
+    if [ -L "$API_KEY_FILE" ] || [ ! -f "$API_KEY_FILE" ]; then echo "  API_KEY_FILE $API_KEY_FILE: not a regular file"; ng=1
+    elif [ $(( 8#$(stat -c %a "$API_KEY_FILE") & 8#044 )) -ne 0 ]; then echo "  API_KEY_FILE $API_KEY_FILE: readable by other users (chmod 600 it)"; ng=1
+    elif [ -z "$(api_key)" ]; then echo "  API_KEY_FILE $API_KEY_FILE: no key in it"; ng=1; fi
+  fi
+  [ $ng -eq 0 ] && echo "check: ok" || echo "check: NG"
+  return $ng
+}
+
+cmd_verify() {                                     # the weights against their SHA256SUMS on every node at once
+  local tmp r ng=0
+  [ -f "$WEIGHTS/SHA256SUMS" ] || { echo "no SHA256SUMS in $WEIGHTS"; return 1; }
+  echo "checking $WEIGHTS on every node (sha256sum -c at low priority, a few minutes)"
+  tmp=$(mktemp -d)
+  for r in "${!NODES[@]}"; do
+    ( n=${NODES[$r]}; t0=$(date +%s)
+      o=$(on "$n" "o=\$(cd $WEIGHTS && nice -n 19 ionice -c3 sha256sum -c --quiet SHA256SUMS 2>&1); r=\$?; echo \"\$o\" | head -3; echo rc=\$r")
+      if [[ $o == *rc=0* ]]; then echo "  rank $r $n: ok ($(( $(date +%s) - t0 )) s)"
+      else echo "  rank $r $n: NG $(echo "$o" | grep -v '^rc=' | tr '\n' ' ' | cut -c1-240)"; : > "$tmp/ng"; fi ) > "$tmp/$r" &
+  done; wait
+  cat "$tmp"/[0-9]*; [ -f "$tmp/ng" ] && ng=1; rm -rf "$tmp"
+  [ $ng -eq 0 ] && echo "verify: ok" || echo "verify: NG (copy the files named above to that node again)"
+  return $ng
+}
+
+cmd_down() {
+  local n bad=""
+  [ -z "${WATCHING:-}" ] && pkill -f "^bash $SELF( -c [^ ]*)? watch$" 2>/dev/null
+  for n in "${NODES[@]}"; do
+    # TERM, KILL after 30 s, then wait until the GPU no longer lists the stopped processes (its cleanup lags the exit)
+    ( on "$n" "P0=\$($PIDS); P=\$P0; [ -n \"\$P\" ] && kill -TERM \$P; for i in \$(seq 30); do [ -z \"\$($PIDS)\" ] && break; sleep 1; done; P=\$($PIDS); [ -n \"\$P\" ] && kill -KILL \$P; for i in \$(seq 60); do g=\$(nvidia-smi --query-compute-apps=pid --format=csv,noheader); left=; for p in \$P0; do echo \"\$g\" | grep -qx \$p && left=1; done; [ -z \"\$($PIDS)\" ] && [ -z \"\$left\" ] && break; sleep 1; done; [ -z \"\$($PIDS)\" ] && [ -z \"\$left\" ]" >/dev/null 2>&1 || echo "$n" ) &
+  done | { while read -r n; do bad="$bad $n"; done; [ -z "$bad" ] && echo "down: every rank stopped" || { echo "down: not confirmed on$bad"; exit 1; }; }
+}
+
+cmd_watch() {                                      # one rank gone while others run: stop them all (they would wait forever)
+  local strikes=0 up gone n
+  while true; do
+    up=0; gone=0
+    for n in "${NODES[@]}"; do case $(alive "$n") in 1) up=$((up + 1)) ;; 0) gone=$((gone + 1)) ;; esac; done
+    [ $gone -eq $WORLD ] && exit 0
+    if [ $gone -gt 0 ] && [ $up -gt 0 ]; then strikes=$((strikes + 1)); else strikes=0; fi
+    if [ $strikes -ge 2 ]; then echo "$(date '+%F %T') $gone rank(s) gone: stopping all"; gone_ranks; WATCHING=1 cmd_down; exit 1; fi
+    sleep 5
+  done
+}
+
+gone_ranks() {                                      # each rank not running, with the last error lines of its log
+  local tmp r; tmp=$(mktemp -d)
+  for r in "${!NODES[@]}"; do
+    ( n=${NODES[$r]}
+      case $(alive "$n") in
+        1) ;;
+        0) echo "  rank $r $n stopped: $(on "$n" "grep -a -i -E 'error|panic' $LOGS/rank$r.log 2>/dev/null | tail -2 | tr '\n' ' '" | cut -c1-300)" ;;
+        *) echo "  rank $r $n: not reachable over ssh" ;;
+      esac ) > "$tmp/$r" &
+  done; wait
+  cat "$tmp"/[0-9]*; rm -rf "$tmp"
+}
+
+fail_up() {                                         # a start that failed: stop every rank, keep the logs
+  trap - INT TERM
+  echo "$1: stopping every rank"
+  cmd_down
+  echo "the logs stay on each node in $LOGS (tf-glm53 logs R); the previous start's are rankR.log.prev"
+  return 1
+}
+
+cmd_up() {
+  cmd_check || { echo "not started"; return 1; }
+  local r n gid args
+  args="--host $HOST --port $PORT --name $NAME --context $CONTEXT"
+  [ -n "$API_KEY_FILE" ] && args="$args --api-key-file $API_KEY_FILE"
+  trap 'fail_up "interrupted"; exit 130' INT TERM
+  for r in $(seq $LAST -1 0); do
+    n=${NODES[$r]}
+    gid=${GID_INDEX:-$(on "$n" "$GID_PROBE")}
+    # ranks above 0 refuse requests; they listen on loopback only
+    a=$args; [ "$r" -gt 0 ] && a="--host 127.0.0.1 --port $PORT --name $NAME --context $CONTEXT"
+    # the last start's log is kept as rankR.log.prev; only the server goes to the background, its output to the log:
+    # ssh returns at once
+    on "$n" "mkdir -p $LOGS; cd $PKG || exit 1; [ -f $LOGS/rank$r.log ] && mv -f $LOGS/rank$r.log $LOGS/rank$r.log.prev; export $(rank_env "$r" "$gid"); nohup ./bin/tensorfold-native serve $WEIGHTS $a > $LOGS/rank$r.log 2>&1 < /dev/null &"
+  done
+  [ -f "$LOGS/watch.log" ] && mv -f "$LOGS/watch.log" "$LOGS/watch.log.prev"
+  drafter_line > "$LOGS/drafter"
+  ( nohup bash "$SELF" -c "$CONF" watch > "$LOGS/watch.log" 2>&1 < /dev/null & )
+  echo "started; waiting for the server (up to ${READY_TIMEOUT}s)"
+  local t0 el up; t0=$(date +%s)
+  while ! grep -q "serving .* at http://" "$LOGS/rank0.log" 2>/dev/null; do
+    sleep 10; el=$(( $(date +%s) - t0 ))
+    up=0; for n in "${NODES[@]}"; do [ "$(alive "$n")" = 1 ] && up=$((up + 1)); done
+    if [ $up -lt $WORLD ] && [ $el -gt 20 ]; then
+      gone_ranks
+      fail_up "a rank stopped ($up/$WORLD running)"; return 1
+    fi
+    [ $el -gt "$READY_TIMEOUT" ] && { fail_up "not ready after ${READY_TIMEOUT}s"; return 1; }
+    [ $((el % 60)) -lt 10 ] && echo "  ${el}s"
+  done
+  echo "ready after $(( $(date +%s) - t0 ))s: $(grep -m1 'serving .* at http://' "$LOGS/rank0.log" | sed 's/.*serving/serving/')"
+  echo "drafter: $(drafter_line)"
+  store_line
+  cmd_smoke || { fail_up "the smoke test failed"; return 1; }
+  trap - INT TERM
+}
+
+cmd_status() {
+  local n
+  for n in "${NODES[@]}"; do echo "  $n running $(alive "$n"), $(on "$n" "free -g | awk '/^Mem/{print \$7}'") GiB available" & done; wait
+  [ -f "$LOGS/drafter" ] && echo "drafter (the last start): $(cat "$LOGS/drafter")"
+  store_line
+  local h; h=$(curl -s -m 3 "$(url)/health")
+  echo "${h:0:300}"
+  # the pool's counters sit past the first 300 characters
+  p=$(echo "$h" | grep -o '"pool": *{[^}]*}'); [ -n "$p" ] && echo "$p"
+}
+
+# the slot cache's store as the last start allocated it (rank 0's log); 0 with STORE above 0: a rank lacked the memory.
+# With the pool (TF_GLM53_PREFIX=pool) its own line: the positions every conversation shares, in blocks of 256
+store_line() {
+  local s p
+  p=$(grep -m1 -o 'pool: [0-9]* blocks of 256 positions + Z ([0-9]* positions, capacity [0-9]*), [0-9]* slots at most' "$LOGS/rank0.log" 2>/dev/null)
+  if [ -n "$p" ]; then
+    set -- $(echo "$p" | grep -o '[0-9][0-9]*')
+    echo "conversation cache (pool): $3 positions in $1 blocks of 256, shared by up to $5 conversations (context $4)"
+    return
+  fi
+  s=$(grep -m1 -o 'slot cache: store of [0-9]* positions' "$LOGS/rank0.log" 2>/dev/null | grep -o '[0-9][0-9]*')
+  if [ -z "$s" ]; then echo "slot cache: not reported in $LOGS/rank0.log"
+  elif [ "$s" -eq 0 ] && [ "$STORE" -gt 0 ]; then echo "slot cache: WARNING: no store (a rank could not allocate $STORE positions); a request resumes only the conversation just before it: lower STORE or free memory, then down and up"
+  else echo "slot cache: $s positions kept for earlier conversations"; fi
+}
+
+ask() {                                            # ask JSON_MESSAGES -> the reply's content (and the cached prompt tokens on stderr)
+  local auth=() out
+  [ -n "$API_KEY_FILE" ] && auth=(-H "Authorization: Bearer $(api_key)")
+  out=$(curl -s -m 600 "${auth[@]}" -H 'Content-Type: application/json' "$(url)/v1/chat/completions" \
+    -d "{\"model\": \"$NAME\", \"messages\": $1, \"max_tokens\": 1200, \"temperature\": 0.6}")
+  echo "$out" | grep -o '"cached_tokens": *[0-9]*' | grep -o '[0-9]*$' >&2
+  echo "$out" | grep -o '"content": *"[^"]*"' | tail -1 | sed 's/.*: *"//;s/"$//'
+}
+
+cmd_smoke() {
+  local ok=0 c doc q1 q2 cached
+  c=$(ask '[{"role": "user", "content": "What is 17 + 25? Answer with the number only."}]' 2>/dev/null)
+  [[ $c == *42* ]] && echo "  1/3 ok (42)" || { echo "  1/3 FAIL: '$c'"; ok=1; }
+  local L=({A..Z}) i
+  doc=$(for i in $(seq 0 299); do printf 'Record %d: warehouse %s%d holds %d boxes.\\n' "$i" "${L[i % 26]}" "$i" $((i * 7 % 97)); done)
+  q1="{\"role\": \"user\", \"content\": \"$doc\\nHow many boxes does warehouse K10 hold? Answer with the number only.\"}"
+  c=$(ask "[$q1]" 2>/dev/null)
+  [[ $c == *70* ]] && echo "  2/3 ok (70)" || { echo "  2/3 FAIL: '$c'"; ok=1; }
+  q2="{\"role\": \"assistant\", \"content\": \"$c\"}, {\"role\": \"user\", \"content\": \"And warehouse T19? Answer with the number only.\"}"
+  c=$(ask "[$q1, $q2]" 2>"$LOGS/.cached"); cached=$(tail -1 "$LOGS/.cached")
+  [[ $c == *36* ]] && [ "${cached:-0}" -gt 0 ] && echo "  3/3 ok (36, ${cached} cached prompt tokens)" || { echo "  3/3 FAIL: '$c', cached ${cached:-0}"; ok=1; }
+  [ $ok -eq 0 ] && echo "smoke: PASS" || echo "smoke: FAIL"
+  return $ok
+}
+
+case "${1:-}" in
+  deploy) cmd_deploy ;;
+  check)  cmd_check ;;
+  verify) cmd_verify ;;
+  up)     cmd_up ;;
+  down)   cmd_down ;;
+  status) cmd_status ;;
+  smoke)  cmd_smoke ;;
+  watch)  cmd_watch ;;
+  logs)   on "${NODES[${2:-0}]}" "tail -f $LOGS/rank${2:-0}.log" ;;
+  *)      sed -n '2,12p' "$SELF" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac

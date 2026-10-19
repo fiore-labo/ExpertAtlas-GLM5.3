@@ -1,0 +1,60 @@
+# Settings for tf-glm53. Copy to glm53.conf next to tf-glm53 and edit. Every node must reach the others over ssh
+# without a password, and this directory, the weights and (if used) the DFlash2 drafter must sit at the same path on
+# all of them (`tf-glm53 deploy` copies this directory).
+
+# The eight nodes in rank order, by the address of the RDMA network; run tf-glm53 on the first one.
+NODES=(192.0.2.11 192.0.2.12 192.0.2.13 192.0.2.14 192.0.2.15 192.0.2.16 192.0.2.17 192.0.2.18)
+
+# The network interface and RDMA device of that network on every node (`ip -br addr`, `ibv_devices`): on a DGX Spark,
+# the port the cable is in, e.g. enp1s0f0np0 / rocep1s0f0 or enp1s0f1np1 / rocep1s0f1.
+SOCKET_IFNAME=enp1s0f1np1
+IB_HCA=rocep1s0f1
+# The RoCE v2 GID index; empty: found on each node (the last RoCE v2 entry with an IPv4 address).
+GID_INDEX=
+
+# NCCL 2.30.7 on every node at this path: NVIDIA's wheel, unpacked on each node by
+#   pip3 install --no-deps --target ~/nccl-2.30.7 nvidia-nccl-cu13==2.30.7
+NCCL_LIB=~/nccl-2.30.7/nvidia/nccl/lib/libnccl.so.2
+
+# The checkpoint for eight ranks, the same path on every node (RUNTIME.md: fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks).
+WEIGHTS=~/models/GLM-5.3-EXL3-8x-DGX-Sparks
+
+# What drafts the tokens the model then checks (the reply is the model's own choice in every case):
+#   mtp      the checkpoint's own MTP layer, part of the GLM-5.3 weights and under their license; needs a
+#            checkpoint that has the layer. MTP_K drafts a round (1 .. 7).
+#   dflash2  incoai/GLM-5.3-DFlash2 in the directory DRAFTER, the same path on every node. Not included: its card
+#            states CC BY-NC-ND 4.0 (non-commercial use without derivatives). Obtain it yourself (RUNTIME.md,
+#            "Getting DFlash2") and check that your use is covered.
+#   none     no drafts.
+# `tf-glm53 -d KIND up` picks the drafter for one start instead of DRAFTER_KIND.
+DRAFTER_KIND=mtp
+MTP_K=3
+DRAFTER=
+#DRAFTER=~/models/GLM-5.3-DFlash2
+
+# The server. HOST other than loopback needs API_KEY_FILE (a file holding the key); put TLS or a closed network in front.
+NAME=glm-5.3
+HOST=127.0.0.1
+PORT=8000
+API_KEY_FILE=
+
+# Positions a request may reach (prompt + reply), and the positions kept beyond them for earlier conversations.
+# CACHE=pool (the default) keeps CONTEXT + STORE positions in blocks of 256 that every conversation shares: a request
+# resumes from the longest cached prefix of any conversation, and conversations that start alike (one system prompt)
+# hold its blocks once. CACHE=slots keeps one store of STORE positions per conversation.
+CONTEXT=819200
+STORE=819200
+CACHE=pool
+
+# Rank 0's port for the NCCL rendezvous, and seconds to wait for the server.
+MASTER_PORT=29551
+READY_TIMEOUT=900
+
+# Four nodes (TP=4): see glm53.t4.conf.example and T4.md (the four-node checkpoint, KV=fp4, the measured settings).
+# NEED_GB is the memory a node must have available before the start (default 112).
+#DCP=2
+#ROWS=8192
+# SP_PARTS: the parts a prompt chunk of ROWS rows is split into (default 4). Parts wider than 2,048 rows
+# (e.g. ROWS=12288 with SP_PARTS=3) run the routed experts on more rows a pass, at the memory of wider buffers.
+#SP_PARTS=4
+#NEED_GB=112
