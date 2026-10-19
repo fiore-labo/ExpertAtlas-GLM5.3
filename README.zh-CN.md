@@ -77,8 +77,11 @@ zig build dist -Dversion=r2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platf
 代码采用 Apache-2.0 许可（`LICENSE`）；`NOTICE` 和 `THIRD_PARTY_NOTICES.md` 说明了各部分的来源。权重保留其自身的许可证（GLM-5.3 License）；可选的 DFlash2 草稿模型也保留其自身的许可证。
 
 - [TensorFold](https://github.com/ashhart/TensorFold)，由 TensorFold 贡献者开发：本方案所扩展的服务器、构建系统和 CUDA 引擎。
-- GLM-5.3 引擎沿用了 drowzeys 为 TensorFold 编写的完整版 GLM-5.3 Python 引擎的设计（[ashhart/TensorFold#159](https://github.com/ashhart/TensorFold/pull/159)）；其中部分 CUDA 文件也包含在内。
-- [b12x](https://github.com/local-inference-lab/b12x)（RoCE 代理和集合通信）、[MiaAI-Lab](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold)（提示词处理内核）和 [MiaAI-Lab 的 GLM-5.3 EXL3 on 3x DGX Spark](https://github.com/MiaAI-Lab/GLM-5.3-EXL3-3x-DGX-Sparks-TensorFold)（4 bit KV 缓存的布局）、[ExLlamaV3](https://github.com/turboderp-org/exllamav3)（EXL3 格式）。
+- drowzeys 为 TensorFold 编写的完整版 GLM-5.3 Python 引擎（[ashhart/TensorFold#159](https://github.com/ashhart/TensorFold/pull/159)）：GLM-5.3 引擎用 Zig 和纯 CUDA 重写了它的设计（引擎结构、Triton 内核以及 MTP 和 DFlash2 草稿模型的处理流程）。其中部分 CUDA 文件被收录，其中几个经过了修改。
+- [b12x](https://github.com/local-inference-lab/b12x)：将其 RoCE one-shot 集合通信用纯 CUDA 重写（`roce.cu`）；收录了其 RoCE 代理（`zig/native/roce_proxy.c`），并修改为按每个 RDMA 设备选择 GID 索引。
+- [MiaAI-Lab 的 GLM-5.3-Flash on 2x DGX Spark](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold)：参考其提示词处理内核编写了 GLM-5.3 的提示词处理内核。
+- [MiaAI-Lab 的 GLM-5.3 EXL3 on 3x DGX Spark](https://github.com/MiaAI-Lab/GLM-5.3-EXL3-3x-DGX-Sparks-TensorFold)：4 bit KV 缓存采用其布局，并用本引擎自己的代码实现。
+- [ExLlamaV3](https://github.com/turboderp-org/exllamav3)：检查点用它量化，引擎读取其 EXL3 格式。
 
 ## TensorFold 的贡献者
 

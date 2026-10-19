@@ -77,8 +77,11 @@ zig build dist -Dversion=r2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platf
 コードは Apache-2.0（`LICENSE`）です。どの部分がどこに由来するかは `NOTICE` と `THIRD_PARTY_NOTICES.md` に記載しています。重みはそれ自身のライセンス（GLM-5.3 License）に従い、オプションの DFlash2 drafter もそれ自身のライセンスに従います。
 
 - TensorFold のコントリビューターによる [TensorFold](https://github.com/ashhart/TensorFold): このレシピが拡張しているサーバー、ビルド、CUDA エンジン。
-- GLM-5.3 エンジンは、drowzeys による TensorFold のフルサイズ GLM-5.3 用 Python エンジン（[ashhart/TensorFold#159](https://github.com/ashhart/TensorFold/pull/159)）の設計に従っています。その CUDA ファイルの一部を含んでいます。
-- [b12x](https://github.com/local-inference-lab/b12x)（RoCE プロキシと集団通信）、[MiaAI-Lab](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold)（プロンプト処理用カーネル）と [MiaAI-Lab の GLM-5.3 EXL3 on 3x DGX Spark](https://github.com/MiaAI-Lab/GLM-5.3-EXL3-3x-DGX-Sparks-TensorFold)（4 ビット KV キャッシュのレイアウト）、[ExLlamaV3](https://github.com/turboderp-org/exllamav3)（EXL3 形式）。
+- drowzeys による TensorFold のフルサイズ GLM-5.3 用 Python エンジン（[ashhart/TensorFold#159](https://github.com/ashhart/TensorFold/pull/159)）: GLM-5.3 エンジンは、その設計（エンジンの構造、Triton カーネル、MTP と DFlash2 の drafter の処理）を Zig と素の CUDA で書き直したものです。その CUDA ファイルの一部を収録しており、いくつかは変更を加えています。
+- [b12x](https://github.com/local-inference-lab/b12x): RoCE の one-shot 集団通信を素の CUDA で書き直しました（`roce.cu`）。RoCE プロキシは収録し（`zig/native/roce_proxy.c`）、RDMA デバイスごとに GID インデックスを選ぶよう変更しました。
+- [MiaAI-Lab の GLM-5.3-Flash on 2x DGX Spark](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold): そのプロンプト処理用カーネルを参考に、GLM-5.3 のプロンプト処理用カーネルを書きました。
+- [MiaAI-Lab の GLM-5.3 EXL3 on 3x DGX Spark](https://github.com/MiaAI-Lab/GLM-5.3-EXL3-3x-DGX-Sparks-TensorFold): 4 ビット KV キャッシュはそのレイアウトを採用し、このエンジン独自のコードで実装しました。
+- [ExLlamaV3](https://github.com/turboderp-org/exllamav3): チェックポイントはこれで量子化しており、エンジンはその EXL3 形式を読み込みます。
 
 ## TensorFold のコントリビューター
 

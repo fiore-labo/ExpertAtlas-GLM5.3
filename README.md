@@ -116,12 +116,19 @@ their own license (GLM-5.3 License); the optional DFlash2 drafter keeps its own.
 
 - [TensorFold](https://github.com/ashhart/TensorFold) by the TensorFold contributors: the server, the build and the
   CUDA engine this recipe extends.
-- The GLM-5.3 engine follows the design of TensorFold's Python engine for full GLM-5.3 by drowzeys
-  ([ashhart/TensorFold#159](https://github.com/ashhart/TensorFold/pull/159)); some of its CUDA files are included.
-- [b12x](https://github.com/local-inference-lab/b12x) (the RoCE proxy and collectives),
-  [MiaAI-Lab](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold) (prompt kernels) and
-  [MiaAI-Lab's GLM-5.3 EXL3 on 3x DGX Spark](https://github.com/MiaAI-Lab/GLM-5.3-EXL3-3x-DGX-Sparks-TensorFold) (the
-  layout of the 4-bit KV cache), [ExLlamaV3](https://github.com/turboderp-org/exllamav3) (the EXL3 format).
+- TensorFold's Python engine for full GLM-5.3 by drowzeys
+  ([ashhart/TensorFold#159](https://github.com/ashhart/TensorFold/pull/159)): the GLM-5.3 engine rewrites its design in
+  Zig and plain CUDA (the engine's structure, its Triton kernels and its MTP and DFlash2 drafter paths). Some of its
+  CUDA files are included, a few of them modified.
+- [b12x](https://github.com/local-inference-lab/b12x): its RoCE one-shot collectives are rewritten as plain CUDA
+  (`roce.cu`), and its RoCE proxy is included (`zig/native/roce_proxy.c`), modified to pick a GID index for each RDMA
+  device.
+- [MiaAI-Lab's GLM-5.3-Flash on 2x DGX Spark](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold):
+  the GLM-5.3 prompt kernels are written with reference to its prompt kernels.
+- [MiaAI-Lab's GLM-5.3 EXL3 on 3x DGX Spark](https://github.com/MiaAI-Lab/GLM-5.3-EXL3-3x-DGX-Sparks-TensorFold): the
+  4-bit KV cache takes its layout, implemented with this engine's own code.
+- [ExLlamaV3](https://github.com/turboderp-org/exllamav3): the checkpoints are quantized with it, and the engine reads
+  its EXL3 format.
 
 ## TensorFold's contributors
 
