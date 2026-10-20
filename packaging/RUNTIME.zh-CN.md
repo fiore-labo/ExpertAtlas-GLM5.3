@@ -91,7 +91,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/
   "messages": [{"role": "user", "content": "Say hello in one short sentence."}]}'
 ```
 
-回复的 `message` 中，`reasoning_content` 是模型的推理过程，其后 `content` 是答案；`max_tokens` 同时计入两者。从其他机器访问时，在已设置 `HOST` 和 `API_KEY_FILE` 的前提下，将请求发送到 `http://HOST:PORT`，并加上 `-H "Authorization: Bearer KEY"`。
+回复的 `message` 中，`reasoning_content` 是模型的推理过程，其后 `content` 是答案；`max_tokens` 同时计入两者。从其他机器访问时，在已设置 `HOST` 和 `API_KEY_FILE` 的前提下，将请求发送到 `http://HOST:PORT`，并加上 `-H "Authorization: Bearer KEY"`（密钥文件见“为其他机器提供服务”）。
 
 ## 草稿模型
 
@@ -169,9 +169,30 @@ conversation cache (pool): 837280 positions in 3271 blocks of 256, shared by up 
 
 ## 为其他机器提供服务
 
-服务器默认监听 `127.0.0.1`，提供 OpenAI chat API。要为其他机器提供服务，请设置 `HOST` 和 `API_KEY_FILE`；对于没有密钥的非回环地址，`tf-glm53` 会拒绝。服务器使用明文 HTTP：请在其前面加一层 TLS，或只在封闭网络中使用，否则密钥将以明文传输。
+服务器默认监听 `127.0.0.1`，提供 OpenAI chat API。要为其他机器提供服务，请设置 `HOST` 和 `API_KEY_FILE`：**必须有 API 密钥文件**，对于没有密钥的非回环地址，`tf-glm53` 会拒绝。服务器使用明文 HTTP：请在其前面加一层 TLS，或只在封闭网络中使用，否则密钥将以明文传输。
 
-API 密钥文件只在第一个节点上读取。文件中每行一个密钥（`KEY` 或 `LABEL: KEY`，`#` 开始注释），且必须是其他用户无法读取的普通文件（`chmod 600`），否则服务器拒绝启动；`tf-glm53 check` 会检查这两点。`tf-glm53 deploy` 不会把它复制到其他节点。客户端发送 `Authorization: Bearer KEY`。
+在第一个节点上：
+
+1. 创建只有自己可读的密钥文件：
+
+   ```sh
+   umask 077; mkdir -p ~/.config/tf-glm53
+   echo "lan: $(openssl rand -hex 32)" > ~/.config/tf-glm53/api-keys
+   ```
+
+   文件中每行一个密钥，`KEY` 或 `LABEL: KEY`（`#` 开始注释）。密钥是不含空白的文本；标签由 1 到 64 个字母、数字、点、下划线或连字符组成。为每个客户端单独写一行，便于区分，也可以只撤销其中一个而不影响其他。
+2. 在 `glm53.conf` 中设置 `HOST=0.0.0.0`（所有地址；或第一个节点的局域网地址），并将 `API_KEY_FILE` 设为该文件的绝对路径，例如 `API_KEY_FILE=/home/YOU/.config/tf-glm53/api-keys`。
+3. 用 `./tf-glm53 up` 启动（正在运行的服务器先用 `./tf-glm53 down` 停止）。启动前的检查会验证密钥文件。
+
+在客户端，基础 URL 为 `http://FIRST_NODE:PORT/v1`，API 密钥为去掉标签的密钥：
+
+```sh
+curl -s http://FIRST_NODE:8000/v1/chat/completions -H "Authorization: Bearer KEY" \
+  -H 'Content-Type: application/json' -d '{"model": "glm-5.3", "max_tokens": 300,
+  "messages": [{"role": "user", "content": "Say hello in one short sentence."}]}'
+```
+
+密钥文件必须是其他用户无法读取的普通文件（`chmod 600`），否则服务器拒绝启动；`tf-glm53 check` 会检查这两点。它只在第一个节点上读取，`tf-glm53 deploy` 不会把它复制到其他节点。没有有效密钥的请求会被拒绝（“A valid API key is required”）；`/health` 无需密钥即可应答。
 
 ## 速度
 

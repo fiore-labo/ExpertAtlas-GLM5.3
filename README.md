@@ -42,8 +42,25 @@ Download the release archive `tensorfold-r2-102-linux-aarch64.tar.gz` and follow
 ([packaging/RUNTIME.md](packaging/RUNTIME.md) here). The same archive and launcher serve four or eight nodes: copy
 `glm53.conf.example` (eight nodes) or `glm53.t4.conf.example` (four nodes, see
 [glm53/release/T4.md](glm53/release/T4.md)) to `glm53.conf`, fill in the nodes, network names, NCCL, weights and
-drafter, then `./tf-glm53 deploy` and `./tf-glm53 up`. The server speaks the OpenAI chat API on `127.0.0.1` unless you
-give it an address and an API key file.
+drafter, then `./tf-glm53 deploy` and `./tf-glm53 up`. The server speaks the OpenAI chat API on `127.0.0.1`.
+
+**To use it from other machines on your network, you need an API key file**: `tf-glm53` refuses any address other
+than loopback without one. On the first node, make the file (readable by you alone) and set `HOST` and `API_KEY_FILE`
+in `glm53.conf`:
+
+```sh
+umask 077; mkdir -p ~/.config/tf-glm53
+echo "lan: $(openssl rand -hex 32)" > ~/.config/tf-glm53/api-keys   # one key a line: KEY or LABEL: KEY
+```
+
+```sh
+HOST=0.0.0.0                                       # every address (or the first node's address on your network)
+API_KEY_FILE=/home/YOU/.config/tf-glm53/api-keys   # the file's full path on the first node
+```
+
+Clients send the key (without its label) as `Authorization: Bearer KEY` to `http://FIRST_NODE:PORT/v1`. The server
+speaks plain HTTP: keep it on a closed network or put TLS in front. See
+[Serving other machines](packaging/RUNTIME.md#serving-other-machines) in RUNTIME.md.
 
 ## Drafters
 
