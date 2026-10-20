@@ -23,7 +23,9 @@ MTP_K=3
 DRAFTER=
 #DRAFTER=~/models/GLM-5.3-DFlash2
 
-# The server. HOST other than loopback needs API_KEY_FILE; put TLS or a closed network in front.
+# The server. HOST other than loopback (other machines on your network) needs API_KEY_FILE, the full path of a key
+# file only you can read (chmod 600); RUNTIME.md, "Serving other machines", shows how to make one. The server speaks
+# plain HTTP: put TLS or a closed network in front.
 NAME=glm-5.3
 HOST=127.0.0.1
 PORT=8000

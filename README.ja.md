@@ -23,7 +23,21 @@
 
 ## 実行
 
-リリースアーカイブ `tensorfold-r2-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。4 台でも 8 台でも、同じアーカイブと起動スクリプトを使います。`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーし、ノード、ネットワーク名、NCCL、重み、drafter を記入してから、`./tf-glm53 deploy` と `./tf-glm53 up` を実行します。アドレスと API キーファイルを指定しない限り、サーバーは `127.0.0.1` 上で OpenAI chat API を提供します。
+リリースアーカイブ `tensorfold-r2-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。4 台でも 8 台でも、同じアーカイブと起動スクリプトを使います。`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーし、ノード、ネットワーク名、NCCL、重み、drafter を記入してから、`./tf-glm53 deploy` と `./tf-glm53 up` を実行します。サーバーは `127.0.0.1` 上で OpenAI chat API を提供します。
+
+**LAN など他のマシンから使うには、API キーファイルが必要です**。キーファイルなしでループバック以外のアドレスを指定すると、`tf-glm53` は拒否します。1 台目のノードでキーファイルを作り（自分だけが読めるようにします）、`glm53.conf` の `HOST` と `API_KEY_FILE` を設定します。
+
+```sh
+umask 077; mkdir -p ~/.config/tf-glm53
+echo "lan: $(openssl rand -hex 32)" > ~/.config/tf-glm53/api-keys   # 1 行に 1 つ: KEY または LABEL: KEY
+```
+
+```sh
+HOST=0.0.0.0                                       # すべてのアドレス（または 1 台目のノードの LAN 側のアドレス）
+API_KEY_FILE=/home/YOU/.config/tf-glm53/api-keys   # 1 台目のノード上のファイルの絶対パス
+```
+
+クライアントは `http://FIRST_NODE:PORT/v1` に、キー（ラベルを除いた部分）を `Authorization: Bearer KEY` として送ります。サーバーは平文の HTTP で通信するため、閉じたネットワーク内で使うか、前段に TLS を置いてください。詳しくは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md) の「他のマシンへの提供」を参照してください。
 
 ## Drafter
 

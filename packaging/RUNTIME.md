@@ -122,7 +122,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/
 
 The reply's `message` holds the model's reasoning in `reasoning_content`, then the answer in `content`; `max_tokens`
 counts both. From another machine, with `HOST` and `API_KEY_FILE` set, send the request to `http://HOST:PORT` and add
-`-H "Authorization: Bearer KEY"`.
+`-H "Authorization: Bearer KEY"` (see [Serving other machines](#serving-other-machines) for the key file).
 
 ## Drafters
 
@@ -241,12 +241,37 @@ in `logs/rankR.log.prev`; `tf-glm53 logs R` follows rank R's.
 ## Serving other machines
 
 The server listens on `127.0.0.1` by default and speaks the OpenAI chat API. To serve other machines, set `HOST` and
-`API_KEY_FILE`; `tf-glm53` refuses a non-loopback address without a key. The server speaks plain HTTP: put TLS in front
-or keep it on a closed network, or the key travels in the clear.
+`API_KEY_FILE`: **an API key file is required**, and `tf-glm53` refuses a non-loopback address without one. The server
+speaks plain HTTP: put TLS in front or keep it on a closed network, or the key travels in the clear.
 
-The API key file is read on the first node only. It holds one key a line (`KEY` or `LABEL: KEY`, `#` starts a comment)
-and must be a regular file that other users cannot read (`chmod 600`), or the server refuses to start; `tf-glm53 check`
-tests both. `tf-glm53 deploy` does not copy it to the other nodes. Clients send `Authorization: Bearer KEY`.
+On the first node:
+
+1. Make the key file, readable by you alone:
+
+   ```sh
+   umask 077; mkdir -p ~/.config/tf-glm53
+   echo "lan: $(openssl rand -hex 32)" > ~/.config/tf-glm53/api-keys
+   ```
+
+   The file holds one key a line, `KEY` or `LABEL: KEY` (`#` starts a comment). A key is text without whitespace; a
+   label is 1 to 64 letters, digits, dots, underscores or hyphens. Give each client a line of its own to tell them
+   apart, or to take one key away without touching the others.
+2. In `glm53.conf`, set `HOST=0.0.0.0` (every address; or the first node's address on your network) and
+   `API_KEY_FILE` to the file's full path, for example `API_KEY_FILE=/home/YOU/.config/tf-glm53/api-keys`.
+3. Start with `./tf-glm53 up` (stop a running server with `./tf-glm53 down` first). Its check tests the key file
+   before anything starts.
+
+On a client, the base URL is `http://FIRST_NODE:PORT/v1` and the API key is the key without its label:
+
+```sh
+curl -s http://FIRST_NODE:8000/v1/chat/completions -H "Authorization: Bearer KEY" \
+  -H 'Content-Type: application/json' -d '{"model": "glm-5.3", "max_tokens": 300,
+  "messages": [{"role": "user", "content": "Say hello in one short sentence."}]}'
+```
+
+The key file must be a regular file that other users cannot read (`chmod 600`), or the server refuses to start;
+`tf-glm53 check` tests both. It is read on the first node only: `tf-glm53 deploy` does not copy it to the other nodes.
+A request without a valid key is refused ("A valid API key is required"); `/health` answers without one.
 
 ## Speed
 

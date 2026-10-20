@@ -22,7 +22,21 @@
 
 ## 运行
 
-下载发布归档 `tensorfold-r2-102-linux-aarch64.tar.gz`，并按照其中的 `RUNTIME.md`（本仓库中为 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)）操作。四个节点和八个节点使用同一个归档和同一个启动脚本：将 `glm53.conf.example`（八个节点）或 `glm53.t4.conf.example`（四个节点，见 [glm53/release/T4.zh-CN.md](glm53/release/T4.zh-CN.md)）复制为 `glm53.conf`，填写节点、网络名称、NCCL、权重和草稿模型，然后执行 `./tf-glm53 deploy` 和 `./tf-glm53 up`。除非为服务器指定地址和 API 密钥文件，否则它在 `127.0.0.1` 上提供 OpenAI chat API。
+下载发布归档 `tensorfold-r2-102-linux-aarch64.tar.gz`，并按照其中的 `RUNTIME.md`（本仓库中为 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)）操作。四个节点和八个节点使用同一个归档和同一个启动脚本：将 `glm53.conf.example`（八个节点）或 `glm53.t4.conf.example`（四个节点，见 [glm53/release/T4.zh-CN.md](glm53/release/T4.zh-CN.md)）复制为 `glm53.conf`，填写节点、网络名称、NCCL、权重和草稿模型，然后执行 `./tf-glm53 deploy` 和 `./tf-glm53 up`。服务器在 `127.0.0.1` 上提供 OpenAI chat API。
+
+**要从局域网等其他机器使用，需要 API 密钥文件**：没有密钥文件时，`tf-glm53` 会拒绝回环以外的任何地址。在第一个节点上创建密钥文件（只有自己可读），然后在 `glm53.conf` 中设置 `HOST` 和 `API_KEY_FILE`：
+
+```sh
+umask 077; mkdir -p ~/.config/tf-glm53
+echo "lan: $(openssl rand -hex 32)" > ~/.config/tf-glm53/api-keys   # 每行一个密钥：KEY 或 LABEL: KEY
+```
+
+```sh
+HOST=0.0.0.0                                       # 所有地址（或第一个节点的局域网地址）
+API_KEY_FILE=/home/YOU/.config/tf-glm53/api-keys   # 该文件在第一个节点上的绝对路径
+```
+
+客户端向 `http://FIRST_NODE:PORT/v1` 发送请求，并以 `Authorization: Bearer KEY` 的形式发送密钥（不含标签）。服务器使用明文 HTTP：请只在封闭网络中使用，或在其前面加一层 TLS。详见 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md) 中的“为其他机器提供服务”。
 
 ## 草稿模型
 

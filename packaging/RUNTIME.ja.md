@@ -91,7 +91,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/
   "messages": [{"role": "user", "content": "Say hello in one short sentence."}]}'
 ```
 
-応答の `message` には、モデルの思考過程が `reasoning_content` に、続いて回答が `content` に入ります。`max_tokens` は両方を合わせて数えます。別のマシンから送る場合は、`HOST` と `API_KEY_FILE` を設定したうえで、リクエストを `http://HOST:PORT` に送り、`-H "Authorization: Bearer KEY"` を付けます。
+応答の `message` には、モデルの思考過程が `reasoning_content` に、続いて回答が `content` に入ります。`max_tokens` は両方を合わせて数えます。別のマシンから送る場合は、`HOST` と `API_KEY_FILE` を設定したうえで、リクエストを `http://HOST:PORT` に送り、`-H "Authorization: Bearer KEY"` を付けます（キーファイルは「他のマシンへの提供」を参照）。
 
 ## Drafter
 
@@ -169,9 +169,30 @@ conversation cache (pool): 837280 positions in 3271 blocks of 256, shared by up 
 
 ## 他のマシンへの提供
 
-サーバーは既定で `127.0.0.1` で待ち受け、OpenAI chat API を提供します。他のマシンに提供するには `HOST` と `API_KEY_FILE` を設定します。キーなしでループバック以外のアドレスを指定すると、`tf-glm53` は拒否します。サーバーは平文の HTTP で通信します。前段に TLS を置くか、閉じたネットワーク内に留めてください。そうしないとキーが平文で流れます。
+サーバーは既定で `127.0.0.1` で待ち受け、OpenAI chat API を提供します。他のマシンに提供するには `HOST` と `API_KEY_FILE` を設定します。**API キーファイルは必須です**。キーなしでループバック以外のアドレスを指定すると、`tf-glm53` は拒否します。サーバーは平文の HTTP で通信します。前段に TLS を置くか、閉じたネットワーク内に留めてください。そうしないとキーが平文で流れます。
 
-API キーファイルは 1 台目のノードでのみ読み込まれます。1 行に 1 つのキーを書き（`KEY` または `LABEL: KEY`、`#` 以降はコメント）、他のユーザーが読めない通常ファイル（`chmod 600`）でなければなりません。そうでなければサーバーは起動を拒否します。`tf-glm53 check` はこの両方を検査します。`tf-glm53 deploy` はこのファイルを他のノードにコピーしません。クライアントは `Authorization: Bearer KEY` を送ります。
+1 台目のノードで次のようにします。
+
+1. 自分だけが読めるキーファイルを作ります。
+
+   ```sh
+   umask 077; mkdir -p ~/.config/tf-glm53
+   echo "lan: $(openssl rand -hex 32)" > ~/.config/tf-glm53/api-keys
+   ```
+
+   1 行に 1 つのキーを書きます（`KEY` または `LABEL: KEY`、`#` 以降はコメント）。キーは空白を含まない文字列、ラベルは英字・数字・ピリオド・アンダースコア・ハイフンの 1〜64 文字です。クライアントごとに行を分けると、区別したり、他に影響を与えずに 1 つだけ取り消したりできます。
+2. `glm53.conf` で `HOST=0.0.0.0`（すべてのアドレス。または 1 台目のノードの LAN 側のアドレス）とし、`API_KEY_FILE` にファイルの絶対パスを指定します。例: `API_KEY_FILE=/home/YOU/.config/tf-glm53/api-keys`。
+3. `./tf-glm53 up` で起動します（動いているサーバーは先に `./tf-glm53 down` で止めます）。起動の前の検査でキーファイルが確かめられます。
+
+クライアントでは、ベース URL を `http://FIRST_NODE:PORT/v1` とし、API キーにはラベルを除いたキーを使います。
+
+```sh
+curl -s http://FIRST_NODE:8000/v1/chat/completions -H "Authorization: Bearer KEY" \
+  -H 'Content-Type: application/json' -d '{"model": "glm-5.3", "max_tokens": 300,
+  "messages": [{"role": "user", "content": "Say hello in one short sentence."}]}'
+```
+
+キーファイルは、他のユーザーが読めない通常ファイル（`chmod 600`）でなければなりません。そうでなければサーバーは起動を拒否します。`tf-glm53 check` はこの両方を検査します。キーファイルは 1 台目のノードでのみ読み込まれ、`tf-glm53 deploy` は他のノードにコピーしません。有効なキーのないリクエストは拒否されます（「A valid API key is required」）。`/health` はキーなしで応答します。
 
 ## 速度
 
