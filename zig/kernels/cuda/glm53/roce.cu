@@ -2,8 +2,12 @@
 // (https://github.com/local-inference-lab/b12x, Apache-2.0).
 // b12x (Apache-2.0) を参考に書いた RoCE の one-shot all-reduce と all-gather。
 // Over the RDMA proxy of roce_proxy.c; the all-reduce sums in fixed rank order, the all-gather copies in rank order.
+// The reduce-scatter (the first shot of a two-shot all-reduce) sends each peer its share alone (the doorbell's
+// ROCE_SHARES bit) and sums this rank's share in the same rank order: the same bits as the one-shot.
 // ctrl: u32 seq, nbytes, error seq, missing peer; u32 nbytes[2] per slot at 16; u32 missing hca at 24.
 // roce_proxy.c の RDMA proxy の上で動く。all-reduce はランク順に固定して足し、all-gather はランク順にコピーする。
+// reduce-scatter (2 段の all-reduce の 1 段目) は各 peer にその取り分だけを送り (doorbell の ROCE_SHARES ビット)、
+// このランクの取り分を同じランク順に足す: one-shot と同じビット。
 // ctrl: u32 seq, nbytes, error seq, missing peer。16 から slot ごとの u32 nbytes[2]、24 に u32 missing hca。
 
 #include <stdint.h>
@@ -132,6 +136,45 @@ __device__ __forceinline__ void tail(const Region& g, uint32_t seq) {
     }
 }
 
+constexpr uint32_t ROCE_SHARES = 0x80000000u;  // roce_proxy.c's share mode / roce_proxy.c の取り分のモード
+
+// the rank-order sum of every rank's 16 bytes at `off` (this rank's from `in`, the others' from their receive slots)
+// 全ランクの `off` の 16 バイトをランク順に足す (このランクの分は `in`、他は受信 slot から)
+template <bool BF16>
+__device__ __forceinline__ uint4 sum_pack(const Region& g, const uint8_t* in, uint64_t slot, uint64_t off) {
+    float acc[8];
+    for (int s = 0; s < g.world; s++) {
+        const uint4 w = s == g.rank ? ld_v4(in + off)
+                                    : ld_relaxed_sys_v4((const uint8_t*)(g.recv + ((uint64_t)s * g.slots + slot) * g.slot_bytes) + off);
+        const uint32_t ws[4] = {w.x, w.y, w.z, w.w};
+        if (BF16) {
+            for (int q = 0; q < 4; q++) {
+                const float lo = bf16_lo(ws[q]), hi = bf16_hi(ws[q]);
+                if (s == 0) { acc[2 * q] = lo; acc[2 * q + 1] = hi; }
+                else { acc[2 * q] = acc[2 * q] + lo; acc[2 * q + 1] = acc[2 * q + 1] + hi; }
+            }
+        } else {
+            for (int q = 0; q < 4; q++) {
+                const float v = __uint_as_float(ws[q]);
+                acc[q] = s == 0 ? v : acc[q] + v;
+            }
+        }
+    }
+    uint4 o;
+    if (BF16) {
+        o.x = pack_bf16x2(acc[0], acc[1]);
+        o.y = pack_bf16x2(acc[2], acc[3]);
+        o.z = pack_bf16x2(acc[4], acc[5]);
+        o.w = pack_bf16x2(acc[6], acc[7]);
+    } else {
+        o.x = __float_as_uint(acc[0]);
+        o.y = __float_as_uint(acc[1]);
+        o.z = __float_as_uint(acc[2]);
+        o.w = __float_as_uint(acc[3]);
+    }
+    return o;
+}
+
 template <bool BF16>
 __device__ void allreduce(const uint8_t* in, uint8_t* out, int packs, uint32_t nbytes, Region g) {
     uint32_t seq;
@@ -142,37 +185,28 @@ __device__ void allreduce(const uint8_t* in, uint8_t* out, int packs, uint32_t n
         const int index = blockIdx.x * blockDim.x + threadIdx.x, stride = gridDim.x * blockDim.x;
         for (int i = index; i < packs; i += stride) {
             const uint64_t off = (uint64_t)i * 16;
-            float acc[8];
-            for (int s = 0; s < g.world; s++) {
-                const uint4 w = s == g.rank ? ld_v4(in + off)
-                                            : ld_relaxed_sys_v4((const uint8_t*)(g.recv + ((uint64_t)s * g.slots + slot) * g.slot_bytes) + off);
-                const uint32_t ws[4] = {w.x, w.y, w.z, w.w};
-                if (BF16) {
-                    for (int q = 0; q < 4; q++) {
-                        const float lo = bf16_lo(ws[q]), hi = bf16_hi(ws[q]);
-                        if (s == 0) { acc[2 * q] = lo; acc[2 * q + 1] = hi; }
-                        else { acc[2 * q] = acc[2 * q] + lo; acc[2 * q + 1] = acc[2 * q + 1] + hi; }
-                    }
-                } else {
-                    for (int q = 0; q < 4; q++) {
-                        const float v = __uint_as_float(ws[q]);
-                        acc[q] = s == 0 ? v : acc[q] + v;
-                    }
-                }
-            }
-            uint4 o;
-            if (BF16) {
-                o.x = pack_bf16x2(acc[0], acc[1]);
-                o.y = pack_bf16x2(acc[2], acc[3]);
-                o.z = pack_bf16x2(acc[4], acc[5]);
-                o.w = pack_bf16x2(acc[6], acc[7]);
-            } else {
-                o.x = __float_as_uint(acc[0]);
-                o.y = __float_as_uint(acc[1]);
-                o.z = __float_as_uint(acc[2]);
-                o.w = __float_as_uint(acc[3]);
-            }
-            st_v4(out + off, o);
+            st_v4(out + off, sum_pack<BF16>(g, in, slot, off));
+        }
+    }
+    tail(g, seq);
+}
+
+// this rank's share (packs / world packs from rank * share) of the rank-order sum into `mid`; every peer was sent
+// its share alone
+// ランク順の和のうちこのランクの取り分 (rank * share から packs / world 個の pack) を `mid` へ。各 peer には
+// その取り分だけを送った
+template <bool BF16>
+__device__ void reducescatter(const uint8_t* in, uint8_t* mid, int packs, uint32_t nbytes, Region g) {
+    uint32_t seq;
+    if (ld_relaxed_gpu(g.poison) != 0) return;
+    const bool ok = stage_and_wait(g, in, packs, nbytes | ROCE_SHARES, seq);
+    if (ok) {
+        const uint64_t slot = seq & 1u;
+        const int share = packs / g.world;
+        const uint64_t base = (uint64_t)g.rank * share * 16;
+        const int index = blockIdx.x * blockDim.x + threadIdx.x, stride = gridDim.x * blockDim.x;
+        for (int i = index; i < share; i += stride) {
+            st_v4(mid + (uint64_t)i * 16, sum_pack<BF16>(g, in, slot, base + (uint64_t)i * 16));
         }
     }
     tail(g, seq);
@@ -188,6 +222,16 @@ extern "C" __global__ void tf_glm53_roce_allreduce_f32(const uint8_t* in, uint8_
 extern "C" __global__ void tf_glm53_roce_allreduce_bf16(const uint8_t* in, uint8_t* out, int packs, uint32_t nbytes,
                                                          Region g) {
     allreduce<true>(in, out, packs, nbytes, g);
+}
+
+extern "C" __global__ void tf_glm53_roce_reducescatter_f32(const uint8_t* in, uint8_t* mid, int packs, uint32_t nbytes,
+                                                            Region g) {
+    reducescatter<false>(in, mid, packs, nbytes, g);
+}
+
+extern "C" __global__ void tf_glm53_roce_reducescatter_bf16(const uint8_t* in, uint8_t* mid, int packs,
+                                                             uint32_t nbytes, Region g) {
+    reducescatter<true>(in, mid, packs, nbytes, g);
 }
 
 // Shard s lands at column block s of every output row (rows of row_packs 16-byte packs).

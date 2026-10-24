@@ -48,6 +48,9 @@ namespace {
 using tf_exl3x::Fmt;
 using tf_exl3x::LaneMap;
 using tf_exl3x::decode_tile;
+// load_words: word[j] = lane + 32*j < TW ? load(base + 32*j) : 0.
+// K2=10 keeps TW=40 (no 64-word padding); decode_tile shuffles on every lane.
+using tf_exl3x::load_words;
 
 constexpr float HAD_SCALE = 0.08838834764831845f;   // 1 / sqrt(128)
 #ifndef TF_PE_GPM
@@ -296,11 +299,10 @@ __device__ __forceinline__ uint32_t h2u(half2 h) { return *reinterpret_cast<uint
 // 復号したタイル 1 枚の W_q^T H16 (定数の H16 fragment との mma 2 回。fp32 の出力はそのまま A fragment の配置で、
 // a0 / a1 は前半の n8、a2 / a3 は後半から)。
 template <int CB, int K2>
-__device__ __forceinline__ void tile_h16(uint32_t word, const LaneMap<K2>& map, const uint32_t (&hB)[2][2], int lane,
-                                         half2 (&w)[4]) {
-    uint32_t w1[1] = {word};
+__device__ __forceinline__ void tile_h16(const uint32_t (&word)[Fmt<K2>::LW], const LaneMap<K2>& map,
+                                         const uint32_t (&hB)[2][2], int lane, half2 (&w)[4]) {
     uint32_t b0[2], b1[2];
-    decode_tile<CB, K2>(w1, map, lane, b0, b1);
+    decode_tile<CB, K2>(word, map, lane, b0, b1);
     const uint32_t A[4] = {b0[0], b1[0], b0[1], b1[1]};            // W_q^T (m = column, k) / W_q^T (m は列, k)
 #pragma unroll
     for (int h = 0; h < 2; ++h) {
@@ -336,8 +338,8 @@ __device__ __forceinline__ void tiles_h8(half2 (&W)[8][4]) {
 // で終わる。
 template <int CB, int K2, int NB>
 __device__ __forceinline__ void gu_chunk(const half* xs, const half* su, int moff, half2 (&W)[GU_MT][8][4],
-                                         uint32_t (&wbuf)[GU_MT][8], bool has_next,
-                                         const uint32_t* __restrict__ wnext2, size_t kstride, size_t tstride, bool wl,
+                                         uint32_t (&wbuf)[GU_MT][8][Fmt<K2>::LW], bool has_next,
+                                         const uint32_t* __restrict__ wnext2, size_t kstride, size_t tstride,
                                          const LaneMap<K2>& map, const uint32_t (&hB)[2][2], int lane,
                                          float (&acc)[GU_MT][2 * NB][4]) {
     const int t = lane & 3;
@@ -369,7 +371,7 @@ __device__ __forceinline__ void gu_chunk(const half* xs, const half* su, int mof
 #pragma unroll
             for (int i = 0; i < GU_MT; ++i) {
                 tile_h16<CB, K2>(wbuf[i][kk], map, hB, lane, W[i][kk]);
-                if (wnext2) wbuf[i][kk] = wl ? __ldg(wnext2 + (size_t)kk * kstride + i * tstride) : 0u;
+                if (wnext2) load_words<K2>(wbuf[i][kk], wnext2 + (size_t)kk * kstride + i * tstride, lane);
             }
         }
     }
@@ -385,7 +387,7 @@ __device__ __forceinline__ void gu_mainloop(const __nv_bfloat16* __restrict__ x,
                                             const half* __restrict__ suh_u, const int* rows_sh, int cnt, int cb,
                                             int K, unsigned char* smem, float (&acc)[GU_MT][2 * NB][4]) {
     constexpr int TW = Fmt<K2>::TW;
-    static_assert(Fmt<K2>::LW == 1, "prompt experts: up to 4 bits a value");
+    static_assert(K2 == 4 || K2 == 6 || K2 == 8 || K2 == 10);
     auto xs_of = [&](int b) { return reinterpret_cast<half*>(smem + b * GU_STAGE); };
     auto su_of = [&](int b) { return reinterpret_cast<half*>(smem + b * GU_STAGE + GU_XS); };
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
@@ -454,20 +456,27 @@ __device__ __forceinline__ void gu_mainloop(const __nv_bfloat16* __restrict__ x,
     };
     const uint32_t* tbase = Tm + (size_t)nt * TW + lane;
     const size_t kstride = (size_t)NS * TW;
-    const bool wl = TW == 32 || lane < TW;
     // L2 prefetch of a chunk's trellis for the whole block: per (matrix, k tile) its 8 m tiles are 8 TW contiguous
     // words (8 TW * 4 bytes = TW / 4 lines of 128 bytes); thread q < 2 * 8 * (TW / 4) takes one line
     // ブロック全体のためにチャンクの trellis を L2 へ先読みする: (行列, k タイル) ごとに m タイル 8 枚は連続した
     // 8 TW 語 (8 TW * 4 バイト = 128 バイトの行 TW / 4 本)。スレッド q < 2 * 8 * (TW / 4) が 1 行ずつ受け持つ
     constexpr int PF_LINES = TW / 4;
-    const uint32_t* pf_base = nullptr;
-    if (threadIdx.x < 2 * 8 * PF_LINES) {
-        const int q = threadIdx.x, pm = q / (8 * PF_LINES), pk = (q / PF_LINES) % 8, pl = q % PF_LINES;
-        const uint32_t* T = pm == mat ? Tm : Tother;
-        pf_base = T + (size_t)pk * kstride + (size_t)cb * 8 * TW + pl * 32;
+    constexpr int PF_PER_THREAD = (2 * 8 * PF_LINES + GU_THREADS - 1) / GU_THREADS;
+    const uint32_t* pf_base[PF_PER_THREAD];
+#pragma unroll
+    for (int i = 0; i < PF_PER_THREAD; ++i) {
+        const int q = threadIdx.x + i * GU_THREADS;
+        pf_base[i] = nullptr;
+        if (q < 2 * 8 * PF_LINES) {
+            const int pm = q / (8 * PF_LINES), pk = (q / PF_LINES) % 8, pl = q % PF_LINES;
+            const uint32_t* T = pm == mat ? Tm : Tother;
+            pf_base[i] = T + (size_t)pk * kstride + (size_t)cb * 8 * TW + pl * 32;
+        }
     }
     auto prefetch = [&](int chunk) {
-        if (pf_base && chunk < chunks) prefetch_l2(pf_base + (size_t)chunk * 8 * kstride);
+#pragma unroll
+        for (int i = 0; i < PF_PER_THREAD; ++i)
+            if (pf_base[i] && chunk < chunks) prefetch_l2(pf_base[i] + (size_t)chunk * 8 * kstride);
     };
     prefetch(1);
     prefetch(2);
@@ -479,17 +488,22 @@ __device__ __forceinline__ void gu_mainloop(const __nv_bfloat16* __restrict__ x,
     // chunk 0's tiles decoded and rotated up front; wbuf: chunk 1's words
     // チャンク 0 のタイルは先に復号して回転しておく。wbuf にはチャンク 1 の語
     half2 W[GU_MT][8][4];
-    uint32_t wbuf[GU_MT][8];
+    uint32_t wbuf[GU_MT][8][Fmt<K2>::LW];
 #pragma unroll
     for (int i = 0; i < GU_MT; ++i)
 #pragma unroll
-        for (int kk = 0; kk < 8; ++kk) wbuf[i][kk] = wl ? __ldg(tbase + (size_t)kk * kstride + i * TW) : 0u;
+        for (int kk = 0; kk < 8; ++kk)
+            load_words<K2>(wbuf[i][kk], tbase + (size_t)kk * kstride + i * TW, lane);
 #pragma unroll
     for (int i = 0; i < GU_MT; ++i) {
 #pragma unroll
         for (int kk = 0; kk < 8; ++kk) {
             tile_h16<CB, K2>(wbuf[i][kk], map, hB, lane, W[i][kk]);
-            wbuf[i][kk] = (wl && chunks > 1) ? __ldg(tbase + (size_t)(8 + kk) * kstride + i * TW) : 0u;
+            if (chunks > 1)
+                load_words<K2>(wbuf[i][kk], tbase + (size_t)(8 + kk) * kstride + i * TW, lane);
+            else
+#pragma unroll
+                for (int j = 0; j < Fmt<K2>::LW; ++j) wbuf[i][kk][j] = 0u;
         }
         tiles_h8(W[i]);
     }
@@ -509,7 +523,7 @@ __device__ __forceinline__ void gu_mainloop(const __nv_bfloat16* __restrict__ x,
         const half* xs = xs_of(c % GU_STAGES);
         const half* su = su_of(c % GU_STAGES) + mat * CK;
         const uint32_t* wnext2 = c + 2 < chunks ? tbase + (size_t)(c + 2) * 8 * kstride : nullptr;
-        gu_chunk<CB, K2, NB>(xs, su, moff, W, wbuf, c + 1 < chunks, wnext2, kstride, (size_t)TW, wl, map, hB, lane,
+        gu_chunk<CB, K2, NB>(xs, su, moff, W, wbuf, c + 1 < chunks, wnext2, kstride, (size_t)TW, map, hB, lane,
                              acc);
     }
     __syncthreads();
@@ -598,8 +612,8 @@ __device__ __forceinline__ void gu_epilogue(const float (&acc)[GU_MT][2 * NB][4]
     }
 }
 
-template <int CB>
-__global__ void __launch_bounds__(GU_THREADS, 1) prompt_gateup_kernel(
+template <int CB, bool K10>
+__device__ __forceinline__ void prompt_gateup_body(
     const __nv_bfloat16* __restrict__ x, int xstride, const int* __restrict__ sorted, const int* __restrict__ items,
     const int* __restrict__ item_count, const int64_t* __restrict__ gate_ptr, const int64_t* __restrict__ up_ptr,
     const int* __restrict__ k2s, const half* __restrict__ suh_g, const half* __restrict__ suh_u,
@@ -631,9 +645,11 @@ __global__ void __launch_bounds__(GU_THREADS, 1) prompt_gateup_kernel(
     switch (k2s[e] * 16 + nb) {
 #define TF_PE_GU(K2_, NB_)                                                                                         \
     case K2_ * 16 + NB_: {                                                                                        \
+        if constexpr (K2_ != 10 || K10) { \
         float acc[GU_MT][2 * NB_][4];                                                                             \
         gu_mainloop<CB, K2_, NB_>(x, xstride, Tm, To, NS, sg, su, rows_sh, cnt, cb, K, smem_raw, acc);            \
         gu_epilogue<NB_>(acc, smem_raw, ep);                                                                      \
+        } else { __trap(); } \
         break;                                                                                                    \
     }
 #if TF_PE_GPM > 112
@@ -646,11 +662,36 @@ __global__ void __launch_bounds__(GU_THREADS, 1) prompt_gateup_kernel(
         TF_PE_GU_K(4)
         TF_PE_GU_K(6)
         TF_PE_GU_K(8)
+        TF_PE_GU_K(10)
 #undef TF_PE_GU_K
 #undef TF_PE_GU8
 #undef TF_PE_GU
         default: __trap();
     }
+}
+
+// Keep the legacy entry free of the LW=2 mainloops. K10 entry also accepts mixed widths.
+template <int CB>
+__global__ void __launch_bounds__(GU_THREADS, 1) prompt_gateup_kernel(
+    const __nv_bfloat16* __restrict__ x, int xstride, const int* __restrict__ sorted, const int* __restrict__ items,
+    const int* __restrict__ item_count, const int64_t* __restrict__ gate_ptr, const int64_t* __restrict__ up_ptr,
+    const int* __restrict__ k2s, const half* __restrict__ suh_g, const half* __restrict__ suh_u,
+    const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d,
+    half* __restrict__ xd, int K, int N, int NS, int slots, float limit, int act_mode, float4* __restrict__ zero,
+    long long zero_n) {
+    prompt_gateup_body<CB, false>(x, xstride, sorted, items, item_count, gate_ptr, up_ptr, k2s, suh_g, suh_u,
+                                  svh_g, svh_u, suh_d, xd, K, N, NS, slots, limit, act_mode, zero, zero_n);
+}
+
+extern "C" __global__ void __launch_bounds__(GU_THREADS, 1) tf_pe_gu_k10(
+    const __nv_bfloat16* __restrict__ x, int xstride, const int* __restrict__ sorted, const int* __restrict__ items,
+    const int* __restrict__ item_count, const int64_t* __restrict__ gate_ptr, const int64_t* __restrict__ up_ptr,
+    const int* __restrict__ k2s, const half* __restrict__ suh_g, const half* __restrict__ suh_u,
+    const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d,
+    half* __restrict__ xd, int K, int N, int NS, int slots, float limit, int act_mode, float4* __restrict__ zero,
+    long long zero_n) {
+    prompt_gateup_body<1, true>(x, xstride, sorted, items, item_count, gate_ptr, up_ptr, k2s, suh_g, suh_u,
+                                  svh_g, svh_u, suh_d, xd, K, N, NS, slots, limit, act_mode, zero, zero_n);
 }
 
 // ---- down ---------------------------------------------------------------------------------------------------------
@@ -756,7 +797,7 @@ template <int CB, int K2, int NB>
 __device__ __forceinline__ void dn_item(const half* __restrict__ xd, const uint32_t* __restrict__ Td, int NS,
                                         int first, int cb0, int ncb, int K, unsigned char* smem, const DnEpi& ep) {
     constexpr int TW = Fmt<K2>::TW;
-    static_assert(Fmt<K2>::LW == 1, "prompt experts: up to 4 bits a value");
+    static_assert(K2 == 4 || K2 == 6 || K2 == 8 || K2 == 10);
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const LaneMap<K2> map(lane);
     const int l7 = lane & 7;
@@ -775,7 +816,6 @@ __device__ __forceinline__ void dn_item(const half* __restrict__ xd, const uint3
             cp_async16(dst + swz(i, j * 8), xd + (size_t)(first + (ok ? i : 0)) * K + k0 + j * 8, ok);
         }
     };
-    const bool wl = TW == 32 || lane < TW;
     const size_t kstride = (size_t)NS * TW;
     auto tile_ptr = [&](int step) {
         const int cb = cb0 + step / kchunks;
@@ -795,11 +835,11 @@ __device__ __forceinline__ void dn_item(const half* __restrict__ xd, const uint3
     };
     prefetch(1);
     prefetch(2);
-    uint32_t wbuf[8];
+    uint32_t wbuf[8][Fmt<K2>::LW];
     {
         const uint32_t* tp = tile_ptr(0);
 #pragma unroll
-        for (int kk = 0; kk < 8; ++kk) wbuf[kk] = wl ? __ldg(tp + (size_t)kk * kstride) : 0u;
+        for (int kk = 0; kk < 8; ++kk) load_words<K2>(wbuf[kk], tp + (size_t)kk * kstride, lane);
     }
     load(0);
     cp_async_commit();
@@ -825,8 +865,10 @@ __device__ __forceinline__ void dn_item(const half* __restrict__ xd, const uint3
         const uint32_t* wnext = step + 1 < steps ? tile_ptr(step + 1) : nullptr;
 #pragma unroll
         for (int kk = 0; kk < 8; ++kk) {
-            uint32_t w1[1] = {wbuf[kk]};
-            if (wnext) wbuf[kk] = wl ? __ldg(wnext + (size_t)kk * kstride) : 0u;
+            uint32_t w1[Fmt<K2>::LW];
+#pragma unroll
+            for (int j = 0; j < Fmt<K2>::LW; ++j) w1[j] = wbuf[kk][j];
+            if (wnext) load_words<K2>(wbuf[kk], wnext + (size_t)kk * kstride, lane);
             uint32_t b0[2], b1[2];
             decode_tile<CB, K2>(w1, map, lane, b0, b1);
             const uint32_t A[4] = {b0[0], b1[0], b0[1], b1[1]};
@@ -844,8 +886,8 @@ __device__ __forceinline__ void dn_item(const half* __restrict__ xd, const uint3
     }
 }
 
-template <int CB>
-__global__ void __launch_bounds__(NTHREADS, 1) prompt_down_kernel(
+template <int CB, bool K10>
+__device__ __forceinline__ void prompt_down_body(
     const half* __restrict__ xd, const int* __restrict__ sorted, const int* __restrict__ items,
     const int* __restrict__ item_count, const int64_t* __restrict__ down_ptr, const int* __restrict__ k2s,
     const half* __restrict__ svh_d, const float* __restrict__ wts, float* __restrict__ out, int K, int D, int slots,
@@ -868,7 +910,11 @@ __global__ void __launch_bounds__(NTHREADS, 1) prompt_down_kernel(
     const int nb = (cnt + 15) >> 4;
     switch (k2s[e] * 16 + nb) {
 #define TF_PE_DN(K2_, NB_) \
-    case K2_ * 16 + NB_: dn_item<CB, K2_, NB_>(xd, Td, D >> 4, first, blockIdx.y * ncb, ncb, K, smem_raw, ep); break;
+    case K2_ * 16 + NB_: \
+        if constexpr (K2_ != 10 || K10) \
+            dn_item<CB, K2_, NB_>(xd, Td, D >> 4, first, blockIdx.y * ncb, ncb, K, smem_raw, ep); \
+        else { __trap(); } \
+        break;
 #if TF_PE_GPM > 112
 #define TF_PE_DN8(K2_) TF_PE_DN(K2_, 8)
 #else
@@ -879,11 +925,30 @@ __global__ void __launch_bounds__(NTHREADS, 1) prompt_down_kernel(
         TF_PE_DN_K(4)
         TF_PE_DN_K(6)
         TF_PE_DN_K(8)
+        TF_PE_DN_K(10)
 #undef TF_PE_DN_K
 #undef TF_PE_DN8
 #undef TF_PE_DN
         default: __trap();
     }
+}
+
+// Keep the legacy entry free of the LW=2 mainloops. K10 entry also accepts mixed widths.
+template <int CB>
+__global__ void __launch_bounds__(NTHREADS, 1) prompt_down_kernel(
+    const half* __restrict__ xd, const int* __restrict__ sorted, const int* __restrict__ items,
+    const int* __restrict__ item_count, const int64_t* __restrict__ down_ptr, const int* __restrict__ k2s,
+    const half* __restrict__ svh_d, const float* __restrict__ wts, float* __restrict__ out, int K, int D, int slots,
+    int ncb, int f16) {
+    prompt_down_body<CB, false>(xd, sorted, items, item_count, down_ptr, k2s, svh_d, wts, out, K, D, slots, ncb, f16);
+}
+
+extern "C" __global__ void __launch_bounds__(NTHREADS, 1) tf_pe_dn_k10(
+    const half* __restrict__ xd, const int* __restrict__ sorted, const int* __restrict__ items,
+    const int* __restrict__ item_count, const int64_t* __restrict__ down_ptr, const int* __restrict__ k2s,
+    const half* __restrict__ svh_d, const float* __restrict__ wts, float* __restrict__ out, int K, int D, int slots,
+    int ncb, int f16) {
+    prompt_down_body<1, true>(xd, sorted, items, item_count, down_ptr, k2s, svh_d, wts, out, K, D, slots, ncb, f16);
 }
 
 #ifndef TF_ZIG  // host section / ホスト側

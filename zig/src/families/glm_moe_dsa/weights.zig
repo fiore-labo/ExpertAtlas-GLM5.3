@@ -8,6 +8,10 @@ const split = @import("split.zig");
 
 const st = core.safetensors;
 
+/// This process's bytes of shares read so far (every Reader.get; TF_GLM53_LOAD_PROGRESS reports rank 0's at start).
+/// このプロセスがこれまでに読んだ分のバイト数 (Reader.get のたび。TF_GLM53_LOAD_PROGRESS は起動時の rank 0 の分を出す)。
+pub var read_bytes: u64 = 0;
+
 pub const Share = struct {
     dtype: st.DType,
     rank: u8,
@@ -44,6 +48,23 @@ pub const Reader = struct {
         const map = (parsed.object.get("weight_map") orelse return error.BadIndex).object;
         var it = map.iterator();
         while (it.next()) |e| try r.index.put(a, e.key_ptr.*, e.value_ptr.string);
+        return r;
+    }
+
+    /// A reader over one shard file of `dir`, its index taken from the file's own header: the whole checkpoint's
+    /// index (model.safetensors.index.json; GLM-5.3: 170 MB, 1.8 M names) parsed holds about 1 GiB of host memory.
+    /// `dir` の 1 つの shard ファイルだけを読む reader。索引はファイル自身のヘッダから作る: チェックポイント全体の
+    /// 索引 (model.safetensors.index.json。GLM-5.3 では 170 MB、180 万個の名前) を解析すると約 1 GiB のホストメモリを持つ。
+    pub fn openFile(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, fname: []const u8, rank: usize, world: usize, stored_world: usize) !Reader {
+        if (stored_world % world != 0) return error.StoredWorldNotMultiple;
+        var r: Reader = .{ .gpa = gpa, .io = io, .arena = .init(gpa), .dir = dir, .rank = rank, .world = world, .stored_world = stored_world };
+        errdefer r.close();
+        const a = r.arena.allocator();
+        const own = try a.dupe(u8, fname);
+        const f = try r.file(own);
+        // the names outlive the file's own arena (release closes it)
+        // 名前はファイル自身の arena (release が閉じる) より長く使う
+        for (f.names.keys()) |k| try r.index.put(a, try a.dupe(u8, k), own);
         return r;
     }
 
@@ -101,6 +122,12 @@ pub const Reader = struct {
     /// This rank's share of `name`, owned by the caller.
     /// `name` のうちこのランクの分。呼び出し側が所有する。
     pub fn get(r: *Reader, name: []const u8) !Share {
+        const s = try r.getShare(name);
+        read_bytes += s.bytes.len;
+        return s;
+    }
+
+    fn getShare(r: *Reader, name: []const u8) !Share {
         if (r.index.contains(name)) return cut(r.gpa, try r.tensor(name), try split.rule(name), r.rank, r.world, name);
         const k = r.stored_world / r.world;
         const rule = try split.rule(name);

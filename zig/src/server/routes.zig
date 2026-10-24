@@ -42,18 +42,34 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
     if (std.mem.eql(u8, route, "/metrics") or std.mem.eql(u8, route, "/v1/metrics")) return status.metrics(srv, conn, a);
     if (std.mem.eql(u8, route, "/dashboard")) return status.dashboard(srv, conn, a);
     if (std.mem.eql(u8, route, "/stats")) return status.stats(srv, conn, a);
+    if (std.mem.startsWith(u8, route, "/v1/experts/") or std.mem.eql(u8, route, "/v1/memory")) return status.experts(srv, conn, a, route);
+    if (std.mem.eql(u8, route, "/panel")) return status.panel(srv, conn, a);
     if (route.len == 0 or std.mem.eql(u8, route, "/health") or (srv.info.cuda_fields and std.mem.eql(u8, route, "/v1/health"))) return status.health(srv, conn, a) catch {};
     if (std.mem.endsWith(u8, route, "/models")) return status.models(srv, conn, a) catch {};
     unknown(conn, a);
 }
 
+/// Fiore-lab: the read-only listener's routes (TENSORFOLD_METRICS_LISTEN): GET /metrics and /health, and their /v1
+/// names, with no key; anything else is 404.
+pub fn metricsOnly(srv: *Server, conn: *Conn, a: Allocator) void {
+    const route = auth.routePath(conn.path);
+    if (!std.mem.eql(u8, conn.method, "GET")) {
+        discardBody(conn, a);
+        return unknown(conn, a);
+    }
+    if (std.mem.eql(u8, route, "/metrics") or std.mem.eql(u8, route, "/v1/metrics")) return status.metrics(srv, conn, a);
+    if (std.mem.eql(u8, route, "/health") or std.mem.eql(u8, route, "/v1/health")) return status.health(srv, conn, a) catch {};
+    unknown(conn, a);
+}
+
 /// A refused route's body is read and dropped, so it cannot reach the next request on this connection.
-fn discardBody(conn: *Conn, a: Allocator) void {
+pub fn discardBody(conn: *Conn, a: Allocator) void {
     _ = http_body.read(conn, a, http_body.limit) catch {};
 }
 
 fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
+    if (std.mem.startsWith(u8, route, "/v1/experts/")) return status.expertsPost(srv, conn, a, route);
     if (std.mem.endsWith(u8, route, "/decisions")) return decisions.post(srv, conn, a);
     if (anthropic.route(conn.path)) return anthropic.post(srv, conn, a);
     if (responses.route(route)) |rid| if (rid.len == 0) return responses.post(srv, conn, a);

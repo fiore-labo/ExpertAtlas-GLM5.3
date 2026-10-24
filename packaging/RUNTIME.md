@@ -3,7 +3,8 @@ English | [日本語](RUNTIME.ja.md) | [简体中文](RUNTIME.zh-CN.md)
 # Running full GLM-5.3 from this archive
 
 This archive serves full GLM-5.3 (`glm_moe_dsa`, 755B) on four or eight NVIDIA DGX Spark systems, one rank per GB10,
-with tensor parallelism 4 or 8. It needs no Python, compiler or source checkout. It is Fiore-lab's unofficial
+with tensor parallelism 4 or 8. The server needs no Python, compiler or source checkout; the control panel's launcher
+(four nodes) runs on the system `python3` with its standard library only. It is Fiore-lab's unofficial
 derivative of TensorFold 1.0.2, not a release of the TensorFold project. This page covers both node counts; `T4.md`
 gives what differs with four nodes, with its measurements.
 
@@ -14,6 +15,9 @@ gives what differs with four nodes, with its measurements.
 - `lib/libroce_proxy.so`: the RDMA proxy of the decode collectives (needs `libibverbs.so.1`).
 - `tf-glm53`, `glm53.conf.example` (eight nodes) and `glm53.t4.conf.example` (four nodes): start, stop and check the
   ranks.
+- The control panel (four nodes): `launcher/tf_launcher.py` (the launcher), `panel.html` (its page; the server holds
+  the same page), `tools/quant/expert_plan.py` (writes the expert plans), `expert-plan/banks.json` (the expert
+  banks and where they are) and `PANEL-GUIDE.md` (the panel's screens; also in Japanese).
 - `RUNTIME.md` (this page) and `T4.md` (four nodes), each also in Japanese (`.ja.md`) and Simplified Chinese
   (`.zh-CN.md`).
 - `LICENSE`, `NOTICE`, `LICENSES/`, `THIRD_PARTY_NOTICES.md`, `VERSION`, `SHA256SUMS`.
@@ -36,6 +40,8 @@ It holds no model weights, no draft model and no NCCL.
   fewer need 2.7 GiB less. `tf-glm53 check` refuses a node with less.
 - Four nodes: memory sized for this server alone (`T4.md`); with DFlash2 the lowest free memory measured was about
   3.2 GiB a node, at 512K.
+- The control panel (four nodes): disk for the expert banks it uses (below) and `python3` on every node (DGX OS has
+  it).
 
 ## Before the first start
 
@@ -121,8 +127,8 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/
 ```
 
 The reply's `message` holds the model's reasoning in `reasoning_content`, then the answer in `content`; `max_tokens`
-counts both. From another machine, with `HOST` and `API_KEY_FILE` set, send the request to `http://HOST:PORT` and add
-`-H "Authorization: Bearer KEY"`.
+counts both. From another machine, with `HOST` set, send the request to `http://HOST:PORT`; when `API_KEY_FILE` is set,
+add `-H "Authorization: Bearer KEY"`.
 
 ## Drafters
 
@@ -202,7 +208,8 @@ To go back to the MTP layer, set `DRAFTER_KIND=mtp`, then `./tf-glm53 down` and 
 `CONTEXT` is the number of positions one request may reach (prompt and reply). `STORE` is the number of positions
 kept beyond them for earlier conversations. `CACHE` in `glm53.conf` picks how they are kept:
 
-- `pool` (the default): one KV pool of `CONTEXT` + `STORE` positions in blocks of 256 positions; every conversation's
+- `pool` (the default): one KV pool of `CONTEXT` + `STORE` positions in blocks of 256 positions (`STORE` 512 at
+  least); every conversation's
   KV is a table of those blocks. A request resumes from the longest cached prefix of any conversation, not only of the
   one just before it. A conversation's next turn continues its own blocks. A new conversation that begins like an
   earlier one (the same system prompt, such as the one of about 27K tokens some agent harnesses send with every
@@ -227,6 +234,94 @@ The server's `/health` then holds a `pool` object: `blocks`, `free_blocks`, `slo
 `shared_blocks` (blocks held by more than one conversation), `evicted_total` (conversations dropped to make room) and
 `cold_total` (requests computed cold).
 
+## The control panel (Expert Atlas)
+
+On four nodes, the routed experts of layers 3 to 77 (19,200, 256 a layer) can each be loaded at 2, 3, 4 or 5 bits,
+expert by expert, from four banks; the control panel chooses the widths and changes them while the engine runs. In
+r3-102 it runs on four nodes only: the launcher refuses other node counts, and eight nodes start with
+`./tf-glm53 up` as before. `T4.md`, "The control panel", gives which banks four nodes need and what fits.
+
+**The banks.** Each holds the routed experts at one width, with its manifest (`<id>.json`: every file's size, header
+and sha256): `fiore-lab/GLM-5.3-EXL3-Experts-2bit`, `-3bit`, `-4bit` and `-5bit` on Hugging Face (187.3, 277.9,
+368.5 and 459.1 GB). `expert-plan/banks.json` names each bank's directory, the same on every node
+(`~/models/GLM-5.3-EXL3-Experts-<N>bit`; change `dir` there for another place, then `./tf-glm53 deploy`). The 3- and
+4-bit banks for four nodes:
+
+```sh
+for w in 3 4; do
+  D=~/models/GLM-5.3-EXL3-Experts-${w}bit
+  ~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-Experts-${w}bit --local-dir $D
+  for n in NODE2 NODE3 NODE4; do    # the other three addresses in NODES
+    rsync -a --mkpath -e "ssh -c aes128-gcm@openssh.com" $D/ $n:$D/ &
+  done; wait
+done
+./tf-glm53 verify-banks 3 4    # every file against its manifest's sha256 on every node, at low priority (minutes)
+```
+
+The eight-node checkpoint's routed experts are the 4-bit bank file for file: with that checkpoint as `WEIGHTS`, put the
+4-bit manifest into its directory on every node
+(`hf download fiore-lab/GLM-5.3-EXL3-Experts-4bit glm53-exl3-experts-4bit.json --local-dir ~/models/GLM-5.3-EXL3-8x-DGX-Sparks`)
+and set the 4-bit bank's `dir` to `~/models/GLM-5.3-EXL3-8x-DGX-Sparks`. The launcher checks every width's bank on
+every node (the manifest, and every layer file at its size) when it starts, at most once a minute while the page is
+open, and before every start; the panel
+offers only the widths every node holds, and a start or a change that needs another is refused before anything
+changes. A start checks each layer file's size and header against the manifest; `verify-banks` reads the files whole.
+
+**The launcher.** It runs on the first node and stays on, whether the engine runs or not:
+
+```sh
+./tf-glm53 launcher           # start it; also ./tf-glm53 launcher status, ./tf-glm53 launcher stop
+```
+
+Open `http://LAUNCHER_HOST:LAUNCHER_PORT/panel`: `127.0.0.1:8010` in `glm53.t4.conf.example` (without `LAUNCHER_PORT`,
+`PORT` + 10). From another machine, forward the port (`ssh -L 8010:127.0.0.1:8010 FIRST-NODE`, then
+`http://127.0.0.1:8010/panel`), or set `LAUNCHER_HOST` and `API_KEY_FILE`: away from loopback every call needs a key
+of that file, and the page takes one from its address once (`/panel#key=KEY`). The panel's other calls go to the
+engine through the launcher, so the page has one address whether the engine runs or not. Start and stop the engine
+from the panel while you use it. `PANEL-GUIDE.md` describes the screens; the page is in English or
+Japanese (by the browser's language, or Display > Language).
+
+- **A start** from the panel: the launcher checks every node (reachable, no engine or other GPU process, the plan
+  fits its memory), writes the widths as an expert plan (`launch/plan-<time>.json`), copies it to every node and runs
+  `tf-glm53 up` with it; the page shows each layer as it loads. Every routed expert then comes from the banks; the
+  checkpoint gives the other weights.
+- **The drafter** is chosen on the launch screen for each start, beside the KV format: MTP (the checkpoint's layer),
+  DFlash2 (offered only when `DRAFTER` in `glm53.conf` holds its model on every node, "Using DFlash2" above) or none;
+  `DRAFTER_KIND` is the default. Each has its own memory: DFlash2 leaves about 4 GiB less a node than MTP, so the
+  plan is made again for the drafter picked.
+- **The context** of a start is chosen there too: 128K, 256K, 512K, `CONTEXT` or the longest that fits (at most
+  1,048,576 tokens); a length the plan's memory cannot hold is cut to what fits.
+- **The store** (`STORE`: the tokens kept beside the context for earlier conversations) is chosen there too: `STORE`,
+  a size, or all the memory the context leaves; and **what each node keeps for the OS** (`RESERVE_GB`, 4 GiB by
+  default, 2 to 32). The plan sizes the KV cache with both; the engine's own memory check at the start keeps the same
+  amount. The KV cache is set aside at the start and does not grow while the engine runs.
+- **The nodes.** While the engine is stopped the workers' addresses (`NODES` after the first) can be changed on the
+  launch screen; the first node stays. Check copies this directory to them (`tf-glm53 deploy`) and runs
+  `tf-glm53 check` on the list; Save writes `NODES` in `glm53.conf` once that list passed, keeping the previous file
+  beside it (`glm53.conf.bak-<time>`).
+- **Usage.** The engine counts the experts each prompt row and each decoded token picks. At a stop the panel asks
+  whether to add the run's counts to the learning data (`launch/usage-total.json`); a run stopped elsewhere waits as
+  pending until you decide. The plans rank the experts by these counts: the most used get the widest bits. Before
+  the first saved run they rank by the counts the page ships with, measured by Fiore-lab over 12 kinds of work
+  (coding, agents, Japanese and English text, Linux operations, security); from the first saved run on, by this
+  install's saved runs alone. Before any run the plan is all 3 bits.
+- **Expert optimisation** re-sorts the experts by the counts, each width keeping its number of experts, so the mean
+  width of the experts picked rises at the same memory. While the engine runs, it ranks by this run's picks: the
+  change starts once no request runs or waits (the page tries again until then); the engine changes the layers in
+  place on every rank, drops the conversations it keeps (their KV was computed with the old experts) and
+  serves again, and requests that arrive meanwhile wait; a full change of 75
+  layers took 83 to 90 s on four nodes. A rank stuck past `TF_GLM53_SWAP_DEADLINE_S` (600 s by default) ends its
+  process, and `tf-glm53`'s watcher stops every rank. While the engine is stopped, it ranks the last run's picks and
+  the result becomes the plan for the next start. Each result is saved in `ATLAS_DIR/allocs/user/`
+  (`sort-<time>.json`; `atlas/` in this directory by default).
+- With `TF_GLM53_MULTI` in `EXTRA_ENV` the engine changes no widths while it runs: expert optimisation saves the
+  allocation, for a stop and a start with it.
+- The page's settings (colours, the circle's order and the rest) are one file for every browser:
+  `launch/panel-settings.json` (`TF_PANEL_SETTINGS` in `EXTRA_ENV` moves it).
+- `LAUNCH_SNAPSHOTS=1` in `glm53.conf` writes each node's GPU, memory and log tail before and after each start and
+  stop to `snapshots/`; `LAUNCH_DROP_CACHES=1` drops the page cache on every node before a start (it needs `sudo`
+  without a password). Both are off by default.
+
 ## When a rank stops
 
 `tf-glm53 up` leaves a watcher that checks the ranks every 5 seconds. If some ranks are gone while others still run
@@ -240,13 +335,25 @@ in `logs/rankR.log.prev`; `tf-glm53 logs R` follows rank R's.
 
 ## Serving other machines
 
-The server listens on `127.0.0.1` by default and speaks the OpenAI chat API. To serve other machines, set `HOST` and
-`API_KEY_FILE`; `tf-glm53` refuses a non-loopback address without a key. The server speaks plain HTTP: put TLS in front
-or keep it on a closed network, or the key travels in the clear.
+The server listens on `127.0.0.1` by default and speaks the OpenAI chat API. To serve other machines, set `HOST`; set
+`API_KEY_FILE` as well to require a key. Without a key on a non-loopback address `tf-glm53` warns and starts, and the
+API is open to anyone who can reach it. The server speaks plain HTTP: put TLS in front or keep it on a closed network,
+or the key travels in the clear.
 
 The API key file is read on the first node only. It holds one key a line (`KEY` or `LABEL: KEY`, `#` starts a comment)
 and must be a regular file that other users cannot read (`chmod 600`), or the server refuses to start; `tf-glm53 check`
 tests both. `tf-glm53 deploy` does not copy it to the other nodes. Clients send `Authorization: Bearer KEY`.
+
+A monitor on another host can read the server without reaching the API: set `METRICS_LISTEN=HOST:PORT` (for example
+`0.0.0.0:9894`). The first node then also answers `GET /metrics` (Prometheus text) and `GET /health` on that address,
+without a key, and nothing else (any other request gets 404), while the API stays on `HOST`. `tf-glm53 status` prints
+the address. Keep the port on a closed network: it shows no prompt or reply, but it shows the load and the token counts.
+The `tensorfold_health:*_total` counters include the running request and never fall back, so a speed is the difference
+of two reads: prefill tokens/s = Δ`prefill_tokens_total` / Δ`prefill_seconds_total`, decode = Δ`completion_tokens_total`
+/ Δ`decode_seconds_total`, cache hits = Δ`cached_tokens_total` / Δ`prompt_tokens_total`, draft acceptance =
+Δ`accepted_total` / Δ`drafted_total`. `tensorfold:requests_prefilling` and `tensorfold:requests_decoding` give the
+running request's phase, `tensorfold:prefill_tokens_remaining` what its prefill has left, `tensorfold:pool_*` the
+conversation cache and `tensorfold:engine_info` the settings.
 
 ## Speed
 
@@ -312,7 +419,9 @@ on the nodes or lower `STORE`, then `tf-glm53 down` and `tf-glm53 up`.
 ## Limits
 
 - Four or eight GB10 systems only (tensor parallelism 4 or 8); other GPU models and other rank counts are not
-  supported. Four nodes need the four-node checkpoint and `KV=fp4`.
+  supported. Four nodes need the four-node checkpoint and `KV=fp4` (with the control panel, either checkpoint and the
+  banks, `T4.md`).
+- The control panel runs on four nodes only in this release.
 - One request runs at a time. Up to 32 others wait in arrival order, chat-title requests (and those sent with
   `"priority": "background"`) behind the rest. Past 32 a request is refused with "the engine is busy; retry shortly":
   a 503, or an error event in a streamed reply.

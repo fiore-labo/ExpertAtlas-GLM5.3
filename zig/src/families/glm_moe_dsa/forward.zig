@@ -34,6 +34,16 @@ const wide_topk_min = 16384;
 // blocks of this many rows take the radix select: the k-th best by the score word alone, ties in column order
 // この行数以上のブロックは radix select: 点数の語だけで k 番目を決め、同点は列の順
 const radix_min_rows = 32;
+/// The widest window over several conversations (`windowMulti` under `par`): its RoCE collectives, bf16 lane and
+/// exchange take up to this many rows. Buffer sets of up to this many rows hold a whole window at the head, argmax,
+/// exchange and top-k states.
+/// 複数の会話をまとめたウィンドウ (`par` の `windowMulti`) の最大行数: RoCE の集団通信・bf16 の lane・交換はこの行数
+/// まで。この行数以下のバッファの組は head・argmax・交換・top-k の状態にウィンドウ全体を持つ。
+pub const multi_rows = 32;
+/// The live expert usage log: rows a layer (a decode window's rows: multi_rows at most) and layers (MTP included).
+/// expert の使用状況のログ: 層あたりの行 (decode ウィンドウの行は最大 multi_rows) と層の数 (MTP を含む)。
+pub const log_rows = multi_rows;
+pub const log_layers = 80;
 // the default widest key range scored (Buffers.keys)
 // 点数を付けるキー範囲の既定の最大 (Buffers.keys)
 pub const max_keys = 8192;
@@ -303,9 +313,9 @@ pub const Glue = struct {
     }
 
     /// topkValues for decode windows over long rows (many blocks a row): the same set, any order.
-    /// `state`: 16 x TkState (1040 bytes each, zeroed once), `cand`: [n, t] int64 scratch.
+    /// `state`: one TkState a row, n of them (1040 bytes each, zeroed once), `cand`: [n, t] int64 scratch.
     /// 長い行に対する decode ウィンドウ用の topkValues (1 行に多数のブロック): 同じ集合を順不同で出す。
-    /// `state`: TkState x 16 (各 1040 バイト、最初に 1 回ゼロにする)、`cand`: [n, t] int64 の作業領域。
+    /// `state`: 1 行に TkState 1 つで n 個 (各 1040 バイト、最初に 1 回ゼロにする)、`cand`: [n, t] int64 の作業領域。
     pub fn topkValuesWide(g: *const Glue, s: cuda.Stream, sc: u64, out: u64, n: u32, t: u32, k: u32, state: u64, cand: u64) !void {
         // short rows: one block a row is faster
         // 短い行は 1 行 1 ブロックの方が速い
@@ -562,6 +572,9 @@ pub const Buffers = struct {
     // DECODE_BF16: ウィンドウの部分和の行 (bf16) と、その bf16 の和
     dpart: ?Buf = null,
     dred: ?Buf = null,
+    // the two-shot all-reduce's share of dpart (rows x D x 2 / world bytes; Ctx.ar2_rows)
+    // 2 段の all-reduce での dpart の取り分 (rows x D x 2 / world バイト。Ctx.ar2_rows)
+    dmid: ?Buf = null,
 
     /// `reduce_rows`: the rows the TP reduce scratch (red, gath, send, recv, mine) must hold - `rows`, or fewer where
     /// the wide windows reduce elsewhere (engine.zig: the SP parts under PREFILL_REDUCE=ring reduce through hpart).
@@ -581,9 +594,12 @@ pub const Buffers = struct {
                 return b;
             }
         }.z;
-        // po: chunk partials of the decode class (8 chunks for each of up to 16 rows) or one chunk a row
-        // po: decode クラスのチャンクの部分結果 (16 行までの各行に 8 チャンク) か、1 行 1 チャンク
-        const slots: usize = @max(cfg.index_topk / 256 * @min(R, 16), R);
+        // the rows of a decode window this set may hold: all of them up to multi_rows (windowMulti), else 16
+        // この組が持つ decode ウィンドウの行数: multi_rows まではすべて (windowMulti)、それより多ければ 16
+        const wr: usize = if (R <= multi_rows) R else small_rows;
+        // po: chunk partials of the decode class (8 chunks for each of the window's rows) or one chunk a row
+        // po: decode クラスのチャンクの部分結果 (ウィンドウの各行に 8 チャンク) か、1 行 1 チャンク
+        const slots: usize = @max(cfg.index_topk / 256 * wr, R);
         var out: Buffers = .{
             .ids = try a(d, R * 8),
             .x = try a(d, R * D * 2),
@@ -624,7 +640,7 @@ pub const Buffers = struct {
             // vocabulary share for the head's rows (at most 16)
             // router の K スライスの部分和 [8, m, ne]: 全行に 1024 列まで (indexer、expert)、head の行 (16 まで) には
             // 語彙の取り分
-            .rpart = try a(d, 8 * @max(R * 1024, @min(R, 16) * vocab_share) * 4),
+            .rpart = try a(d, 8 * @max(R * 1024, wr * vocab_share) * 4),
             .xh = try a(d, R * D * 2),
             .wq = try a(d, 6144 * 3072 * 2),
             .mlog = try a(d, R * cfg.experts * 4),
@@ -641,10 +657,10 @@ pub const Buffers = struct {
             .po = try a(d, if (partials) slots * heads * lw * 4 * dcp else 16),
             .dummy = try a(d, 16),
             .fnormed = try a(d, R * D * 2),
-            .lpart = try a(d, @min(R, 16) * vocab_share * 4),
-            .amax = try a(d, 16 * 4 * 4),
-            .amax_all = try a(d, world * 16 * 4 * 4),
-            .tok_out = try a(d, 16 * 4),
+            .lpart = try a(d, wr * vocab_share * 4),
+            .amax = try a(d, @max(wr, 16) * 4 * 4),
+            .amax_all = try a(d, world * @max(wr, 16) * 4 * 4),
+            .tok_out = try a(d, @max(wr, 16) * 4),
             .rows = rows,
             .keys = keys,
             .had = try Buf.fromHost(d, had),
@@ -656,7 +672,7 @@ pub const Buffers = struct {
             const H: usize = heads;
             // decode windows exchange by all-gather (G x the bytes)
             // decode ウィンドウは all-gather で交換する (G 倍のバイト)
-            const fan: usize = if (R <= 16) G else 1;
+            const fan: usize = if (R <= multi_rows) G else 1;
             out.dcp = dcp;
             out.qpack = try a(d, R * H * 576 * 2);
             out.qall = try a(d, G * R * H * 576 * 2);
@@ -664,14 +680,16 @@ pub const Buffers = struct {
             out.lsend = try a(d, G * R * H * 4);
             out.orecv = try a(d, fan * G * R * H * lw * 2);
             out.lrecv = try a(d, fan * G * R * H * 4);
-            const xb = G * @min(R, small_rows) * H * (lw * 2 + 4) + 16;
+            const xb = G * wr * H * (lw * 2 + 4) + 16;
             out.xsend = try a(d, xb);
             out.xrecv = try a(d, G * xb);
             out.cnt = try a(d, R * 4);
             out.cand = try a(d, G * @min(R, sel_rows) * cfg.index_topk * 8);
             out.dmine = try a(d, @min(R, sel_rows) * cfg.index_topk * 8);
-            out.tk_state = try a(d, 16 * 1040);
-            out.tk_cand = try Buf.alloc(d, @min(R, radix_min_rows - 1) * ((keys + dcp - 1) / dcp) * 8);
+            // one TkState a row of any block below radix_min_rows rows (selectDcp's prompt blocks of 17 .. 31 rows too)
+            // radix_min_rows 行未満のブロックの 1 行に TkState 1 つ (selectDcp の 17 .. 31 行の prompt のブロックも)
+            out.tk_state = try a(d, @max(wr, radix_min_rows - 1) * 1040);
+            out.tk_cand = try Buf.alloc(d, (if (R <= multi_rows) R else radix_min_rows - 1) * ((keys + dcp - 1) / dcp) * 8);
         }
         return out;
     }
@@ -710,7 +728,48 @@ pub const State = struct {
         try pos.fill8(0, null);
         return .{ .kc = kc, .ic = ic, .pos = pos };
     }
+
+    /// The bytes `init` allocates, for a check before it runs.
+    /// `init` が確保するバイト数 (実行前の確認用)。
+    pub fn bytes(cfg: Config, layers: []const model.Layer, capacity: usize, kv8: bool, kv4: bool) usize {
+        const lat_row: usize = latRow(cfg, kv8, kv4);
+        const idx_row: usize = if (kv8) 144 else cfg.index_dim * 2;
+        var n: usize = 16;
+        for (layers) |L| n += (capacity + 1) * lat_row + if (L.indexer != null) (capacity + 1) * idx_row else 0;
+        return n;
+    }
 };
+
+/// One conversation's rows of a window over several conversations (`Ctx.windowMulti`): its row count, its caches by
+/// layer, its device position (int32, its first row's) and its key range.
+/// 複数の会話をまとめたウィンドウ (`Ctx.windowMulti`) での 1 つの会話の行: 行数、層ごとのキャッシュ、デバイス上の
+/// 位置 (int32、先頭行の)、キー範囲。
+/// `t` null: the conversation's rows all lie below index_topk (every key attended, no selection). `pmap`
+/// (TF_GLM53_PREFIX=pool with TF_GLM53_MULTI): its own PoolMap, which its cache writes and key reads go through (0: the
+/// context's ops.pmap).
+/// `t` が null: 会話の行はすべて index_topk より手前 (全キーを参照し、選択しない)。`pmap` (TF_GLM53_PREFIX=pool で
+/// TF_GLM53_MULTI): その会話自身の PoolMap。キャッシュの書き込みとキーの読み出しはそれを通る (0 ならコンテキストの
+/// ops.pmap)。
+pub const WindowSeq = struct {
+    rows: u32,
+    kc: []const Buf,
+    ic: []const ?Buf,
+    pos: u64,
+    t: ?u32,
+    pmap: u64 = 0,
+};
+
+/// How `Ctx.windowMulti` runs the per-conversation steps under DCP: `per`, the DCP collectives once a conversation;
+/// `one`, once over all the rows; `one_absorb`, as `one` with the absorbed queries over all the rows at once (the
+/// weight read once) and only each later conversation's RoPE part rewritten at its position.
+/// `Ctx.windowMulti` が DCP で会話ごとの段をどう回すか: `per` は DCP の collective を会話ごと、`one` は全行で 1 回、
+/// `one_absorb` は `one` に加えて吸収済みの query を全行まとめて 1 回で作り (重みの読みは 1 回)、2 つ目以降の会話の
+/// RoPE 部分だけを自分の位置で書き直す。
+///  `par`: as `one_absorb` with each conversation's steps on a stream of its own (`Ctx.par_streams`), parallel branches
+/// of the captured graph, over scratch of its own rows (`parView`).
+/// `par` は `one_absorb` に加えて、会話ごとの段をそれぞれの stream (`Ctx.par_streams`) で、capture した graph の並列の
+/// 枝として、自分の行の作業領域 (`parView`) で回す。
+pub const MultiComm = enum { per, one, one_absorb, par };
 
 /// A rank's tensor-parallel context and the kernels the forward launches.
 /// ランクの tensor-parallel の文脈と、forward が起動するカーネル。
@@ -751,6 +810,16 @@ pub const Ctx = struct {
     pek: ?*const prompt_experts.Kernels = null,
     pes: ?*const prompt_experts.Scratch = null,
     pe_ok: []const bool = &.{},
+    /// TF_GLM53_EXPERT_LIVE: the device address of the target decode windows' pick log (layer l, row r at
+    /// (l * log_rows + r) * 8); 0 in every other context (prompt, MTP draft, off).
+    /// TF_GLM53_EXPERT_LIVE: target の decode ウィンドウの選択ログのデバイスアドレス (層 l、行 r は
+    /// (l * log_rows + r) * 8)。ほかの文脈 (prompt、MTP の draft、無効) では 0。
+    pick_log: u64 = 0,
+    /// TF_GLM53_EXPERT_LIVE on rank 0: the device address of the prompt chunks' pick counts (u32, layer l's expert e
+    /// at (l * experts + e) * 4, l < log_layers); 0 in every other context (decode, MTP draft, off, the other ranks).
+    /// TF_GLM53_EXPERT_LIVE の rank 0: prompt チャンクの選択の数のデバイスアドレス (u32、層 l の expert e は
+    /// (l * experts + e) * 4、l < log_layers)。ほかの文脈 (decode、MTP の draft、無効、ほかのランク) では 0。
+    prompt_hist: u64 = 0,
     /// The prompt GEMMs' unpacked weights, shared by the SP parts, and this context's stream index in it (0 main, 1 the
     /// SP comm stream).
     /// prompt の GEMM 用に展開した重み (SP の part で共有) と、その中でのこの文脈のストリーム番号 (0 は main、1 は
@@ -818,6 +887,20 @@ pub const Ctx = struct {
     /// TF_GLM53_INDEX_FP8 (既定 off、選択が変わる): indexer の点数を FP8 の tensor core 積で計算し、query を e4m3 に
     /// 量子化する (`scores`、`iqPrep`)。native カーネルが必要。
     index_fp8: bool = false,
+    /// windowMulti's `par`: a stream a conversation, and events (0: the fork, 1 + j: conversation j's join).
+    /// windowMulti の `par`: 会話ごとの stream と event (0 は分岐、1 + j は会話 j の合流)。
+    par_streams: []const cuda.Stream = &.{},
+    par_events: []const cuda.Event = &.{},
+    /// Windows up to this many rows take the RoCE one-shot reduce and the bf16 lane (`gather`, `laneBf16`):
+    /// small_rows, multi_rows inside `windowMulti`.
+    /// この行数までのウィンドウは RoCE の one-shot の reduce と bf16 の lane を使う (`gather`、`laneBf16`):
+    /// small_rows。`windowMulti` の中では multi_rows。
+    window_rows: u32 = small_rows,
+    /// Windows of this many rows or more reduce their bf16 lane in two shots (roce.Runtime.allReduce2, b.dmid):
+    /// fewer bytes on the wire for wide windows, the same bits. Off by default.
+    /// この行数以上のウィンドウは bf16 の lane を 2 段で reduce する (roce.Runtime.allReduce2、b.dmid): 広い
+    /// ウィンドウで回線のバイトが減り、ビットは同じ。既定は使わない。
+    ar2_rows: u32 = std.math.maxInt(u32),
 
     /// emit with a label of its own in place of "L<layer>" (layer = maxInt: the probe writes `tag`).
     /// "L<layer>" の代わりに独自のラベルで emit する (layer = maxInt のとき probe は `tag` を書く)。
@@ -925,13 +1008,13 @@ pub const Ctx = struct {
     /// bf16 のまま保つ: fp32 -> bf16 -> reduce -> fp32 -> residual_add と同じバイトを、2 回の変換 (と expert の和の
     /// 加算) なしで得る。probe があるときは使わない (probe は fp32 の和をハッシュする)。
     fn laneBf16(c: *const Ctx, R: u32) bool {
-        return c.fuse and c.fast != null and R <= small_rows and c.decode_bf16 and c.b.dpart != null and c.probe == null;
+        return c.fuse and c.fast != null and R <= c.window_rows and c.decode_bf16 and c.b.dpart != null and c.probe == null;
     }
 
     const Gathered = struct { ptr: u64, world: u32, bf16: bool = false };
 
     fn gather(c: *const Ctx, R: u32) !Gathered {
-        if (c.fast) |f| if (R <= small_rows) {
+        if (c.fast) |f| if (R <= c.window_rows) {
             // the RoCE one-shot: the rank-order sum [1, R, D] (DECODE_BF16: of the bf16 partials, stored bf16, then
             // copied into the fp32 red)
             // RoCE の one-shot: ランク順の和 [1, R, D] (DECODE_BF16 なら bf16 の部分和の和を bf16 で受け、fp32 の
@@ -939,7 +1022,9 @@ pub const Ctx = struct {
             const b = c.b;
             const n: u64 = @as(u64, R) * c.cfg.hidden;
             if (c.laneBf16(R)) {
-                try f.allReduce(c.stream, b.dpart.?.ptr, b.dred.?.ptr, @intCast(n * 2), true);
+                if (R >= c.ar2_rows and b.dmid != null) {
+                    try f.allReduce2(c.stream, b.dpart.?.ptr, b.dmid.?.ptr, b.dred.?.ptr, @intCast(n * 2), true);
+                } else try f.allReduce(c.stream, b.dpart.?.ptr, b.dred.?.ptr, @intCast(n * 2), true);
                 return .{ .ptr = b.dred.?.ptr, .world = 1, .bf16 = true };
             }
             if (c.decode_bf16 and b.dpart != null) {
@@ -1257,6 +1342,7 @@ pub const Ctx = struct {
             // radix_min_rows 行未満は順不同 (マージが正確な順を取る)。それ以上は列の順の radix select で、マージの
             // 同点はその順に従う
             if (n < radix_min_rows and b.tk_state != null) {
+                if (@as(usize, n) * 1040 > b.tk_state.?.len) return error.TopkStateTooSmall;
                 try c.scores(ic, pos, b.sc.ptr, n, Tl, r0, true);
                 try c.glue.topkValuesWide(c.stream, b.sc.ptr, b.dmine.?.ptr, n, Tl, K, b.tk_state.?.ptr, b.tk_cand.?.ptr);
             } else try c.candidates(ic, pos, b.dmine.?.ptr, n, Tl, r0, true);
@@ -1391,6 +1477,459 @@ pub const Ctx = struct {
         try c.glue.pick(c.stream, b.amax_all.ptr, c.world, R, b.ids.ptr, b.tok_out.ptr);
     }
 
+    /// One verify window over several conversations (CUDA-graph capturable): conversation j's `rows` rows follow
+    /// conversation j - 1's in b.ids / b.x, each at its own position with its own caches and key range. The linears,
+    /// experts, reductions and head run once over all the rows; the cache writes, the indexer's selection, the
+    /// RoPE'd queries and the attention run per conversation (its DCP collectives too). Picks as `windowStep`. Every
+    /// conversation needs a key range (contexts past index_topk). `comm` (DCP > 1, `MultiComm`): `one` /
+    /// `one_absorb` run the selection's candidate gather, the query gather and the partials' exchange once over all
+    /// the rows instead of once a conversation (`selectMulti`, `attnDcpMulti`). Up to 16 rows, up to multi_rows
+    /// under `par` with DCP (`attentionPar`).
+    /// 複数の会話をまとめた verify ウィンドウ 1 つ (CUDA graph に capture できる): 会話 j の `rows` 行は b.ids / b.x の
+    /// 中で会話 j - 1 の行の後に続き、それぞれ自分の位置・キャッシュ・キー範囲を持つ。linear・expert・reduce・head は
+    /// 全行で 1 回、キャッシュの書き込み・indexer の選択・RoPE をかけた query・attention は会話ごと (DCP の
+    /// collective も)。選択の出力は `windowStep` と同じ。どの会話もキー範囲が要る (文脈が index_topk を超えること)。
+    /// `comm` (DCP > 1、`MultiComm`): `one` / `one_absorb` は選択の候補の gather、query の gather、部分結果の交換を、
+    /// 会話ごとではなく全行で 1 回にする (`selectMulti`、`attnDcpMulti`)。16 行まで。DCP の `par` では multi_rows
+    /// 行まで (`attentionPar`)。
+    pub fn windowMulti(c0: *const Ctx, seqs: []const WindowSeq, embed_table: u64, layers: []const model.Layer, norm: u64, lm_head: u64, vocab_share: u32, comm: MultiComm) !void {
+        const b = c0.b;
+        var R: u32 = 0;
+        for (seqs) |s| {
+            // `par` takes conversations below index_topk too (no selection for them)
+            // `par` は index_topk より手前の会話も受ける (その会話は選択しない)
+            if (s.t == null and comm != .par) return error.ShortContext;
+            R += s.rows;
+        }
+        if (R > multi_rows or (R > small_rows and (comm != .par or c0.dgroup == null))) return error.WindowTooWide;
+        var cw = c0.*;
+        cw.window_rows = multi_rows;
+        const c = &cw;
+        try c.embed(embed_table, R);
+        for (layers, 0..) |*L, i| try c.layerMulti(L, i, seqs, R, comm);
+        try c.headLogits(norm, lm_head, 0, R, vocab_share);
+        try c.glue.rowArgmax(c.stream, b.lpart.ptr, b.amax.ptr, R, vocab_share, c.rank * vocab_share);
+        if (c.fast) |f| {
+            try f.allGather(c.stream, b.amax.ptr, b.amax_all.ptr, 16 * R);
+        } else try c.group.lib.check(c.group.lib.api.ncclAllGather(b.amax.ptr, b.amax_all.ptr, 4 * @as(usize, R), .f32, c.group.comm, c.stream.handle), "ncclAllGather");
+        try c.glue.pick(c.stream, b.amax_all.ptr, c.world, R, b.ids.ptr, b.tok_out.ptr);
+    }
+
+    /// `layerPrompt` for a window over several conversations (`windowMulti`).
+    /// 複数の会話をまとめたウィンドウ (`windowMulti`) の `layerPrompt`。
+    fn layerMulti(c: *const Ctx, L: *const model.Layer, li: usize, seqs: []const WindowSeq, R: u32, comm: MultiComm) !void {
+        const b = c.b;
+        const D: u32 = @intCast(c.cfg.hidden);
+        try c.ops.rmsnorm(b.x.ptr, D, L.input_norm.ptr, b.normed.ptr, D, R, D, c.cfg.eps);
+        try c.attentionMulti(L, li, seqs, R, comm);
+        const a = try c.gather(R);
+        if (a.bf16) try c.ops.residualAddBf16(b.x.ptr, b.x.ptr, a.ptr, R, D) else try c.ops.residualAdd(b.x.ptr, b.x.ptr, a.ptr, R, D, a.world);
+        try c.ops.rmsnorm(b.x.ptr, D, L.post_attn_norm.ptr, b.normed.ptr, D, R, D, c.cfg.eps);
+        try c.ffnPart(L, R);
+        const f = try c.gather(R);
+        if (f.bf16) try c.ops.residualAddBf16(b.x.ptr, b.x.ptr, f.ptr, R, D) else try c.ops.residualAdd(b.x.ptr, b.x.ptr, f.ptr, R, D, f.world);
+        // after a tap layer (DFlash2): every row's x into column block s of b.taps [R, n_taps * D], as layerPrompt
+        // tap 層の後 (DFlash2): 全行の x を b.taps [R, n_taps * D] の列ブロック s に写す (layerPrompt と同じ)
+        if (L.index < c.tap_slot.len and c.tap_slot[L.index] >= 0) if (b.taps) |tp| {
+            const slot: usize = @intCast(c.tap_slot[L.index]);
+            try c.glue.scatter3(c.stream, b.x.ptr, try tp.at(slot * D * 2), 1, R, D, 0, @as(i64, c.n_taps) * D, false);
+        };
+    }
+
+    /// The buffers seen from row `o`: the attention's row-indexed buffers advanced by `o` rows, the scratch that the
+    /// per-conversation steps reuse in turn (scores, candidates, chunk partials, the DCP exchange) at its base.
+    /// `kva_n`: kv_a's output width (its rows' stride).
+    /// 行 `o` から見たバッファ: attention の行で引くバッファを `o` 行進め、会話ごとの段が順に使い回す作業領域 (点数、
+    /// 候補、チャンクの部分結果、DCP の交換) は先頭のまま。`kva_n`: kv_a の出力幅 (行のストライド)。
+    fn rowView(c: *const Ctx, o: u32, kva_n: usize) Buffers {
+        const cfg = c.cfg;
+        const b = c.b;
+        var v = b.*;
+        const r: usize = o;
+        const H: usize = c.heads;
+        const at = struct {
+            fn f(x: Buf, off: usize) Buf {
+                return view(x, off, x.len - off);
+            }
+        }.f;
+        v.normed = at(b.normed, r * cfg.hidden * 2);
+        v.qa = at(b.qa, r * cfg.q_lora * 2);
+        v.qn = at(b.qn, r * cfg.q_lora * 2);
+        v.kva = at(b.kva, r * kva_n * 2);
+        v.q = at(b.q, r * H * (cfg.qk_nope + cfg.qk_rope) * 2);
+        v.qlat = at(b.qlat, r * H * cfg.kv_lora * 2);
+        v.qrot = at(b.qrot, r * H * cfg.qk_rope * 2);
+        v.ol = at(b.ol, r * H * cfg.kv_lora * 2);
+        v.o = at(b.o, r * H * cfg.v_head * 2);
+        v.ik = at(b.ik, r * cfg.index_dim * 4);
+        v.iw = at(b.iw, r * cfg.index_heads * 4);
+        v.iq = at(b.iq, r * cfg.index_heads * cfg.index_dim * 2);
+        v.iq8 = at(b.iq8, r * cfg.index_heads * cfg.index_dim);
+        v.iqs = at(b.iqs, r * cfg.index_heads * 4);
+        v.tok = at(b.tok, r * cfg.index_topk * 4);
+        if (b.cnt) |x| v.cnt = at(x, r * 4);
+        if (b.qpack) |x| v.qpack = at(x, r * H * 576 * 2);
+        return v;
+    }
+
+    /// `attention` for a window over several conversations: the linears over all R rows, each conversation's cache
+    /// writes, query RoPE, selection, absorbed queries and attention on its rows (`rowView`), the value expansion and
+    /// o_proj over all R rows.
+    /// 複数の会話をまとめたウィンドウの `attention`: linear は全 R 行、会話ごとにキャッシュの書き込み・query の RoPE・
+    /// 選択・吸収済みの query・attention を自分の行 (`rowView`) で、value の展開と o_proj は全 R 行。
+    fn attentionMulti(c: *const Ctx, L: *const model.Layer, li: usize, seqs: []const WindowSeq, R: u32, comm: MultiComm) !void {
+        const cfg = c.cfg;
+        const b = c.b;
+        const H = c.heads;
+        const D: u32 = @intCast(cfg.hidden);
+        const kva_n: usize = L.kv_a.n;
+        if (comm == .par) if (c.dgroup) |dg| return c.attentionPar(dg, L, li, seqs, R);
+        const dg1: ?*const cuda.tp.Group = if (comm != .per) c.dgroup else null;
+        try c.lins(&.{ &L.q_a, &L.kv_a }, b.normed.ptr, R, &.{ b.qa.ptr, b.kva.ptr }, &.{ true, true });
+        try c.ops.rmsnorm(b.qa.ptr, @intCast(cfg.q_lora), L.q_a_norm.ptr, b.qn.ptr, @intCast(cfg.q_lora), R, @intCast(cfg.q_lora), cfg.eps);
+        var o: u32 = 0;
+        for (seqs) |s| {
+            try c.ops.kvWrite(b.kva.ptr + @as(u64, o) * kva_n * 2, L.kv_a.n, L.kv_a_norm.ptr, s.kc[li].ptr, s.pos, b.inv.ptr, cfg.eps, s.rows);
+            o += s.rows;
+        }
+        if (L.indexer) |ix| {
+            try c.ops.router(b.normed.ptr, D, ix.wk.ptr, b.rpart.ptr, b.ik.ptr, R, D, @intCast(cfg.index_dim));
+            o = 0;
+            for (seqs) |s| {
+                try c.ops.ikWrite(b.ik.ptr + @as(u64, o) * cfg.index_dim * 4, ix.k_norm_w.ptr, ix.k_norm_b.ptr, b.inv.ptr, s.ic[li].?.ptr, s.pos, s.rows);
+                o += s.rows;
+            }
+            try c.ops.router(b.normed.ptr, D, ix.weights_proj.ptr, b.rpart.ptr, b.iw.ptr, R, D, @intCast(cfg.index_heads));
+            try c.lins(&.{ &ix.wq_b, &L.q_b }, b.qn.ptr, R, &.{ b.iq.ptr, b.q.ptr }, &.{ true, true });
+            o = 0;
+            for (seqs) |s| {
+                try c.ops.iqRope(b.iq.ptr + @as(u64, o) * cfg.index_heads * cfg.index_dim * 2, b.inv.ptr, s.pos, s.rows);
+                o += s.rows;
+            }
+            try c.iqPrep(0, R);
+            if (dg1) |dg| try c.selectMulti(dg, li, seqs, R, kva_n) else {
+                o = 0;
+                for (seqs) |s| {
+                    var bv = c.rowView(o, kva_n);
+                    var cv = c.*;
+                    cv.b = &bv;
+                    try cv.select(s.rows, s.t.?, s.ic[li].?.ptr, s.pos);
+                    o += s.rows;
+                }
+            }
+        } else try c.lin(&L.q_b, b.qn.ptr, R, b.q.ptr, true);
+        if (dg1) |dg| return c.attnDcpMulti(dg, L, li, seqs, R, kva_n, comm == .one_absorb);
+        o = 0;
+        for (seqs) |s| {
+            var bv = c.rowView(o, kva_n);
+            var cv = c.*;
+            cv.b = &bv;
+            try cv.coreQ(L, s.rows, s.pos, true);
+            const kc = s.kc[li].ptr;
+            if (c.dgroup) |dg| try cv.attentionDcp(dg, s.rows, kc, s.pos) else {
+                const nch: u32 = @intCast(cfg.index_topk / 256);
+                try cv.ops.attnChunks(bv.qlat.ptr, bv.qrot.ptr, kc, bv.tok.ptr, s.pos, bv.po.ptr, bv.pm.ptr, bv.pl.ptr, s.rows, H, nch, 256, 32, false);
+                try cv.ops.merge(bv.po.ptr, bv.pm.ptr, bv.pl.ptr, bv.ol.ptr, bv.dummy.ptr, s.rows, H, nch);
+            }
+            o += s.rows;
+        }
+        try c.coreOut(L, R);
+    }
+
+    /// `selectDcp` for a window over several conversations with one candidate gather: each conversation's scores and
+    /// its index_topk best packed keys of this rank's slots into its rows of b.dmine, the group's candidates of all
+    /// the rows gathered once, the global picks of every row (`dcpSelect` reads each row at the window's stride).
+    /// Windows below radix_min_rows rows only (the any-order candidates, as selectDcp takes there).
+    /// 複数の会話をまとめたウィンドウの `selectDcp` (候補の gather は 1 回): 会話ごとに点数を付け、このランクの
+    /// スロットの packed キーの上位 index_topk 個を b.dmine の自分の行に書き、全行のグループの候補を 1 回で集め、
+    /// 全行の全体の選択を出す (`dcpSelect` は各行をウィンドウの間隔で読む)。radix_min_rows 行未満のウィンドウだけ
+    /// (selectDcp がそこで使う順不同の候補)。
+    fn selectMulti(c: *const Ctx, dg: *const cuda.tp.Group, li: usize, seqs: []const WindowSeq, R: u32, kva_n: usize) !void {
+        const b = c.b;
+        const K: u32 = @intCast(c.cfg.index_topk);
+        const G: u32 = dg.world;
+        if (R >= radix_min_rows or b.tk_state == null) return error.WindowTooWide;
+        var o: u32 = 0;
+        for (seqs) |s| {
+            const T = s.t.?;
+            if (T > b.keys) return error.TooManyKeys;
+            const Tl = (T + G - 1) / G;
+            if (@as(usize, s.rows) * 1040 > b.tk_state.?.len) return error.TopkStateTooSmall;
+            var bv = c.rowView(o, kva_n);
+            var cv = c.*;
+            cv.b = &bv;
+            try cv.scores(s.ic[li].?.ptr, s.pos, b.sc.ptr, s.rows, Tl, 0, true);
+            try c.glue.topkValuesWide(c.stream, b.sc.ptr, b.dmine.?.ptr + @as(u64, o) * K * 8, s.rows, Tl, K, b.tk_state.?.ptr, b.tk_cand.?.ptr);
+            o += s.rows;
+        }
+        const cb: usize = @as(usize, R) * K * 8;
+        if (c.dfast != null and cb <= roce.max_bytes) {
+            try c.dfast.?.allGather(c.stream, b.dmine.?.ptr, b.cand.?.ptr, @intCast(cb));
+        } else try dg.lib.check(dg.lib.api.ncclAllGather(b.dmine.?.ptr, b.cand.?.ptr, @as(usize, R) * K, .i64, dg.comm, c.stream.handle), "ncclAllGather");
+        try c.glue.dcpSelect(c.stream, b.cand.?.ptr, b.tok.ptr, b.cnt.?.ptr, R, R, K, G, dg.rank, false);
+    }
+
+    /// `attentionDcp` + `coreOut` for a window over several conversations with one query gather and one exchange:
+    /// each conversation's absorbed queries into its rows of b.qpack, every row's gathered once (b.qall [G, R, H, 576]);
+    /// per conversation its queries copied out as [G, n, H, 576] (b.orecv, unused by decode windows), its attention
+    /// over its keys and the chunk merge into [G, n, H, 512] + [G, n, H] (b.xrecv, free until the exchange), scattered
+    /// into its rows of the window's exchange block (b.xsend); one exchange and one combine of all the rows; the value
+    /// expansion and o_proj.
+    /// 複数の会話をまとめたウィンドウの `attentionDcp` + `coreOut` (query の gather と交換は 1 回): 会話ごとの吸収済みの
+    /// query を b.qpack の自分の行に書き、全行を 1 回で集める (b.qall [G, R, H, 576])。会話ごとに、その query を
+    /// [G, n, H, 576] で取り出し (b.orecv、decode ウィンドウでは使わない)、自分のキーで attention し、チャンクの
+    /// merge を [G, n, H, 512] + [G, n, H] に書き (b.xrecv、交換までは空き)、ウィンドウの交換ブロック (b.xsend) の
+    /// 自分の行へ散らす。全行の交換と結合を 1 回ずつ。value の展開と o_proj。
+    fn attnDcpMulti(c: *const Ctx, dg: *const cuda.tp.Group, L: *const model.Layer, li: usize, seqs: []const WindowSeq, R: u32, kva_n: usize, absorb_once: bool) !void {
+        const b = c.b;
+        const H = c.heads;
+        const G: u32 = dg.world;
+        if (R > small_rows) return error.WindowTooWide;
+        var o: u32 = 0;
+        if (absorb_once and c.fuse) {
+            // every row's absorbed queries at the first conversation's positions (the latent part does not depend on
+            // the position), then each later conversation's RoPE part at its own: the bytes of one absorb each
+            // 全行の吸収済みの query を最初の会話の位置で作り (latent 部分は位置に依らない)、2 つ目以降の会話の RoPE
+            // 部分を自分の位置で書き直す: 会話ごとの absorb と同じバイト
+            try c.ops.absorbPacked(b.q.ptr, L.wk.ptr, b.inv.ptr, b.qpack.?.ptr, seqs[0].pos, R, H);
+            o = seqs[0].rows;
+            for (seqs[1..]) |s| {
+                const bv = c.rowView(o, kva_n);
+                try c.ops.qropePacked(bv.q.ptr, b.inv.ptr, bv.qpack.?.ptr, s.pos, s.rows, H);
+                o += s.rows;
+            }
+        } else for (seqs) |s| {
+            var bv = c.rowView(o, kva_n);
+            var cv = c.*;
+            cv.b = &bv;
+            try cv.coreQ(L, s.rows, s.pos, true);
+            o += s.rows;
+        }
+        try c.dcpGatherQ(dg, R);
+        const nch: u32 = @intCast(c.cfg.index_topk / 256);
+        const qrow: u32 = H * 576;
+        const qseq = b.orecv.?.ptr;
+        const xs = b.xrecv.?.ptr;
+        const xo = b.xsend.?.ptr;
+        const xl = xo + @as(u64, G) * R * H * 1024;
+        o = 0;
+        for (seqs) |s| {
+            const n = s.rows;
+            // 4-byte elements: half the counts and strides of the bf16 rows
+            // 4 バイト要素: bf16 の行の数とストライドの半分
+            try c.glue.copy3(c.stream, b.qall.?.ptr + @as(u64, o) * qrow * 2, qseq, G, n, qrow / 2, @as(i64, R) * (qrow / 2), qrow / 2, true);
+            const tok = try b.tok.at(@as(usize, o) * c.cfg.index_topk * 4);
+            const cnt = try b.cnt.?.at(@as(usize, o) * 4);
+            try c.ops.attnDcpAll(qseq, s.kc[li].ptr, tok, cnt, s.pos, b.po.ptr, b.pm.ptr, b.pl.ptr, n, H, G, nch, 256, 32);
+            const ls = xs + @as(u64, G) * n * H * 1024;
+            try c.ops.mergeLse(b.po.ptr, b.pm.ptr, b.pl.ptr, xs, ls, n, G * H, H, nch);
+            try c.glue.scatter3(c.stream, xs, xo + @as(u64, o) * H * 1024, G, n, H * 256, @as(i64, R) * H * 256, H * 256, true);
+            try c.glue.scatter3(c.stream, ls, xl + @as(u64, o) * H * 4, G, n, H, @as(i64, R) * H, H, true);
+            o += n;
+        }
+        try c.dcpExchange(dg, R);
+        try c.dcpCombine(dg, R);
+        try c.coreOut(L, R);
+    }
+
+    /// `rowView` with the scratch of the per-conversation steps also at the conversation's rows, so that conversations
+    /// run at once (`par`): the scores and the top-k candidates (rows of `keysl` slots), the top-k states, the chunk
+    /// partials ([nch, n, G H] per conversation).
+    /// `rowView` に加えて、会話ごとの段の作業領域も会話の行に置く (会話を同時に回す `par` 用): 点数と top-k の候補
+    /// (行は `keysl` スロット)、top-k の状態、チャンクの部分結果 (会話ごとに [nch, n, G H])。
+    fn parView(c: *const Ctx, o: u32, kva_n: usize, keysl: usize, G: u32) Buffers {
+        const b = c.b;
+        var v = c.rowView(o, kva_n);
+        const r: usize = o;
+        const ht: usize = @as(usize, G) * c.heads;
+        const nch: usize = c.cfg.index_topk / 256;
+        const at = struct {
+            fn f(x: Buf, off: usize) Buf {
+                return view(x, off, x.len - off);
+            }
+        }.f;
+        v.sc = at(b.sc, r * keysl * 8);
+        if (b.tk_state) |x| v.tk_state = at(x, r * 1040);
+        if (b.tk_cand) |x| v.tk_cand = at(x, r * keysl * 8);
+        v.po = at(b.po, r * nch * ht * 512 * 4);
+        v.pm = at(b.pm, r * nch * ht * 4);
+        v.pl = at(b.pl, r * nch * ht * 4);
+        return v;
+    }
+
+    fn parFork(c: *const Ctx, n: usize) !void {
+        try c.par_events[0].record(c.stream);
+        for (c.par_streams[0..n]) |s| try s.wait(c.par_events[0]);
+    }
+
+    fn parJoin(c: *const Ctx, n: usize) !void {
+        for (0..n) |j| {
+            try c.par_events[1 + j].record(c.par_streams[j]);
+            try c.stream.wait(c.par_events[1 + j]);
+        }
+    }
+
+    const max_par = 8; // conversations a `par` window / `par` のウィンドウの会話数
+    const XGroup = struct { o: u32, n: u32, off: u64 };
+
+    /// `attentionPar`'s exchange groups: consecutive whole conversations while their exchange block (xBytes) stays
+    /// within roce.max_bytes; each group's rows (from o, n of them) and its block's byte offset in b.xsend (its
+    /// received blocks at G x that in b.xrecv). `of[j]`: conversation j's group. Returns the number of groups.
+    /// `attentionPar` の交換のまとまり: 交換ブロック (xBytes) が roce.max_bytes に収まる間、続く会話を丸ごとまとめる。
+    /// まとまりごとの行 (o から n 行) と、b.xsend の中のブロックのバイト位置 (受け取るブロックは b.xrecv の G 倍の
+    /// 位置)。`of[j]`: 会話 j のまとまり。まとまりの数を返す。
+    fn xGroups(c: *const Ctx, G: u32, seqs: []const WindowSeq, out: *[max_par]XGroup, of: *[max_par]u8) !usize {
+        if (seqs.len > max_par) return error.WindowTooWide;
+        var ng: usize = 0;
+        var o: u32 = 0;
+        var off: u64 = 0;
+        for (seqs, 0..) |s, j| {
+            if (ng == 0 or c.xBytes(G, out[ng - 1].n + s.rows) > roce.max_bytes) {
+                if (ng > 0) off += c.xBytes(G, out[ng - 1].n);
+                out[ng] = .{ .o = o, .n = 0, .off = off };
+                ng += 1;
+            }
+            out[ng - 1].n += s.rows;
+            of[j] = @intCast(ng - 1);
+            o += s.rows;
+        }
+        return ng;
+    }
+
+    /// `attentionMulti` under `par` (DCP, windows below radix_min_rows rows): the linears over all rows on the main
+    /// stream; branch A, a stream a conversation: its cache writes, index query RoPE, scores and candidates (into its
+    /// rows of b.dmine); on main the candidate gather and the picks of all rows, the absorbed queries of all rows (each
+    /// later conversation's RoPE part rewritten) and the query gather; branch B: each conversation's queries copied
+    /// out, its attention, chunk merge and scatter into the exchange block; on main the exchange, the combine and
+    /// coreOut. The same steps and bytes as `one_absorb`. Up to multi_rows rows: the query gather here (dcpGatherQ
+    /// leaves windows past 16 rows to peerQ), the exchange in groups of whole conversations whose blocks pass
+    /// roce.max_bytes (`xGroups`).
+    /// `par` での `attentionMulti` (DCP、radix_min_rows 行未満のウィンドウ): linear は全行を main stream で。枝 A は会話
+    /// ごとの stream で、キャッシュの書き込み・index query の RoPE・点数と候補 (b.dmine の自分の行へ)。main で候補の
+    /// gather と全行の選択、全行の吸収済みの query (2 つ目以降の会話の RoPE 部分を書き直す)、query の gather。枝 B は
+    /// 会話ごとに query の取り出し・attention・チャンクの merge・交換ブロックへの散らし。main で交換・結合・coreOut。
+    /// 段とバイトは `one_absorb` と同じ。multi_rows 行まで: query の gather はここで (dcpGatherQ は 16 行を超える
+    /// ウィンドウを peerQ に任せる)、交換は、ブロックが roce.max_bytes に収まる会話のまとまりごと (`xGroups`)。
+    fn attentionPar(c: *const Ctx, dg: *const cuda.tp.Group, L: *const model.Layer, li: usize, seqs: []const WindowSeq, R: u32) !void {
+        const cfg = c.cfg;
+        const b = c.b;
+        const H = c.heads;
+        const G: u32 = dg.world;
+        const D: u32 = @intCast(cfg.hidden);
+        const K: u32 = @intCast(cfg.index_topk);
+        const kva_n: usize = L.kv_a.n;
+        if (R > multi_rows or b.tk_state == null or !c.fuse) return error.WindowTooWide;
+        if (c.par_streams.len < seqs.len or c.par_events.len < seqs.len + 1) return error.NoParallelStreams;
+        var xg: [max_par]XGroup = undefined;
+        var xof: [max_par]u8 = undefined;
+        const ng = try c.xGroups(G, seqs, &xg, &xof);
+        const keysl: usize = (b.keys + G - 1) / G;
+        try c.lins(&.{ &L.q_a, &L.kv_a }, b.normed.ptr, R, &.{ b.qa.ptr, b.kva.ptr }, &.{ true, true });
+        try c.ops.rmsnorm(b.qa.ptr, @intCast(cfg.q_lora), L.q_a_norm.ptr, b.qn.ptr, @intCast(cfg.q_lora), R, @intCast(cfg.q_lora), cfg.eps);
+        if (L.indexer) |ix| {
+            try c.ops.router(b.normed.ptr, D, ix.wk.ptr, b.rpart.ptr, b.ik.ptr, R, D, @intCast(cfg.index_dim));
+            try c.ops.router(b.normed.ptr, D, ix.weights_proj.ptr, b.rpart.ptr, b.iw.ptr, R, D, @intCast(cfg.index_heads));
+            try c.lins(&.{ &ix.wq_b, &L.q_b }, b.qn.ptr, R, &.{ b.iq.ptr, b.q.ptr }, &.{ true, true });
+            try c.iqPrep(0, R);
+        } else try c.lin(&L.q_b, b.qn.ptr, R, b.q.ptr, true);
+        // branch A
+        // 枝 A
+        try c.parFork(seqs.len);
+        var o: u32 = 0;
+        for (seqs, 0..) |s, j| {
+            var bv = c.parView(o, kva_n, keysl, G);
+            var cv = c.*;
+            cv.b = &bv;
+            cv.stream = c.par_streams[j];
+            cv.ops.stream = c.par_streams[j];
+            if (s.pmap != 0) cv.ops.pmap = s.pmap;
+            try cv.ops.kvWrite(bv.kva.ptr, L.kv_a.n, L.kv_a_norm.ptr, s.kc[li].ptr, s.pos, b.inv.ptr, cfg.eps, s.rows);
+            if (L.indexer) |ix| {
+                try cv.ops.ikWrite(bv.ik.ptr, ix.k_norm_w.ptr, ix.k_norm_b.ptr, b.inv.ptr, s.ic[li].?.ptr, s.pos, s.rows);
+                if (s.t) |T| {
+                    if (T > b.keys) return error.TooManyKeys;
+                    const Tl = (T + G - 1) / G;
+                    if (@as(usize, s.rows) * 1040 > bv.tk_state.?.len) return error.TopkStateTooSmall;
+                    try cv.ops.iqRope(bv.iq.ptr, b.inv.ptr, s.pos, s.rows);
+                    try cv.scores(s.ic[li].?.ptr, s.pos, bv.sc.ptr, s.rows, Tl, 0, true);
+                    try cv.glue.topkValuesWide(cv.stream, bv.sc.ptr, b.dmine.?.ptr + @as(u64, o) * K * 8, s.rows, Tl, K, bv.tk_state.?.ptr, bv.tk_cand.?.ptr);
+                } else {
+                    // rows below index_topk: the attention reads every key and none of the picks; zero candidates keep
+                    // the shared selection's input defined
+                    // index_topk より手前の行: attention は全キーを読み、選択の結果は使わない。候補を 0 にして、共通の
+                    // 選択の入力を決まった値にしておく
+                    try view(b.dmine.?, @as(usize, o) * K * 8, @as(usize, s.rows) * K * 8).fill8(0, cv.stream.handle);
+                }
+            }
+            o += s.rows;
+        }
+        try c.parJoin(seqs.len);
+        if (L.indexer != null) {
+            const cb: usize = @as(usize, R) * K * 8;
+            if (c.dfast != null and cb <= roce.max_bytes) {
+                try c.dfast.?.allGather(c.stream, b.dmine.?.ptr, b.cand.?.ptr, @intCast(cb));
+            } else try dg.lib.check(dg.lib.api.ncclAllGather(b.dmine.?.ptr, b.cand.?.ptr, @as(usize, R) * K, .i64, dg.comm, c.stream.handle), "ncclAllGather");
+            try c.glue.dcpSelect(c.stream, b.cand.?.ptr, b.tok.ptr, b.cnt.?.ptr, R, R, K, G, dg.rank, false);
+        }
+        try c.ops.absorbPacked(b.q.ptr, L.wk.ptr, b.inv.ptr, b.qpack.?.ptr, seqs[0].pos, R, H);
+        o = seqs[0].rows;
+        for (seqs[1..]) |s| {
+            const bv = c.rowView(o, kva_n);
+            try c.ops.qropePacked(bv.q.ptr, b.inv.ptr, bv.qpack.?.ptr, s.pos, s.rows, H);
+            o += s.rows;
+        }
+        const qb: usize = @as(usize, R) * H * 576 * 2;
+        if (c.dfast != null and qb <= roce.max_bytes) {
+            try c.dfast.?.allGather(c.stream, b.qpack.?.ptr, b.qall.?.ptr, @intCast(qb));
+        } else try dg.lib.check(dg.lib.api.ncclAllGather(b.qpack.?.ptr, b.qall.?.ptr, @as(usize, R) * H * 576, .bf16, dg.comm, c.stream.handle), "ncclAllGather");
+        // branch B
+        // 枝 B
+        const nch: u32 = @intCast(cfg.index_topk / 256);
+        const qrow: u32 = H * 576;
+        try c.parFork(seqs.len);
+        o = 0;
+        for (seqs, 0..) |s, j| {
+            const n = s.rows;
+            const bv = c.parView(o, kva_n, keysl, G);
+            const st = c.par_streams[j];
+            var ops = c.ops;
+            ops.stream = st;
+            if (s.pmap != 0) ops.pmap = s.pmap;
+            const qseq = b.orecv.?.ptr + @as(u64, G) * o * qrow * 2;
+            const xs = b.xrecv.?.ptr + @as(u64, G) * o * H * 1028;
+            const ls = xs + @as(u64, G) * n * H * 1024;
+            // into the exchange block of its group (rows g.o .. g.o + g.n - 1 of the window)
+            // 自分のまとまりの交換ブロックへ (ウィンドウの行 g.o .. g.o + g.n - 1)
+            const g = xg[xof[j]];
+            const xo = b.xsend.?.ptr + g.off;
+            const xl = xo + @as(u64, G) * g.n * H * 1024;
+            const ol: u64 = o - g.o;
+            try c.glue.copy3(st, b.qall.?.ptr + @as(u64, o) * qrow * 2, qseq, G, n, qrow / 2, @as(i64, R) * (qrow / 2), qrow / 2, true);
+            try ops.attnDcpAll(qseq, s.kc[li].ptr, bv.tok.ptr, bv.cnt.?.ptr, s.pos, bv.po.ptr, bv.pm.ptr, bv.pl.ptr, n, H, G, nch, 256, 32);
+            try ops.mergeLse(bv.po.ptr, bv.pm.ptr, bv.pl.ptr, xs, ls, n, G * H, H, nch);
+            try c.glue.scatter3(st, xs, xo + ol * H * 1024, G, n, H * 256, @as(i64, g.n) * H * 256, H * 256, true);
+            try c.glue.scatter3(st, ls, xl + ol * H * 4, G, n, H, @as(i64, g.n) * H, H, true);
+            o += n;
+        }
+        try c.parJoin(seqs.len);
+        // each group's exchange and combine (one group up to 16 rows, and for TP 8's windows)
+        // まとまりごとの交換と結合 (16 行まで、および TP 8 のウィンドウは 1 つ)
+        const me: u64 = dg.rank;
+        const lw: u64 = cfg.kv_lora;
+        for (xg[0..ng]) |g| {
+            const xb = c.xBytes(G, g.n);
+            const src = b.xsend.?.ptr + g.off;
+            const xr = b.xrecv.?.ptr + @as(u64, G) * g.off;
+            if (c.dfast != null and xb <= roce.max_bytes) {
+                try c.dfast.?.allGather(c.stream, src, xr, xb);
+            } else try dg.lib.check(dg.lib.api.ncclAllGather(src, xr, xb, .u8, dg.comm, c.stream.handle), "ncclAllGather");
+            const per_o: u64 = @as(u64, g.n) * H * 512;
+            const per_l: u64 = @as(u64, g.n) * H;
+            try c.ops.dcpCombine(xr + me * per_o * 2, xr + @as(u64, G) * per_o * 2 + me * per_l * 4, b.ol.ptr + @as(u64, g.o) * H * lw * 2, g.n, xb / 2, xb / 4, H, G);
+        }
+        try c.coreOut(L, R);
+    }
+
     /// The MLP: gate and up (EXL3), SwiGLU, down into `out` (fp32 unless `out_bf16`).
     /// MLP: gate と up (EXL3)、SwiGLU、down を `out` に (`out_bf16` でなければ fp32)。
     fn mlp(c: *const Ctx, m: *const model.Mlp, R: u32, out: u64, out_bf16: bool) !void {
@@ -1410,7 +1949,8 @@ pub const Ctx = struct {
             // route: router logits (bf16 GEMM) and the sigmoid + bias top-8
             // ルーティング: router の logit (bf16 GEMM) と sigmoid + bias の top-8
             try c.ops.router(b.normed.ptr, D, L.router_w.?.ptr, b.rpart.ptr, b.mlog.ptr, R, D, @intCast(c.cfg.experts));
-            try c.ops.topk(b.mlog.ptr, L.router_bias.?.ptr, b.pick.ptr, b.wts.ptr, R, c.cfg.routed_scaling);
+            const log: u64 = if (c.pick_log != 0 and R <= log_rows and L.index < log_layers) c.pick_log + L.index * log_rows * 8 else 0;
+            try c.ops.topk(b.mlog.ptr, L.router_bias.?.ptr, b.pick.ptr, b.wts.ptr, R, c.cfg.routed_scaling, log);
         }
         return c.ffnMain(L, R);
     }
@@ -1432,6 +1972,12 @@ pub const Ctx = struct {
             }
             return c.mlp(&L.mlp, R, b.part.ptr, false);
         };
+        // the prompt's picks counted here, once a row: the SP parts' picks are gathered by now (spFrontFfn)
+        // prompt の選択はここで 1 行 1 回数える: SP の part の選択はこの時点で集めてある (spFrontFfn)
+        if (c.prompt_hist != 0 and L.index < log_layers) {
+            const E: u32 = @intCast(c.cfg.experts);
+            try c.ops.pickHist(b.pick.ptr, R, c.prompt_hist + @as(u64, L.index) * E * 4, E);
+        }
         // the routed experts' sum went through bf16 (prompt_experts), or would have
         // routed expert の和が bf16 を経た (prompt_experts)、または経るはずだった
         var rounded = false;
@@ -1757,7 +2303,7 @@ fn spFrontFfn(c: *const Ctx, h: *const SpPart, L: *const model.Layer) !void {
     const E: u32 = @intCast(cfg.experts);
     const tk: usize = cfg.top_k;
     try c.ops.router(nx, D, L.router_w.?.ptr, b.rpart.ptr, b.mlog.ptr + o * E * 4, n, D, E);
-    try c.ops.topk(b.mlog.ptr + o * E * 4, L.router_bias.?.ptr, b.pick.ptr + o * tk * 4, b.wts.ptr + o * tk * 4, n, c.cfg.routed_scaling);
+    try c.ops.topk(b.mlog.ptr + o * E * 4, L.router_bias.?.ptr, b.pick.ptr + o * tk * 4, b.wts.ptr + o * tk * 4, n, c.cfg.routed_scaling, 0);
     try spAgRows(c, h, &.{ .{ b.normed.ptr, D * 2 }, .{ b.pick.ptr, tk * 4 }, .{ b.wts.ptr, tk * 4 } });
 }
 
@@ -1772,58 +2318,99 @@ fn spFrontFfn(c: *const Ctx, h: *const SpPart, L: *const model.Layer) !void {
 /// を返す。`head` (prompt の最後のチャンク) なら、その b.x に part の最終 residual stream の行が入る。他の part や
 /// チャンクの分は誰も読まない。
 pub fn promptSp(parts: []SpPart, want: u32, ready: cuda.Event, ids: []const i64, a: u32, embed_table: u64, layers: []const model.Layer, kc: []const Buf, ic: []const ?Buf, t: ?u32, taps: ?u64, tap_row: usize, head: bool, extra: ?SpExtra) !*SpPart {
-    const R: u32 = @intCast(ids.len);
-    const P = spParts(R, want);
-    if (P > parts.len) return error.SpParts;
-    const c0 = &parts[0].main;
-    const main = c0.stream;
-    const comm = parts[0].side.stream;
-    const W = c0.world;
-    const D: u32 = @intCast(c0.cfg.hidden);
-    const dg = c0.dgroup orelse return error.SpNeedsDcp;
-    var offs: [sp_max_parts + 1]u32 = undefined;
-    if (P == 2) {
-        offs[0] = 0;
-        offs[1] = R / 2;
-        offs[2] = R;
-    } else for (0..P + 1) |k| {
-        offs[k] = @intCast(k * R / P);
-    }
-    const hs = parts[0..P];
-    for (hs, 0..) |*h, k| {
-        h.R = offs[k + 1] - offs[k];
-        h.n = (h.R + W - 1) / W;
-        h.Rp = h.n * W;
-        h.o = c0.rank * h.n;
-        h.nv = if (h.R > h.o) @min(h.n, h.R - h.o) else 0;
-        if (h.Rp > h.main.b.rows) return error.SpPartTooWide;
-        if (taps) |tp| h.main.b.taps = .{ .d = h.main.b.x.d, .ptr = tp + offs[k] * tap_row, .len = h.R * tap_row };
-    }
-    const n_layers = layers.len;
-    const side = struct {
-        fn begin(rd: cuda.Event, m: cuda.Stream, cs: cuda.Stream) !void {
-            try rd.record(m);
-            try cs.wait(rd);
+    var ch = try SpChunk.begin(parts, want, ready, ids, a, embed_table, layers, kc, ic, t, taps, tap_row, head, extra);
+    for (0..layers.len) |i| try ch.layer(i);
+    return ch.finish();
+}
+
+/// The comm stream after the main stream's work so far (through `ready`).
+/// comm ストリームを、ここまでの main ストリームの処理の後にする (`ready` で)。
+fn sideBegin(rd: cuda.Event, m: cuda.Stream, cs: cuda.Stream) !void {
+    try rd.record(m);
+    try cs.wait(rd);
+}
+
+/// promptSp in steps: `begin` (the parts' rows, positions, embeddings, layer 0's front), `layer` once a layer in order,
+/// `finish`. The same launches in the same order as promptSp; between the steps a caller may put other work on the
+/// streams (tests: a decode round between layers).
+/// promptSp を段に分けたもの: `begin` (part の行・位置・埋め込み・層 0 の前段)、層ごとに順に 1 回の `layer`、`finish`。
+/// 起動するものもその順も promptSp と同じ。段の間で呼び出し側が別の処理を stream に入れてよい (試験: 層の間に decode の
+/// ラウンド)。
+pub const SpChunk = struct {
+    hs: []SpPart,
+    P: u32,
+    offs: [sp_max_parts + 1]u32,
+    ready: cuda.Event,
+    main: cuda.Stream,
+    comm: cuda.Stream,
+    dg: *const cuda.tp.Group,
+    D: u32,
+    layers: []const model.Layer,
+    kc: []const Buf,
+    ic: []const ?Buf,
+    t: ?u32,
+    head: bool,
+    extra: ?SpExtra,
+
+    pub fn begin(parts: []SpPart, want: u32, ready: cuda.Event, ids: []const i64, a: u32, embed_table: u64, layers: []const model.Layer, kc: []const Buf, ic: []const ?Buf, t: ?u32, taps: ?u64, tap_row: usize, head: bool, extra: ?SpExtra) !SpChunk {
+        const R: u32 = @intCast(ids.len);
+        const P = spParts(R, want);
+        if (P > parts.len) return error.SpParts;
+        const c0 = &parts[0].main;
+        const main = c0.stream;
+        const comm = parts[0].side.stream;
+        const W = c0.world;
+        const D: u32 = @intCast(c0.cfg.hidden);
+        const dg = c0.dgroup orelse return error.SpNeedsDcp;
+        var offs: [sp_max_parts + 1]u32 = undefined;
+        if (P == 2) {
+            offs[0] = 0;
+            offs[1] = R / 2;
+            offs[2] = R;
+        } else for (0..P + 1) |k| {
+            offs[k] = @intCast(k * R / P);
         }
-    };
-    // start: ids, positions, the own rows' embeddings, layer 0's front
-    // 開始: ids、位置、自分の行の埋め込み、層 0 の前段
-    for (hs, 0..) |*h, k| {
-        const s = &h.side;
-        const b = s.b;
-        try side.begin(ready, main, comm);
-        try b.ids.uploadAsync(0, std.mem.sliceAsBytes(ids[offs[k]..offs[k + 1]]), comm.handle);
-        const p0 = a + offs[k];
-        try view(b.ppos.?, 0, 4).fill32(p0, comm.handle);
-        try view(b.ppos.?, 16, 4).fill32(p0 + h.o, comm.handle);
-        try view(b.ppos.?, 32, 4).fill32(p0 + (c0.rank / dg.world) * dg.world * h.n, comm.handle);
-        if (h.nv > 0) try s.glue.gatherRows(comm, embed_table, b.ids.ptr + @as(u64, h.o) * 8, b.xo.?.ptr, h.nv, D);
-        if (h.n > h.nv) try view(b.xo.?, h.nv * D * 2, (h.n - h.nv) * D * 2).fill8(0, comm.handle);
-        try spFrontAttn(s, h, &layers[0], kc[0].ptr, if (ic[0]) |x| x.ptr else null, t);
-        try h.done.record(comm);
+        const hs = parts[0..P];
+        for (hs, 0..) |*h, k| {
+            h.R = offs[k + 1] - offs[k];
+            h.n = (h.R + W - 1) / W;
+            h.Rp = h.n * W;
+            h.o = c0.rank * h.n;
+            h.nv = if (h.R > h.o) @min(h.n, h.R - h.o) else 0;
+            if (h.Rp > h.main.b.rows) return error.SpPartTooWide;
+            if (taps) |tp| h.main.b.taps = .{ .d = h.main.b.x.d, .ptr = tp + offs[k] * tap_row, .len = h.R * tap_row };
+        }
+        // start: ids, positions, the own rows' embeddings, layer 0's front
+        // 開始: ids、位置、自分の行の埋め込み、層 0 の前段
+        for (hs, 0..) |*h, k| {
+            const s = &h.side;
+            const b = s.b;
+            try sideBegin(ready, main, comm);
+            try b.ids.uploadAsync(0, std.mem.sliceAsBytes(ids[offs[k]..offs[k + 1]]), comm.handle);
+            const p0 = a + offs[k];
+            try view(b.ppos.?, 0, 4).fill32(p0, comm.handle);
+            try view(b.ppos.?, 16, 4).fill32(p0 + h.o, comm.handle);
+            try view(b.ppos.?, 32, 4).fill32(p0 + (c0.rank / dg.world) * dg.world * h.n, comm.handle);
+            if (h.nv > 0) try s.glue.gatherRows(comm, embed_table, b.ids.ptr + @as(u64, h.o) * 8, b.xo.?.ptr, h.nv, D);
+            if (h.n > h.nv) try view(b.xo.?, h.nv * D * 2, (h.n - h.nv) * D * 2).fill8(0, comm.handle);
+            try spFrontAttn(s, h, &layers[0], kc[0].ptr, if (ic[0]) |x| x.ptr else null, t);
+            try h.done.record(comm);
+        }
+        return .{ .hs = hs, .P = P, .offs = offs, .ready = ready, .main = main, .comm = comm, .dg = dg, .D = D, .layers = layers, .kc = kc, .ic = ic, .t = t, .head = head, .extra = extra };
     }
-    for (layers, 0..) |*L, i| {
-        const kci = kc[i].ptr;
+
+    /// Layer i (in order, from 0): its attention and FFN over every part, then the next layer's front (or, after the
+    /// last, the head's row and the extra layer's input).
+    /// 層 i (0 から順に): 全 part の attention と FFN、続いて次の層の前段 (最後の層の後は head の行と追加の層の入力)。
+    pub fn layer(ch: *SpChunk, i: usize) !void {
+        const hs = ch.hs;
+        const main = ch.main;
+        const comm = ch.comm;
+        const dg = ch.dg;
+        const ready = ch.ready;
+        const D = ch.D;
+        const L = &ch.layers[i];
+        const kci = ch.kc[i].ptr;
         // attention: the main steps between the group's collectives, the parts round robin
         // attention: グループの collective の間の main の段を、part を順に回して
         for (0..3) |stage| for (hs) |*h| {
@@ -1837,7 +2424,7 @@ pub fn promptSp(parts: []SpPart, want: u32, ready: cuda.Event, ids: []const i64,
                     try m.coreOut(L, h.R);
                 },
             }
-            try side.begin(ready, main, comm);
+            try sideBegin(ready, main, comm);
             switch (stage) {
                 0 => try h.side.dcpGatherQ(dg, h.R),
                 1 => try h.side.dcpExchange(dg, h.R),
@@ -1851,27 +2438,32 @@ pub fn promptSp(parts: []SpPart, want: u32, ready: cuda.Event, ids: []const i64,
         for (hs, 0..) |*h, k| {
             try main.wait(h.done);
             try h.main.ffnMain(L, h.R);
-            try side.begin(ready, main, comm);
+            try sideBegin(ready, main, comm);
             const s = &h.side;
             try spRsResidual(s, h);
             if (L.index < s.tap_slot.len and s.tap_slot[L.index] >= 0) {
                 const slot: usize = @intCast(s.tap_slot[L.index]);
                 try spGatherX(s, h, s.b.taps.?.ptr + slot * D * 2, s.n_taps * D);
             }
-            if (i + 1 < n_layers) {
-                try spFrontAttn(s, h, &layers[i + 1], kc[i + 1].ptr, if (ic[i + 1]) |x| x.ptr else null, t);
+            if (i + 1 < ch.layers.len) {
+                try spFrontAttn(s, h, &ch.layers[i + 1], ch.kc[i + 1].ptr, if (ch.ic[i + 1]) |x| x.ptr else null, ch.t);
             } else {
                 // the one row the head reads: the last part's last
                 // head が読む 1 行: 最後の part の最後の行
-                if (head and h == &hs[P - 1]) try spGatherX(s, h, s.b.x.ptr, D);
-                if (extra) |x| {
-                    try x.input(x.ctx, s, h, k, offs[k]);
+                if (ch.head and h == &hs[ch.P - 1]) try spGatherX(s, h, s.b.x.ptr, D);
+                if (ch.extra) |x| {
+                    try x.input(x.ctx, s, h, k, ch.offs[k]);
                     try spCacheFill(s, h, x.layer, x.kc, x.ic);
                 }
             }
             try h.done.record(comm);
         }
     }
-    for (hs) |*h| try main.wait(h.done);
-    return &hs[P - 1];
-}
+
+    /// The main stream after every part's last side chain; the part holding the chunk's last row.
+    /// main ストリームを全 part の最後の side の処理の後にする。チャンクの最後の行を持つ part を返す。
+    pub fn finish(ch: *SpChunk) !*SpPart {
+        for (ch.hs) |*h| try ch.main.wait(h.done);
+        return &ch.hs[ch.P - 1];
+    }
+};

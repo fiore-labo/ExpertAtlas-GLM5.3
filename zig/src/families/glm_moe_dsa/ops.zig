@@ -172,8 +172,14 @@ pub const Ops = struct {
 
     /// Sigmoid + bias top-8 of the router logits -> pick int32 / wts fp32 (normalized, scaled).
     /// router logits の sigmoid + bias で top-8 を選ぶ -> pick int32 / wts fp32 (正規化してスケール済み)。
-    pub fn topk(o: Ops, logits: u64, bias: u64, pick: u64, wts: u64, n: u32, scale: f32) !void {
-        return o.k.topk(o.stream, logits, bias, pick, wts, n, scale);
+    pub fn topk(o: Ops, logits: u64, bias: u64, pick: u64, wts: u64, n: u32, scale: f32, log: u64) !void {
+        return o.k.topk(o.stream, logits, bias, pick, wts, n, scale, log);
+    }
+
+    /// The picks of `rows` rows (int32 [rows, 8]) counted into `hist` (u32 [experts]).
+    /// `rows` 行の選択 (int32 [rows, 8]) を `hist` (u32 [experts]) に数える。
+    pub fn pickHist(o: Ops, pick: u64, rows: u32, hist: u64, experts: u32) !void {
+        return o.k.pickHist(o.stream, pick, rows, hist, experts);
     }
 
     /// RoPE of the indexer's query rows in place.

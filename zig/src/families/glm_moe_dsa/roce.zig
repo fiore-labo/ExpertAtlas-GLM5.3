@@ -20,7 +20,7 @@ const slot_alignment = 4096;
 const threads = 512; // threads a block / ブロックあたりのスレッド数
 const max_blocks = 8; // a power of two: the arrival counters' modulus / 2 のべき乗: 到着カウンタの法
 const counter_classes = 4; // one class a grid size: 1, 2, 4, 8 blocks / grid の大きさごとに 1 つ: 1, 2, 4, 8 ブロック
-const abi_version = 3;
+const abi_version = 4; // 4: the share mode (allReduce2) / 4: 取り分のモード (allReduce2)
 // sizeof(roce_blob_t) on aarch64 (checked against the library's roce_blob_bytes)
 // aarch64 での sizeof(roce_blob_t) (ライブラリの roce_blob_bytes と照合する)
 const blob_bytes = 192;
@@ -99,10 +99,12 @@ pub const Kernels = struct {
     reduce_f32: cuda.Function,
     reduce_bf16: cuda.Function,
     gather: cuda.Function,
+    scatter_f32: cuda.Function,
+    scatter_bf16: cuda.Function,
 
     pub fn load(d: *const cuda.Driver) !Kernels {
         var m = try cuda.Module.load(d, cuda.kernels.glm53_roce);
-        return .{ .module = m, .reduce_f32 = try m.function("tf_glm53_roce_allreduce_f32"), .reduce_bf16 = try m.function("tf_glm53_roce_allreduce_bf16"), .gather = try m.function("tf_glm53_roce_allgather") };
+        return .{ .module = m, .reduce_f32 = try m.function("tf_glm53_roce_allreduce_f32"), .reduce_bf16 = try m.function("tf_glm53_roce_allreduce_bf16"), .gather = try m.function("tf_glm53_roce_allgather"), .scatter_f32 = try m.function("tf_glm53_roce_reducescatter_f32"), .scatter_bf16 = try m.function("tf_glm53_roce_reducescatter_bf16") };
     }
 };
 
@@ -255,6 +257,28 @@ pub const Runtime = struct {
         a.add(nbytes);
         a.add(g.reg);
         try cuda.launch.launch(if (bf16) r.ks.reduce_bf16 else r.ks.reduce_f32, .{ .grid = .{ .x = g.blocks, .y = 1, .z = 1 }, .block = .{ .x = threads, .y = 1, .z = 1 } }, s, &a);
+    }
+
+    /// `allReduce` in two shots: a reduce-scatter (each peer is sent its share of `in` alone, this rank's share of the
+    /// rank-order sum into `mid`, nbytes / world) and an all-gather of the shares into `out`. 2 (W - 1) / W of the
+    /// bytes on this rank's wire instead of W - 1 times, the same bits; two round trips. nbytes a multiple of
+    /// 16 x world.
+    /// 2 段の `allReduce`: reduce-scatter (各 peer には `in` のその取り分だけを送り、ランク順の和のこのランクの取り分を
+    /// `mid` へ、nbytes / world) と、取り分の all-gather で `out` へ。このランクの回線のバイトは W - 1 倍ではなく
+    /// 2 (W - 1) / W、同じビット。往復は 2 回。nbytes は 16 x world の倍数。
+    pub fn allReduce2(r: *const Runtime, s: cuda.Stream, in: u64, mid: u64, out: u64, nbytes: u32, bf16: bool) !void {
+        const W: u32 = @intCast(r.reg.world);
+        if (nbytes % (16 * W) != 0 or nbytes > max_bytes or in % 16 != 0 or mid % 16 != 0 or out % 16 != 0) return error.RoceShape;
+        const packs = nbytes / 16;
+        const g = r.grid(packs);
+        var a: cuda.Args = .{};
+        a.add(in);
+        a.add(mid);
+        a.add(@as(c_int, @intCast(packs)));
+        a.add(nbytes);
+        a.add(g.reg);
+        try cuda.launch.launch(if (bf16) r.ks.scatter_bf16 else r.ks.scatter_f32, .{ .grid = .{ .x = g.blocks, .y = 1, .z = 1 }, .block = .{ .x = threads, .y = 1, .z = 1 } }, s, &a);
+        return r.allGather(s, mid, out, nbytes / W);
     }
 
     /// out = every rank's `in` (nbytes each) concatenated in rank order (dim 0).

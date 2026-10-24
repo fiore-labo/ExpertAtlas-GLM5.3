@@ -39,9 +39,29 @@ fn alignUp(n: usize) usize {
     return (n + 255) & ~@as(usize, 255);
 }
 
+/// Where a layer's routed experts are read from: one reader for every expert (the checkpoint), or one reader per expert
+/// picked from `readers` by `pick` (an expert plan's banks, expert_plan.zig).
+/// 層の routed expert の読み元: 全 expert で 1 つの reader (チェックポイント)、または `pick` で `readers` から expert ごとに
+/// 選ぶ reader (エキスパートの計画のバンク、expert_plan.zig)。
+pub const Source = struct {
+    readers: []const *weights.Reader,
+    pick: ?[]const u8 = null,
+
+    fn of(s: Source, e: usize) *weights.Reader {
+        return s.readers[if (s.pick) |p| p[e] else 0];
+    }
+};
+
 /// This rank's share of `layer`'s routed experts, on the GPU.
 /// `layer` の routed expert のうちこのランクの分を GPU に載せる。
 pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, r: *weights.Reader, cfg: Config, layer: usize) !Routed {
+    const one = [_]*weights.Reader{r};
+    return loadFrom(gpa, d, .{ .readers = &one }, cfg, layer);
+}
+
+/// `load` from `src`. With a per-expert pick every expert and projection must carry the same codebook marker.
+/// `src` から `load` する。expert ごとに選ぶときは、全 expert・全射影の codebook の印が同じでなければならない。
+pub fn loadFrom(gpa: std.mem.Allocator, d: *const cuda.Driver, src: Source, cfg: Config, layer: usize) !Routed {
     const E = cfg.experts;
     const projs = [_][]const u8{ "gate", "up", "down" };
     var shares: [3][]weights.Share = undefined;
@@ -60,6 +80,7 @@ pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, r: *weights.Reader, c
         scales[p][0] = try gpa.alloc(weights.Share, E);
         scales[p][1] = try gpa.alloc(weights.Share, E);
         for (0..E) |e| {
+            const r = src.of(e);
             shares[p][e] = try r.get(try std.fmt.bufPrint(&buf, "model.layers.{d}.mlp.experts.{d}.{s}_proj.trellis", .{ layer, e, proj }));
             scales[p][0][e] = try r.get(try std.fmt.bufPrint(&buf, "model.layers.{d}.mlp.experts.{d}.{s}_proj.suh", .{ layer, e, proj }));
             scales[p][1][e] = try r.get(try std.fmt.bufPrint(&buf, "model.layers.{d}.mlp.experts.{d}.{s}_proj.svh", .{ layer, e, proj }));
@@ -103,9 +124,23 @@ pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, r: *weights.Reader, c
     out.svh_u = try stack(gpa, d, scales[1][1]);
     out.suh_d = try stack(gpa, d, scales[2][0]);
     out.svh_d = try stack(gpa, d, scales[2][1]);
-    var cbuf: [192]u8 = undefined;
-    out.cb = if (r.has(try std.fmt.bufPrint(&cbuf, "model.layers.{d}.mlp.experts.0.gate_proj.mcg", .{layer}))) 1 else if (r.has(try std.fmt.bufPrint(&cbuf, "model.layers.{d}.mlp.experts.0.gate_proj.mul1", .{layer}))) 2 else 0;
+    out.cb = try codebook(src.of(0), layer, 0, "gate");
+    if (src.pick != null) for (0..E) |e| for (projs) |proj| {
+        if (try codebook(src.of(e), layer, e, proj) != out.cb) {
+            std.log.err("glm53: layer {d} expert {d} {s}: its codebook differs from expert 0's", .{ layer, e, proj });
+            return error.MixedCodebooks;
+        }
+    };
     return out;
+}
+
+/// The codebook marker of one expert's projection: 1 mcg, 2 mul1, 0 none.
+/// expert の射影 1 つの codebook の印: 1 は mcg、2 は mul1、0 は無し。
+fn codebook(r: *weights.Reader, layer: usize, e: usize, proj: []const u8) !u8 {
+    var cbuf: [192]u8 = undefined;
+    if (r.has(try std.fmt.bufPrint(&cbuf, "model.layers.{d}.mlp.experts.{d}.{s}_proj.mcg", .{ layer, e, proj }))) return 1;
+    if (r.has(try std.fmt.bufPrint(&cbuf, "model.layers.{d}.mlp.experts.{d}.{s}_proj.mul1", .{ layer, e, proj }))) return 2;
+    return 0;
 }
 
 fn stack(gpa: std.mem.Allocator, d: *const cuda.Driver, parts: []const weights.Share) !Buf {

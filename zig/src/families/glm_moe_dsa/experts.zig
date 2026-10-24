@@ -22,6 +22,20 @@ const rot_in_bf16_symbol = "_ZN8tf_exl3e13rot_in_kernelI13__nv_bfloat16EEvPKT_iP
 const gateup_symbol = "_ZN8tf_exl3e22gateup_epilogue_kernelEPKfPKiPK6__halfS6_S6_PS4_iiiifi";
 const down_combine_symbol = "_ZN8tf_exl3e19down_combine_kernelEPKfPKiPK6__halfPfS1_S7_iiiii";
 
+/// TF_GLM53_EXPERTS_GENERIC=1: every layer on the [2, 10] instance, none on the all-4-bit [8, 8] one. The two are the
+/// same kernel with fewer widths compiled in: on GB10 they take the same time (1,410 / 1,411 us a TP4 gate/up
+/// launch, 3 blocks a SM both); so a layer loaded all 4 bit may then take any width in a swap. Read once.
+/// TF_GLM53_EXPERTS_GENERIC=1: どの層も [2, 10] のインスタンスで、全 4 bit 用の [8, 8] は使わない。両者は同じカーネルで
+/// コンパイルする幅が少ないだけ: GB10 では同じ時間 (TP4 の gate/up 1 回 1,410 / 1,411 us、どちらも 1 SM に
+/// 3 ブロック)。そのため全 4 bit で読み込んだ層も、入れ替えでどの幅でも受けられる。読むのは 1 回だけ。
+pub fn genericOnly() bool {
+    const S = struct {
+        var v: ?bool = null;
+    };
+    if (S.v == null) S.v = if (std.c.getenv("TF_GLM53_EXPERTS_GENERIC")) |e| std.mem.eql(u8, std.mem.span(e), "1") else false;
+    return S.v.?;
+}
+
 /// experts_grouped.cuh's GroupedArgs (host side only, never passed to the device): pointers and the tile setting.
 /// experts_grouped.cuh の GroupedArgs (ホスト側だけで使い、デバイスには渡さない): ポインタとタイル設定。
 pub const GroupedArgs = struct {
@@ -126,9 +140,9 @@ pub const Kernels = struct {
     pub fn grouped(k: *const Kernels, stream: cuda.Stream, a: GroupedArgs) !void {
         if (a.K % (16 * a.SK * a.warps) != 0 or a.N % (16 * a.nt) != 0) return error.UnevenSplit;
         if (a.ns != 0 and a.ns < a.N / 16) return error.BadRowStride;
-        // the K2 ranges: [8, 8], else [2, 10], else [2, 16]
-        // K2 の範囲: [8, 8]、だめなら [2, 10]、だめなら [2, 16]
-        const lo: u32, const hi: u32 = if (a.lo == 8 and a.hi == 8) .{ 8, 8 } else if (a.lo >= 2 and a.hi <= 10) .{ 2, 10 } else .{ 2, 16 };
+        // the K2 ranges: [8, 8] (unless genericOnly), else [2, 10], else [2, 16]
+        // K2 の範囲: [8, 8] (genericOnly でなければ)、だめなら [2, 10]、だめなら [2, 16]
+        const lo: u32, const hi: u32 = if (a.lo == 8 and a.hi == 8 and !genericOnly()) .{ 8, 8 } else if (a.lo >= 2 and a.hi <= 10) .{ 2, 10 } else .{ 2, 16 };
         const idx = for (grouped_variants, 0..) |v, i| {
             if (v.cb == a.cb and v.nt == a.nt and v.warps == a.warps and v.pf == a.pf and v.lo == lo and v.hi == hi) break i;
         } else return error.UnportedGroupedVariant;

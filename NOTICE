@@ -33,6 +33,7 @@ changed these TensorFold files, each of which says so in its first lines:
   zig/src/server/metrics.zig
   zig/src/server/openai.zig
   zig/src/server/routes.zig
+  zig/src/server/serve.zig
   zig/src/server/server.zig
   zig/src/server/status_routes.zig
   zig/src/server/stream_preflight_test.zig

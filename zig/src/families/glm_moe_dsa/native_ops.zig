@@ -32,7 +32,8 @@ const DconvArgs = extern struct { x: u64, dyn: u64, base: u64, res: u64, out: u6
 const PrepArgs = extern struct { qkv: u64, qn: u64, kn: u64, cos: u64, sin: u64, qo: u64, ko: u64, vo: u64, rows: c_int, stride: c_int, h: c_int, hkv: c_int, eps: f32 };
 const DattnArgs = extern struct { q: u64, k: u64, v: u64, out: u64, pos: u64, window: c_int, nh: c_int, scale: f32 };
 const dattn_smem: u32 = 5 * 16384 + 8192 + 2 * 1024; // DR_SMEM
-const TopkArgs = extern struct { logits: u64, bias: u64, pick: u64, wts: u64, rows: c_int, scale: f32 };
+const TopkArgs = extern struct { logits: u64, bias: u64, pick: u64, wts: u64, rows: c_int, scale: f32, log: u64 };
+const PickHistArgs = extern struct { pick: u64, hist: u64, n: c_int, experts: c_int };
 const RmsArgs = extern struct { x: u64, w: u64, out: u64, xs: u64, rows: c_int, d: c_int, x_stride: c_int, o_stride: c_int, vec: c_int, eps: f32, rd: f32 };
 
 comptime {
@@ -70,6 +71,7 @@ pub const Kernels = struct {
     f_dcp_combine: cuda.Function,
     f_topk: cuda.Function,
     f_topk_one: cuda.Function,
+    f_pick_hist: cuda.Function,
     f_absorb: cuda.Function,
     f_expand: cuda.Function,
     f_router_part: cuda.Function,
@@ -155,6 +157,7 @@ pub const Kernels = struct {
             .f_dcp_combine = try m.function("tf_glm53_n_dcp_combine"),
             .f_topk = try m.function("tf_glm53_n_topk"),
             .f_topk_one = try m.function("tf_glm53_n_topk_one"),
+            .f_pick_hist = try m.function("tf_glm53_n_pick_hist"),
             .f_absorb = try m.function("tf_glm53_n_absorb"),
             .f_expand = try m.function("tf_glm53_n_expand"),
             .f_router_part = try m.function("tf_glm53_n_router_part"),
@@ -257,12 +260,22 @@ pub const Kernels = struct {
         try go128(k.f_dcp_combine, s, r, h, DcpCombineArgs{ .orecv = orecv, .lrecv = lrecv, .out = out, .rows = @intCast(r), .ss = @intCast(ss), .ssl = @intCast(ssl), .h = @intCast(h), .world = @intCast(world) });
     }
 
-    pub fn topk(k: *const Kernels, s: cuda.Stream, logits: u64, bias: u64, pick: u64, wts: u64, n: u32, scale: f32) !void {
+    /// `log`: 0, or where each row's 8 picks also go as bytes (row r at log + 8 r).
+    /// `log`: 0 か、各行の 8 個の選択をバイトでも置く場所 (行 r は log + 8 r)。
+    pub fn topk(k: *const Kernels, s: cuda.Stream, logits: u64, bias: u64, pick: u64, wts: u64, n: u32, scale: f32, log: u64) !void {
         // from 128 rows the entry whose blocks do less work in all is the faster one; below, the one without a
         // hand-over inside the block (topk_body)
         // 128 行からはブロックの仕事の合計が少ない入口が速い。それより下では、ブロック内の受け渡しがない方が速い
         // (topk_body)
-        try go(if (n >= 128) k.f_topk_one else k.f_topk, s, n, 1, TopkArgs{ .logits = logits, .bias = bias, .pick = pick, .wts = wts, .rows = @intCast(n), .scale = scale });
+        try go(if (n >= 128) k.f_topk_one else k.f_topk, s, n, 1, TopkArgs{ .logits = logits, .bias = bias, .pick = pick, .wts = wts, .rows = @intCast(n), .scale = scale, .log = log });
+    }
+
+    /// The picks of `rows` rows at `pick` (int32 [rows, 8]) added into `hist` (u32 [experts]).
+    /// `pick` の `rows` 行の選択 (int32 [rows, 8]) を `hist` (u32 [experts]) に足す。
+    pub fn pickHist(k: *const Kernels, s: cuda.Stream, pick: u64, rows: u32, hist: u64, experts: u32) !void {
+        if (experts > 256) return error.UnsupportedShape;
+        const n = rows * 8;
+        try go(k.f_pick_hist, s, (n + 2047) / 2048, 1, PickHistArgs{ .pick = pick, .hist = hist, .n = @intCast(n), .experts = @intCast(experts) });
     }
 
     /// Row blocks of RBK = min(r, 16) rows; the kernels read the weights and the 8-wide row slices by 16-byte loads.

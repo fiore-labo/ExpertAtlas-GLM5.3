@@ -22,12 +22,18 @@ const roce = @import("roce.zig");
 const native_ops = @import("native_ops.zig");
 const pool_devmap = @import("pool/devmap.zig");
 const pool_serve = @import("pool_serve.zig");
+const pool_plan = @import("pool/plan.zig");
 const slots_serve_mod = @import("slots_serve.zig");
 const unpack_cache = @import("unpack_cache.zig");
 const slots_mod = @import("slots.zig");
 const tune = @import("tune.zig");
 const linear = @import("linear.zig");
 const lanes = @import("lanes");
+const expert_live = @import("expert_live.zig");
+const expert_swap = @import("expert_swap.zig");
+const expert_plan = @import("expert_plan.zig");
+const load_progress = @import("load_progress.zig");
+pub const ExpertLive = expert_live.Live;
 /// A request's sampling: keyed draws by (seed, position, id), so drafted and serial replies match.
 /// 要求のサンプリング: (seed, 位置, id) をキーにした抽選なので、draft ありと逐次の応答は一致する。
 pub const Sampling = lanes.Sampling;
@@ -38,6 +44,15 @@ pub const seedFor = lanes.sampling.seedFor;
 /// Candidates read past top_k (past 256 when top_k is 0), so ties at the edge resolve exactly.
 /// top_k (top_k が 0 なら 256) を超えて読む候補の数。境界の同点を正確に扱うため。
 const sample_margin = 8;
+
+/// TF_GLM53_EXPERT_LIVE (rank 0): a prompt chunk's pick counts on their way to the host (expert_live.recordPrompt):
+/// the pinned copy, the chunk's start and end on the main stream (timing events), and what the chunk was.
+/// TF_GLM53_EXPERT_LIVE (rank 0): ホストへ向かう途中の prompt チャンクの選択の数 (expert_live.recordPrompt): pin した
+/// 写し、main ストリーム上のチャンクの始まりと終わり (時刻を取るイベント)、チャンクの中身。
+const PromptCounts = struct { host: cuda.HostBuffer, start: cuda.Event, end: cuda.Event, rows: u32 = 0, pos: u32 = 0, conv: u16 = 0, done: bool = false };
+/// Prompt chunks whose counts may be in flight at once; a fifth waits for the oldest (about 15 s of work each).
+/// 数が同時に途中にあってよい prompt チャンクの数。5 つ目は最古のものを待つ (1 つ約 15 秒の仕事)。
+const prompt_counts_ring = 4;
 
 pub const Options = struct {
     ckpt: []const u8,
@@ -173,6 +188,102 @@ pub fn withEnv(o: Options) Options {
 /// verify ウィンドウの最大行数: 保留中のトークンと最大 7 個の draft。
 pub const vrows = 8;
 
+// ------------------------------------------------- several conversations at once (TF_GLM53_MULTI) / 複数の会話を同時に ---
+
+/// Conversations decoded together at most (their windows' rows: multi_max x vrows <= forward.multi_rows).
+/// 一緒に decode する会話の最大数 (ウィンドウの行は multi_max x vrows <= forward.multi_rows)。
+pub const multi_max = 4;
+const multi_graphs = 48;
+
+/// One conversation of the batched decode (TF_GLM53_MULTI): its device position and PoolMap (the windows' graphs bake
+/// both in), its tokens, its decode state between rounds and its pool plan until the commit.
+/// まとめた decode の 1 つの会話 (TF_GLM53_MULTI): デバイス上の位置と PoolMap (ウィンドウの graph が両方を焼き込む)、
+/// トークン、ラウンドの間の decode の状態、確定までの pool のプラン。
+pub const Conv = struct {
+    live: bool = false,
+    pos: cuda.DeviceBuffer,
+    pmap: ?cuda.DeviceBuffer = null,
+    prompt: std.ArrayList(i64) = .empty,
+    out: std.ArrayList(i64) = .empty,
+    stop_eos: bool = true,
+    drafted: bool = false,
+    P: usize = 0,
+    tok: u32 = 0,
+    n: usize = 0,
+    want: usize = 0,
+    done: bool = false,
+    start: usize = 0,
+    prefill_done: usize = 0,
+    dr_snap_end: ?usize = null,
+    s_valid: u64 = 0,
+    // temperature > 0: keyed sampling (seed, position, id), the same draws as one request alone; null: greedy
+    // temperature > 0: キー付きの抽選 (seed、位置、id)。単独の要求と同じ抽選。null なら greedy
+    samp: ?Sampling = null,
+    plan: ?pool_plan.Plan = null,
+    st: Stats = .{},
+    t1: std.Io.Timestamp = undefined,
+};
+
+const MultiKey = struct { n: u8, conv: [multi_max]u8, rows: [multi_max]u8, t: [multi_max]u32 };
+
+/// TF_GLM53_MULTI: what the prefill of one conversation calls between layers (both streams drained first): one
+/// batched round of the other conversations, the same on every rank (lockstep.zig shares its contents). `every`: the
+/// layers between two calls for a 16,384-row chunk; a chunk of R rows waits every x 16,384 / R layers (the same work
+/// between calls, so a short prompt is not slowed by them; set by rows alone, so the same on every rank).
+/// TF_GLM53_MULTI: 1 つの会話の prefill が層の間で呼ぶもの (先に両方の stream を空にする): ほかの会話をまとめた
+/// ラウンド 1 回。全ランクで同じ (中身は lockstep.zig が配る)。`every`: 16,384 行のチャンクでの呼び出しの間の層数。
+/// R 行のチャンクは every x 16,384 / R 層ごと (呼び出しの間の仕事を同じにして、短い prompt を遅くしない。行数だけで
+/// 決まるので全ランクで同じ)。
+pub const MidHook = struct {
+    ctx: *anyopaque,
+    f: *const fn (ctx: *anyopaque) anyerror!void,
+    every: usize,
+
+    fn layersFor(mh: MidHook, rows: usize) usize {
+        return @max(mh.every, (mh.every * 16384 + rows - 1) / @max(rows, 1));
+    }
+};
+
+/// The batched decode's own buffers (rows of every conversation's window), streams for the per-conversation graph
+/// branches, the conversations and the windows' graphs (by conversations, rows and key buckets; least recently used
+/// dropped past multi_graphs).
+/// まとめた decode 専用のバッファ (全会話のウィンドウの行)、会話ごとの graph の枝の stream、会話、ウィンドウの graph
+/// (会話・行数・キーの bucket ごと。multi_graphs を超えたら最も前に使ったものを捨てる)。
+pub const Multi = struct {
+    n: usize,
+    rows: usize, // a conversation's window: vrows with a drafter, else 1 / 会話のウィンドウ: drafter があれば vrows、なければ 1
+    convs: [multi_max]Conv,
+    b: forward.Buffers,
+    xs: moe.Scratch,
+    streams: [multi_max]cuda.Stream,
+    events: [multi_max + 1]cuda.Event,
+    ar2_rows: u32,
+    keys: [multi_graphs]?MultiKey = @splat(null),
+    execs: [multi_graphs]cuda.graph.Exec = undefined,
+    used: [multi_graphs]u64 = @splat(0),
+    tick: u64 = 0,
+    captures: u64 = 0,
+    // rank 0's log every 200 rounds: nanoseconds in the drafts, the agreement, the window and the accept / emit
+    // rank 0 が 200 ラウンドごとに出すログ: draft、合意、ウィンドウ、受理と出力にかかったナノ秒
+    ns: [4]u64 = @splat(0),
+    rounds: u64 = 0,
+    conv_rounds: u64 = 0,
+    tokens: u64 = 0,
+    // the same log's GPU side: the window graph and the accepted rows' tap updates by timing events (the taps read
+    // one round later, when they are surely done), and the host time spent capturing window graphs
+    // 同じログの GPU 側: ウィンドウの graph と受理した行の tap 更新を timing event で (tap は確実に終わった次の
+    // ラウンドで読む)。ウィンドウの graph の capture にかかったホストの時間
+    tev: [4]cuda.Event = undefined, // window start / end, taps start / end / ウィンドウの始め・終わり、tap の始め・終わり
+    taps_pending: bool = false,
+    gpu_ns: [2]u64 = @splat(0), // window, taps / ウィンドウ、tap
+    cap_ns: u64 = 0,
+    // TF_GLM53_MULTI_BUCKET (rows, 0: off): the indexer's key range of a window rounded up to a multiple of this
+    // instead of the next power of two (never longer), so the top-k scans fewer padding keys past 128K
+    // TF_GLM53_MULTI_BUCKET (行数、0 は使わない): ウィンドウの indexer のキー範囲を次の 2 のべき乗でなくこの倍数に
+    // 切り上げる (長くはしない)。128K を超えたところで top-k が走査する詰め物のキーを減らす
+    bucket_rows: usize = 0,
+};
+
 /// A prompt chunk's shape class: its row count up to 16 (each its own row block), the router's BM class, the path
 /// (row-exact linears up to 128 rows, the wide GEMMs, SP in 2 or 4 parts) and whether it selects (end past index_topk).
 /// prompt チャンクの形の分類: 16 行までは行数そのもの (それぞれ固有の行ブロック)、router の BM 分類、経路 (128 行
@@ -225,6 +336,14 @@ pub const Sink = struct {
     ctx: *anyopaque,
     tokens: *const fn (ctx: *anyopaque, new: []const u32) void,
     prefilled: ?*const fn (ctx: *anyopaque) void = null,
+    // a prompt chunk starts: the prompt rows in the caches (the ranks agreed, so the chunks before it are done); the
+    // first call is the prefill's start, at the rows the cache resumed
+    // prompt チャンクの開始: キャッシュにある prompt の行数 (ランクが合意したので、それより前のチャンクは終わって
+    // いる)。最初の呼び出しが prefill の開始で、キャッシュから再開した行数を渡す
+    chunk: ?*const fn (ctx: *anyopaque, done: usize) void = null,
+    // a decode round ended: the drafts it verified and those it kept
+    // decode のラウンドが終わった: 検証した draft の数と残した数
+    round: ?*const fn (ctx: *anyopaque, drafted: usize, accepted: usize) void = null,
 };
 
 /// The indexer's key range for a window ending at position t - 1 (none while t <= topk, else a power of two, at least
@@ -254,6 +373,42 @@ pub const Engine = struct {
     handle: cuda.cublas.Handle,
     workspace: cuda.DeviceBuffer,
     stream: cuda.Stream,
+    /// TF_GLM53_EXPERT_LIVE (rank 0): the target decode windows' pick log (host memory the topk kernel writes into,
+    /// forward.log_layers x forward.log_rows x 8 bytes), its device address, and the counts kept from it.
+    /// TF_GLM53_EXPERT_LIVE (rank 0): target の decode ウィンドウの選択ログ (topk カーネルが書き込むホストメモリ、
+    /// forward.log_layers x forward.log_rows x 8 バイト)、そのデバイスアドレス、そこから数えたもの。
+    pick_log: ?cuda.HostBuffer = null,
+    pick_log_dev: u64 = 0,
+    live: ?*expert_live.Live = null,
+    /// TF_GLM53_EXPERT_LIVE (rank 0): the prompt contexts' pick counts (forward.log_layers x experts u32 on the device,
+    /// Ctx.prompt_hist; zeroed after each chunk's copy), the chunks' copies in flight (a ring: pc_next the next slot,
+    /// pc_busy the slots not folded yet), the prompt's start (an event, and the live clock then) and the conversation
+    /// the prompt is for (TF_GLM53_MULTI; 0 otherwise).
+    /// TF_GLM53_EXPERT_LIVE (rank 0): prompt の文脈の選択の数 (デバイス上の forward.log_layers x expert の u32、
+    /// Ctx.prompt_hist。チャンクを写すたびに 0 に戻す)、途中にあるチャンクの写し (リング: pc_next は次の枠、pc_busy は
+    /// まだ取り込んでいない枠の数)、prompt の始まり (イベントと、その時のライブの時計)、prompt の会話
+    /// (TF_GLM53_MULTI。それ以外は 0)。
+    pc_dev: ?cuda.DeviceBuffer = null,
+    pc: []PromptCounts = &.{},
+    pc_next: usize = 0,
+    pc_busy: usize = 0,
+    pc_base: ?cuda.Event = null,
+    pc_base_ms: u64 = 0,
+    pc_conv: u16 = 0,
+    /// The bits each routed expert has now (its gate's K2 / 2; the MoE layers from xfirst, E each), the checkpoints
+    /// they may be changed from (TF_GLM53_EXPERT_BANKS, expert_swap) and the split those are stored in.
+    /// 各 routed expert の今の bit (gate の K2 / 2。xfirst からの MoE 層、各 E 個)、変更元のチェックポイント
+    /// (TF_GLM53_EXPERT_BANKS、expert_swap) と、その保存時の分割数。
+    xbits: []u8 = &.{},
+    xfirst: usize = 0,
+    banks: ?expert_swap.Banks = null,
+    // TF_GLM53_EXPERT_PLAN: the plan the routed experts were loaded by (expert_plan.zig); live swaps are refused then
+    // TF_GLM53_EXPERT_PLAN: routed expert を読み込んだ計画 (expert_plan.zig)。そのときは実行中の入れ替えを断る
+    plan: ?expert_plan.Plan = null,
+    // TF_GLM53_LOAD_PROGRESS: the start-up's progress rank 0 writes for the launcher (load_progress.zig)
+    // TF_GLM53_LOAD_PROGRESS: rank 0 がランチャーのために書く起動の進み具合 (load_progress.zig)
+    load_progress: ?load_progress.Progress = null,
+    stored_world: usize,
     x3: exl3.Kernels,
     glue: forward.Glue,
     nat: native_ops.Kernels,
@@ -394,6 +549,11 @@ pub const Engine = struct {
     recording_shapes: bool = false,
     lgath: cuda.DeviceBuffer = undefined, // fp32 [world, rows, vshare]: every rank's logits / 全ランクの logits
     host_logits: []f32 = &.{},
+    // TF_GLM53_MULTI: conversations decoded together (multiSetup) / 一緒に decode する会話 (multiSetup)
+    multi: ?*Multi = null,
+    // TF_GLM53_MULTI: the other conversations' rounds inside a prefill (set around an admission's prefill)
+    // TF_GLM53_MULTI: prefill の中でのほかの会話のラウンド (受け付けの prefill の間だけ設定する)
+    mid: ?MidHook = null,
 
     /// Loads this rank's shares (layer by layer, returning each layer's file pages before the next) and sets up the
     /// buffers. `group` is the world communicator every rank built; the Engine lives where it is created (the forward
@@ -423,14 +583,34 @@ pub const Engine = struct {
         try blas.check(blas.api.cublasSetStream_v2(handle, stream.handle), "cublasSetStream");
         memMark(ctx, rank, "cuBLAS workspace + stream", &mt);
 
+        // TF_GLM53_LOAD_PROGRESS: every rank agrees after the plan's checks and after each layer (a failing rank stops
+        // every rank there), rank 0 writes the progress (load_progress.zig)
+        // TF_GLM53_LOAD_PROGRESS: 計画の検査の後と各層の後で全ランクが合意し (失敗したランクがあれば全ランクがそこで
+        // 止まる)、rank 0 が進み具合を書く (load_progress.zig)
+        var first_moe_layer: usize = n;
+        var moe_layers: usize = 0;
+        for (0..n) |i| if (cfg.isMoe(i)) {
+            first_moe_layer = @min(first_moe_layer, i);
+            moe_layers += 1;
+        };
+        var prog = try load_progress.Progress.fromEnv(gpa, io, d, group, stream, first_moe_layer, moe_layers, 0);
+        errdefer if (prog) |*pg| pg.deinit();
+        var plan: ?expert_plan.Plan = null;
+        const pre = planCheck(gpa, io, cfg, rank, world, &plan);
+        if (prog) |*pg| if (!try pg.agree(if (pre) |_| true else |_| false)) return if (pre) |_| error.LoadFailedOnAnotherRank else |err| err;
+        try pre;
+        if (prog) |*pg| if (plan) |*p| {
+            pg.total_bytes = planBytes(p, cfg, world) + nonexpert_estimate / world;
+            pg.plan = p.name;
+            pg.plan_digest = p.digest;
+        };
         var reader = try weights.Reader.open(gpa, io, o.ckpt, rank, world, o.stored_world);
         defer reader.close();
         const layers = try gpa.alloc(model.Layer, n);
         for (layers, 0..) |*L, i| {
-            L.* = try model.loadLayer(gpa, d, &reader, cfg, i, heads);
-            if (cfg.isMoe(i)) L.experts = try moe.load(gpa, d, &reader, cfg, i);
-            reader.release();
-            try memCheck(io, i);
+            const step = loadLayerAt(gpa, io, d, &reader, if (plan) |*p| p else null, cfg, i, heads, rank, world, o.stored_world, L);
+            if (prog) |*pg| if (!try pg.layerDone(i, cfg.isMoe(i), if (step) |_| true else |_| false)) return if (step) |_| error.LoadFailedOnAnotherRank else |err| err;
+            try step;
         }
         memMark(ctx, rank, "layers (weights, routed experts included)", &mt);
         var mtp: ?mtp_mod.Mtp = null;
@@ -468,6 +648,10 @@ pub const Engine = struct {
         const final_norm = try upload(gpa, d, &reader, "model.norm.weight");
         reader.release();
         memMark(ctx, rank, "embed + lm_head + final norm", &mt);
+        if (prog) |*pg| {
+            pg.endLoad();
+            pg.setPhase(.kv);
+        }
 
         // the widest key range a window may score: the bucket of the capacity (a power of two, at least 2 topk)
         // ウィンドウが採点しうる最大のキー範囲: 容量の bucket (2 のべき乗で、topk の 2 倍以上)
@@ -553,6 +737,9 @@ pub const Engine = struct {
             if (std.c.getenv("TF_GLM53_EXPERTS_DIR")) |x| slots_serve_mod.dropFileCache(io, std.mem.span(x), 3, &files, &dropped);
             if (rank == 0) std.log.info("glm53: pool: page cache of {d} checkpoint files ({d:.0} GiB) dropped before the pool", .{ files, @as(f64, @floatFromInt(dropped)) / (1 << 30) });
         }
+        // refused before the allocation when the node cannot hold it (and what comes after: TF_GLM53_MEM_RESERVE_GIB)
+        // ノードに入らなければ確保の前に断る (後に続く分: TF_GLM53_MEM_RESERVE_GIB)
+        try memAdmit(io, rank, "KV caches", forward.State.bytes(cfg, cache_layers, state_rows, o.kv_fp8, o.kv_fp4));
         const state = try forward.State.init(gpa, d, cfg, cache_layers, state_rows, o.kv_fp8, o.kv_fp4);
         memMark(ctx, rank, "KV caches (the window)", &mt);
         e.* = .{
@@ -583,11 +770,19 @@ pub const Engine = struct {
             .dcp = o.dcp,
             .capacity = o.capacity,
             .graphs = o.graphs,
+            .stored_world = o.stored_world,
         };
         if (o.dcp > 1) {
             if (world % o.dcp != 0) return error.DcpDoesNotDivideWorld;
             e.dgroup = try group.split(rank / o.dcp, rank % o.dcp);
         }
+        // TF_GLM53_EXPERT_LIVE=1: rank 0 keeps the target decode windows' picks (before any context or graph exists)
+        // TF_GLM53_EXPERT_LIVE=1: rank 0 が target の decode ウィンドウの選択を残す (文脈やグラフができる前に)
+        try e.initBits();
+        if (std.c.getenv("TF_GLM53_EXPERT_BANKS")) |v| e.banks = try expert_swap.Banks.parse(gpa, std.mem.span(v));
+        e.plan = plan;
+        e.load_progress = prog;
+        if (rank == 0) if (std.c.getenv("TF_GLM53_EXPERT_LIVE")) |v| if (std.mem.eql(u8, std.mem.span(v), "1")) try e.initLive();
         if (pool_test != null or pool_env.on) {
             const mode = pool_test orelse .identity;
             const n_ent = pool_devmap.entries(keys);
@@ -798,6 +993,28 @@ pub const Engine = struct {
     /// ncclCommDestroy はそれを待つ)。デバイスバッファは context とともに消える。
     pub fn destroy(e: *Engine) void {
         if (e.drafter) |dr| dr.destroyGraphs();
+        // TF_GLM53_MULTI: the windows' graphs (before the communicators, as the others) and the conversations' host
+        // memory
+        // TF_GLM53_MULTI: ウィンドウの graph (他と同じく communicator より先に) と会話のホストのメモリ
+        if (e.multi) |m| {
+            for (m.keys, 0..) |kk, i| if (kk != null) m.execs[i].deinit();
+            for (m.convs[0..]) |*cv| {
+                cv.prompt.deinit(e.gpa);
+                cv.out.deinit(e.gpa);
+                if (cv.plan) |*q| q.deinit(e.gpa);
+            }
+            if (e.drafter) |dr| {
+                for (dr.sets, 0..) |st, k| {
+                    e.gpa.free(st.kc);
+                    e.gpa.free(st.vc);
+                    if (k > 0 and st.snap.len > 0 and st.snap.ptr != dr.snap.ptr) e.gpa.free(st.snap);
+                }
+                e.gpa.free(dr.sets);
+                dr.sets = &.{};
+            }
+            e.gpa.destroy(m);
+            e.multi = null;
+        }
         for (e.execs[0..e.n_graphs]) |*x| x.deinit();
         e.n_graphs = 0;
         if (e.dfast) |*f| f.deinit();
@@ -823,6 +1040,12 @@ pub const Engine = struct {
     /// そろって止まる (そのランクだけが止まり、他は次の要求で待ち続けることはない: POOL.md 12.2e の見つかったこと 1)。
     pub fn poolCheck(e: *Engine) !void {
         const m = e.pmap orelse return;
+        return e.mapCheck(m);
+    }
+
+    /// poolCheck of one PoolMap (the engine's, or a TF_GLM53_MULTI conversation's).
+    /// 1 つの PoolMap の poolCheck (エンジンのもの、または TF_GLM53_MULTI の会話のもの)。
+    fn mapCheck(e: *Engine, m: cuda.DeviceBuffer) !void {
         try e.stream.synchronize();
         if (e.n_sp > 0) try e.comm.synchronize();
         var err: [4]u8 = undefined;
@@ -860,7 +1083,124 @@ pub const Engine = struct {
             .dgroup = if (e.dgroup) |*g| g else null, .probe = e.probe, .probe_ctx = e.probe_ctx,
             .pek = if (e.pek) |*k| k else null, .pes = &e.pes, .pe_ok = e.pe_ok, .ring = e.ring, .topk_words = e.topk_words, .topk_any = e.topk_any, .pe_f16 = e.pe_f16, .topk16 = e.topk16, .fuse = e.fuse, .xgroup = e.xgroup, .peer_q = e.peer_q, .index_fp8 = e.index_fp8, .probe_select = e.probe_select,
             .fast = if (e.fast) |*f| f else null, .dfast = if (e.dfast) |*f| f else null, .decode_bf16 = e.decode_bf16,
+            .pick_log = if (b == &e.vbufs) e.pick_log_dev else 0,
         };
+    }
+
+    /// TF_GLM53_EXPERT_LIVE: the mapped pick log, the counts, and each expert's bits as loaded (the gate's K2 / 2).
+    /// TF_GLM53_EXPERT_LIVE: 写像した選択ログ、数える場所、読み込んだ各 expert の bit (gate の K2 / 2)。
+    fn initLive(e: *Engine) !void {
+        var first: ?usize = null;
+        var last: usize = 0;
+        var n: u32 = 0;
+        for (e.layers) |*L| if (L.experts != null) {
+            if (first == null) first = L.index;
+            last = L.index;
+            n += 1;
+        };
+        const f = first orelse return;
+        // the MoE layers are one run (3 .. 77), every one under the log's layers
+        // MoE 層は一続き (3 .. 77)。どれもログの層数の内
+        if (last - f + 1 != n or last >= forward.log_layers) return error.ExpertLiveLayers;
+        e.pick_log = try cuda.HostBuffer.allocMapped(e.d, forward.log_layers * forward.log_rows * 8);
+        @memset(e.pick_log.?.bytes, 0xff);
+        e.pick_log_dev = try e.pick_log.?.device();
+        const E = e.cfg.experts;
+        const lv = try expert_live.Live.init(e.gpa, e.io, @intCast(f), n, @intCast(E));
+        errdefer lv.deinit();
+        @memcpy(lv.bits, e.xbits);
+        e.live = lv;
+        const cb = forward.log_layers * E * 4;
+        e.pc_dev = try cuda.DeviceBuffer.alloc(e.d, cb);
+        try e.pc_dev.?.fill32(0, null);
+        e.pc = try e.gpa.alloc(PromptCounts, prompt_counts_ring);
+        for (e.pc) |*pc| pc.* = .{ .host = try cuda.HostBuffer.alloc(e.d, cb), .start = try cuda.Event.init(e.d, true), .end = try cuda.Event.init(e.d, true) };
+        e.pc_base = try cuda.Event.init(e.d, true);
+        std.log.info("glm53: expert live: {d} MoE layers from {d}, a pick log of {d} B in mapped host memory", .{ n, f, e.pick_log.?.bytes.len });
+    }
+
+    /// The routed experts' bits as loaded (xbits); every rank (expert_swap checks a table against them).
+    /// 読み込んだ routed expert の bit (xbits)。全ランク (expert_swap が表をこれと照らす)。
+    fn initBits(e: *Engine) !void {
+        const E = e.cfg.experts;
+        var n: usize = 0;
+        for (e.layers) |*L| if (L.experts != null) {
+            if (n == 0) e.xfirst = L.index;
+            n += 1;
+        };
+        e.xbits = try e.gpa.alloc(u8, n * E);
+        const k2 = try e.gpa.alloc(i32, E);
+        defer e.gpa.free(k2);
+        for (e.layers) |*L| if (L.experts) |*x| {
+            try x.k2[0].download(0, std.mem.sliceAsBytes(k2));
+            for (k2, 0..) |v, j| e.xbits[(L.index - e.xfirst) * E + j] = @intCast(@divTrunc(@max(v, 0), 2));
+        };
+    }
+
+    /// After the routed experts' bits changed: the cached prefixes (computed with the old ones) dropped, every rank.
+    /// routed expert の bit を変えた後: 保存した prefix (古い bit で計算したもの) を捨てる。全ランク。
+    pub fn dropCaches(e: *Engine) !void {
+        if (e.pool) |p| try p.cold();
+        if (e.slots) |s| try s.cold();
+        if (e.live) |lv| lv.setBits(e.xbits);
+    }
+
+    /// TF_GLM53_EXPERT_LIVE: rows row0 .. row0 + n of the last decode window (synchronized) as conversation `conv`'s
+    /// input rows at pos0 .., their input tokens `toks` (the text of the pick log).
+    /// TF_GLM53_EXPERT_LIVE: 直前の decode ウィンドウ (同期済み) の行 row0 .. row0 + n を、会話 `conv` の位置 pos0 ..
+    /// の入力行として残す。入力 token は `toks` (選択ログの文字)。
+    fn liveRows(e: *Engine, row0: usize, n: usize, conv: usize, pos0: usize, toks: []const i64) void {
+        const lv = e.live orelse return;
+        lv.record(e.pick_log.?.bytes, row0, n, @intCast(@min(conv, std.math.maxInt(u16))), pos0, toks);
+    }
+
+    /// TF_GLM53_EXPERT_LIVE: a prompt chunk of `rows` rows from position `pos` begins (rank 0): the counts that are in
+    /// folded, a slot taken (waiting for the oldest when all are in flight), the chunk's start recorded.
+    /// TF_GLM53_EXPERT_LIVE: 位置 `pos` からの `rows` 行の prompt チャンクが始まる (rank 0): 届いた数を取り込み、枠を
+    /// 取り (全部が途中なら最古を待つ)、チャンクの始まりを記録する。
+    fn promptCountsBegin(e: *Engine, pos: usize, rows: u32) !void {
+        try e.promptCountsFold(false);
+        if (e.pc_busy == e.pc.len) _ = try e.promptCountsFoldOne(true);
+        const pc = &e.pc[e.pc_next];
+        pc.rows = rows;
+        pc.pos = @intCast(@min(pos, std.math.maxInt(u32)));
+        pc.conv = e.pc_conv;
+        try pc.start.record(e.stream);
+    }
+
+    /// The chunk's counts copied out after its work on the main stream (every prompt context's routed experts run
+    /// there), the device counts zeroed, the chunk's end recorded.
+    /// チャンクの数を main ストリーム上の仕事の後で写し (prompt の文脈の routed expert はすべてそこで動く)、デバイスの
+    /// 数を 0 に戻し、チャンクの終わりを記録する。
+    fn promptCountsEnd(e: *Engine, done: bool) !void {
+        const pc = &e.pc[e.pc_next];
+        pc.done = done;
+        try e.pc_dev.?.downloadAsync(0, pc.host.bytes, e.stream.handle);
+        try e.pc_dev.?.fill32(0, e.stream.handle);
+        try pc.end.record(e.stream);
+        e.pc_next = (e.pc_next + 1) % e.pc.len;
+        e.pc_busy += 1;
+    }
+
+    /// The oldest chunk in flight into the live counts (`wait`: until its copy is done; else only if it is); false
+    /// when there was none or it was not done.
+    /// 途中にある最古のチャンクをライブの数へ取り込む (`wait`: 写しが終わるまで待つ。でなければ終わっていれば)。無いか
+    /// 終わっていなければ false。
+    fn promptCountsFoldOne(e: *Engine, wait: bool) !bool {
+        if (e.pc_busy == 0) return false;
+        const pc = &e.pc[(e.pc_next + e.pc.len - e.pc_busy) % e.pc.len];
+        if (wait) {
+            try pc.end.synchronize();
+        } else if (!try pc.end.done()) return false;
+        const ms = cuda.Event.elapsedMs(pc.start, pc.end) catch 0;
+        const since = cuda.Event.elapsedMs(e.pc_base.?, pc.end) catch 0;
+        e.live.?.recordPrompt(std.mem.bytesAsSlice(u32, pc.host.bytes), pc.rows, pc.conv, pc.pos, pc.done, ms, e.pc_base_ms + @as(u64, @intFromFloat(@max(since, 0))));
+        e.pc_busy -= 1;
+        return true;
+    }
+
+    fn promptCountsFold(e: *Engine, wait: bool) !void {
+        while (try e.promptCountsFoldOne(wait)) {}
     }
 
     /// The longest prompt a request may have (the reply needs at least one position).
@@ -910,7 +1250,7 @@ pub const Engine = struct {
         if (win == 0 or win > vrows) return error.TooManyDrafts;
         e.start = 0;
         e.dr_snap_end = null;
-        _ = (try e.prefill(tokens[0..p0], null)) orelse return error.Stopped;
+        _ = (try e.prefill(tokens[0..p0], null, null)) orelse return error.Stopped;
         const W = e.world;
         const vs: usize = e.vshare;
         const full = try e.gpa.alloc(f32, W * vs);
@@ -957,7 +1297,7 @@ pub const Engine = struct {
         // drafter はこの要求の行を見ないので、要求のあとはその ring と snapshot が古くなる
         e.dr_snap_end = null;
         const t0 = std.Io.Clock.awake.now(e.io);
-        var tok = (try e.prefill(prompt, null)) orelse {
+        var tok = (try e.prefill(prompt, null, sink)) orelse {
             try e.poolCheck();
             return e.stoppedInPrefill(st, t0);
         };
@@ -987,7 +1327,9 @@ pub const Engine = struct {
             }
             if (prof[1] > 0 and n == prof[0]) _ = e.d.api.cuProfilerStart();
             if (prof[1] > 0 and n == prof[1]) _ = e.d.api.cuProfilerStop();
+            const fed: i64 = tok; // the row's input token, at P / 行の入力 token (位置 P)
             tok = if (e.graphs) try e.roundGraph(P) else try e.roundEager(P, tok);
+            e.liveRows(0, 1, 0, P, &.{fed});
             // the row at P predicts P + 1; the next round's graph reads its token from ids[0]
             // 位置 P の行は P + 1 を予測する。次のラウンドのグラフはトークンを ids[0] から読む
             if (e.samp) |s| {
@@ -1001,6 +1343,7 @@ pub const Engine = struct {
             }
             n += 1;
             try e.emit(sink, tok);
+            if (sink) |s| if (s.round) |f| f(s.ctx, 0, 0);
             stop = stop_eos and e.cfg.isEos(tok);
         }
         st.generated = n;
@@ -1027,7 +1370,7 @@ pub const Engine = struct {
         var st: Stats = .{ .prompt = prompt.len };
         if (prop.begin) |f| try f(prop.ctx, prompt);
         const t0 = std.Io.Clock.awake.now(e.io);
-        var tok = (try e.prefill(prompt, prop)) orelse {
+        var tok = (try e.prefill(prompt, prop, sink)) orelse {
             try e.poolCheck();
             return e.stoppedInPrefill(st, t0);
         };
@@ -1101,9 +1444,11 @@ pub const Engine = struct {
             e.lap(&tp, 3);
             var k: usize = 0; // drafts equal to the picks before them / 手前の選択と一致した draft の数
             while (k < nd and k + 1 < np and drafts[k] == @as(u32, @intCast(picks[k]))) k += 1;
+            e.liveRows(0, k + 1, 0, P, window[0 .. k + 1]);
             st.rounds += 1;
             st.drafted += nd;
             st.accepted += k;
+            if (sink) |s| if (s.round) |f| f(s.ctx, nd, k);
             if (prop.kept) |f| try f(prop.ctx, k + 1);
             if (prop.kept_ids) |f| try f(prop.ctx, picks[0 .. k + 1]);
             e.lap(&tp, 4);
@@ -1169,7 +1514,8 @@ pub const Engine = struct {
         const F = struct {
             fn propose(ctx: *anyopaque, tok: u32, P: usize, room: usize, out: []u32) anyerror!usize {
                 const en: *Engine = @ptrCast(@alignCast(ctx));
-                const c = en.fw(true);
+                var c = en.fw(true);
+                c.pick_log = 0; // the MTP layer's draft rows are not target decode rows / MTP 層の draft 行は target の decode 行ではない
                 const m = &en.mtp.?;
                 const kc = en.state.kc[m.index].ptr;
                 const ic = if (en.state.ic[m.index]) |b| b.ptr else null;
@@ -1280,9 +1626,9 @@ pub const Engine = struct {
     /// the last row; returns the first token, or null when the ranks agreed to stop between chunks.
     /// prompt を最大 prompt_rows 行の等分チャンクで実行し (キー範囲: index_topk を超えたらチャンクの終端)、最終行で
     /// head を計算する。最初のトークンを返す。チャンクの間でランクが停止に合意したら null。
-    fn prefill(e: *Engine, prompt: []const i64, prop: ?Proposer) !?u32 {
-        const c = e.fw(false);
-        var head = &c;
+    fn prefill(e: *Engine, prompt: []const i64, prop: ?Proposer, sink: ?Sink) !?u32 {
+        var c = e.fw(false);
+        var head: *const forward.Ctx = &c;
         // rows below e.start are in the caches (the slot cache's resume); the rest takes the equal chunks a prompt of
         // len - start rows takes
         // e.start より前の行はキャッシュにある (スロットキャッシュの再開)。残りは、長さ len - start の prompt と同じ
@@ -1293,6 +1639,18 @@ pub const Engine = struct {
             m.begin();
             m.track = .begin(e.start, prompt.len);
         }
+        // TF_GLM53_EXPERT_LIVE (rank 0): the prompt contexts count their picks; every chunk's counts reach the live
+        // counts by the prefill's end
+        // TF_GLM53_EXPERT_LIVE (rank 0): prompt の文脈は選択を数える。各チャンクの数は prefill の終わりまでにライブの
+        // 数へ届く
+        const counted = e.pc_dev != null;
+        if (counted) {
+            c.prompt_hist = e.pc_dev.?.ptr;
+            for (e.sp_parts[0..e.n_sp]) |*h| h.main.prompt_hist = e.pc_dev.?.ptr;
+            try e.pc_base.?.record(e.stream);
+            e.pc_base_ms = e.live.?.nowMs();
+        }
+        defer if (counted) e.promptCountsFold(true) catch |err| std.log.warn("glm53: the prompt's pick counts not kept: {s}", .{@errorName(err)});
         const chunks = (L0 + e.prompt_rows - 1) / e.prompt_rows;
         const step = (L0 + chunks - 1) / chunks;
         var a: usize = e.start;
@@ -1331,11 +1689,13 @@ pub const Engine = struct {
             // rows [start, a) are in the caches (prefill_done)
             // 行 [start, a) はキャッシュにある (prefill_done)
             if (try e.stopAgreed()) return null;
+            if (sink) |s| if (s.chunk) |f| f(s.ctx, a);
             const end = @min(a + step, prompt.len);
             const rows: u32 = @intCast(end - a);
             const t: ?u32 = if (end > e.cfg.index_topk) @intCast(end) else null;
             if (e.recording_shapes) e.noteShape(e.shapeOf(rows, t != null));
             defer e.prefill_done = end;
+            if (counted) try e.promptCountsBegin(a, rows);
             // the chunk's MTP rows are written (by mtpPrompt or the parts' SpExtra) once it ends
             // チャンクの MTP の行は、チャンクが終わった時点で書けている (mtpPrompt か part の SpExtra)
             defer if (e.mtp) |*m| m.track.chunk(a, end);
@@ -1347,12 +1707,23 @@ pub const Engine = struct {
                     m.spBegin(prompt, a, rows, e.embed.ptr, e.final_norm.ptr);
                     break :blk m.spExtra(e.state.kc[m.index].ptr, if (e.state.ic[m.index]) |b| b.ptr else null);
                 } else null;
-                const last = try forward.promptSp(e.sp_parts[0..e.n_sp], e.sp_want, e.ready, prompt[a..end], @intCast(a), e.embed.ptr, e.layers, e.state.kc, e.state.ic, t, if (e.bufs.taps) |x| x.ptr else null, tap_row, end == prompt.len, extra);
+                const last = if (e.mid) |mh| blk: {
+                    // TF_GLM53_MULTI: the chunk in layer steps, the other conversations' round every mh.every layers
+                    // TF_GLM53_MULTI: チャンクを層ごとの段で実行し、mh.every 層ごとにほかの会話のラウンドを挟む
+                    var sc = try forward.SpChunk.begin(e.sp_parts[0..e.n_sp], e.sp_want, e.ready, prompt[a..end], @intCast(a), e.embed.ptr, e.layers, e.state.kc, e.state.ic, t, if (e.bufs.taps) |x| x.ptr else null, tap_row, end == prompt.len, extra);
+                    const every = mh.layersFor(rows);
+                    for (0..e.layers.len) |li| {
+                        try sc.layer(li);
+                        if ((li + 1) % every == 0 and li + 1 < e.layers.len) try e.midPoint(mh);
+                    }
+                    break :blk try sc.finish();
+                } else try forward.promptSp(e.sp_parts[0..e.n_sp], e.sp_want, e.ready, prompt[a..end], @intCast(a), e.embed.ptr, e.layers, e.state.kc, e.state.ic, t, if (e.bufs.taps) |x| x.ptr else null, tap_row, end == prompt.len, extra);
                 if (end == prompt.len) {
                     try last.main.headLogits(e.final_norm.ptr, e.lm_head.ptr, last.R - 1, 1, e.vshare);
                     head = &last.main;
                 }
                 if (prop) |p| if (p.taps) |f| try f(p.ctx, e.bufs.taps.?.ptr, rows);
+                if (counted) try e.promptCountsEnd(end == prompt.len);
                 continue;
             }
             if (rows > forward.max_rows) return error.ChunkTooWide;
@@ -1361,10 +1732,14 @@ pub const Engine = struct {
             try e.bufs.ids.uploadAsync(0, std.mem.sliceAsBytes(prompt[a..end]), e.stream.handle);
             try e.state.pos.fill32(@intCast(a), e.stream.handle);
             try c.embed(e.embed.ptr, rows);
-            for (e.layers, 0..) |*L, i| try c.layerPrompt(L, rows, e.state.kc[i].ptr, if (e.state.ic[i]) |b| b.ptr else null, e.state.pos.ptr, t);
+            for (e.layers, 0..) |*L, i| {
+                try c.layerPrompt(L, rows, e.state.kc[i].ptr, if (e.state.ic[i]) |b| b.ptr else null, e.state.pos.ptr, t);
+                if (e.mid) |mh| if ((i + 1) % mh.layersFor(rows) == 0 and i + 1 < e.layers.len) try e.midPoint(mh);
+            }
             if (end == prompt.len) try c.headLogits(e.final_norm.ptr, e.lm_head.ptr, rows - 1, 1, e.vshare);
             if (prop) |p| if (p.taps) |f| try f(p.ctx, e.bufs.taps.?.ptr, rows);
             if (e.mtp) |*m| try e.mtpPrompt(m, &c, e.bufs.x.ptr, prompt, a, rows);
+            if (counted) try e.promptCountsEnd(end == prompt.len);
             head = &c;
         }
         if (pprof_on and ci == pprof[1] + 1) {
@@ -1556,7 +1931,7 @@ pub const Engine = struct {
         defer e.recording_shapes = false;
         for ([_]bool{ false, true }) |select| {
             e.start = 0;
-            if (select) _ = try e.prefill(ids[0..past], null);
+            if (select) _ = try e.prefill(ids[0..past], null, null);
             for (sizes) |n| {
                 const base: usize = if (select) past else 0;
                 if (base + n > e.promptLimit()) break;
@@ -1564,12 +1939,455 @@ pub const Engine = struct {
                 // 再開した prompt は少なくとも slots.tail (17) 行を計算する
                 if (select and n < 17) continue;
                 e.start = base;
-                _ = e.prefill(ids[0 .. base + n], null) catch |err| {
+                _ = e.prefill(ids[0 .. base + n], null, null) catch |err| {
                     std.log.err("glm53: rank {d}: a {d}-row prompt chunk{s} cannot run ({s}) while the start-up warms its shapes", .{ e.rank, n, if (select) " after 2100 rows (a selection)" else "", @errorName(err) });
                     return err;
                 };
             }
         }
+    }
+
+    // ------------------------------------------------- several conversations at once (TF_GLM53_MULTI) / 複数の会話 ---
+
+    /// TF_GLM53_MULTI=n (1 .. multi_max): every rank once after the pool's setup. Needs the pool, DCP 2, graphs, the
+    /// fused decode with the bf16 reduce, and DFlash2 with per-slot saves or no drafter (MTP is not batched yet).
+    /// TF_GLM53_MULTI=n (1 .. multi_max): pool の準備の後に全ランクが 1 回呼ぶ。pool、DCP 2、graph、bf16 の reduce 付きの
+    /// fuse した decode、スロットごとの写しのある DFlash2 か drafter なしが要る (MTP はまだまとめない)。
+    /// A prefill's pause for the other conversations (MidHook): both streams drained, then the hook.
+    /// prefill がほかの会話のために止まる所 (MidHook): 両方の stream を空にしてから hook を呼ぶ。
+    fn midPoint(e: *Engine, mh: MidHook) !void {
+        try e.stream.synchronize();
+        if (e.n_sp > 0) try e.comm.synchronize();
+        try mh.f(mh.ctx);
+    }
+
+    pub fn multiSetup(e: *Engine, n: usize) !void {
+        if (n < 1 or n > multi_max) return error.MultiCount;
+        if (e.pool == null) return error.MultiNeedsPool;
+        if (e.dgroup == null or !e.fuse or !e.graphs or !e.decode_bf16 or e.fast == null) return error.MultiNeedsDcpFuseGraphsRoce;
+        if (e.mtp != null) return error.MultiWithMtp;
+        if (e.drafter != null and e.pool.?.meta.saves.len == 0) return error.MultiNeedsDraftSaves;
+        // attentionPar quantizes the index queries before each conversation's RoPE (the single path after it)
+        // attentionPar は index の query を会話ごとの RoPE より前に量子化する (単独の経路は後)
+        if (e.index_fp8) return error.MultiWithIndexFp8;
+        // a plan keeps the other live conversations' slots, its source slot and its new one (plan.makePlanBusy evicts
+        // none of them): n + 1 slots at most, which the slot limit must allow
+        // プランはほかの使用中の会話のスロット、元のスロット、新しいスロットを残す (plan.makePlanBusy はどれも追い
+        // 出さない): 最大 n + 1 個で、スロットの上限はそれを許さねばならない
+        if (e.pool.?.meta.cfg.max_slots < n + 1) return error.MultiNeedsMoreSlots;
+        const rows: usize = if (e.drafter != null) vrows else 1;
+        const R: u32 = @intCast(n * rows);
+        if (R > forward.multi_rows) return error.MultiTooWide;
+        var first_moe: ?*const moe.Routed = null;
+        for (e.layers) |*L| if (L.experts) |*x| {
+            first_moe = x;
+            break;
+        };
+        const keys: usize = bucket(e.capacity + 1, e.cfg.index_topk) orelse 2 * e.cfg.index_topk;
+        const inv = try rope.table(e.cfg.rope_theta, e.cfg.qk_rope);
+        const had = rope.hadamard();
+        const m = try e.gpa.create(Multi);
+        errdefer e.gpa.destroy(m);
+        var b = try forward.Buffers.init(e.d, e.cfg, e.heads, e.world, R, e.vshare, &inv, &had, keys, e.dcp, true, R);
+        const row: usize = @as(usize, R) * e.cfg.hidden * 2;
+        b.dpart = try cuda.DeviceBuffer.alloc(e.d, row);
+        b.dred = try cuda.DeviceBuffer.alloc(e.d, row);
+        b.dmid = try cuda.DeviceBuffer.alloc(e.d, (row / e.world + 15) / 16 * 16);
+        if (e.drafter != null) b.taps = try cuda.DeviceBuffer.alloc(e.d, @as(usize, R) * e.n_taps * e.cfg.hidden * 2);
+        m.* = .{
+            .n = n, .rows = rows, .convs = undefined, .b = b,
+            .xs = try moe.Scratch.init(e.d, first_moe orelse return error.NoMoeLayer, R, @intCast(e.cfg.top_k)),
+            .streams = undefined, .events = undefined,
+            .ar2_rows = @intCast(std.fmt.parseInt(u32, std.mem.span(std.c.getenv("TF_GLM53_MULTI_AR2") orelse "17"), 10) catch 17),
+        };
+        for (m.convs[0..], 0..) |*cv, k| {
+            cv.* = .{ .pos = try cuda.DeviceBuffer.alloc(e.d, 16) };
+            try cv.pos.fill8(0, null);
+            if (k < n) if (e.pmap) |pm| {
+                cv.pmap = try cuda.DeviceBuffer.alloc(e.d, pm.len);
+                try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(cv.pmap.?.ptr, pm.ptr, pm.len, e.stream.handle), "cuMemcpyDtoDAsync");
+            };
+        }
+        for (m.streams[0..n]) |*x| x.* = try cuda.Stream.initPriority(e.d, 0);
+        for (m.events[0 .. n + 1]) |*x| x.* = try cuda.Event.init(e.d, false);
+        for (&m.tev) |*x| x.* = try cuda.Event.init(e.d, true);
+        m.bucket_rows = std.fmt.parseInt(usize, std.mem.span(std.c.getenv("TF_GLM53_MULTI_BUCKET") orelse "0"), 10) catch return error.MultiBucket;
+        if (m.bucket_rows % 1024 != 0) return error.MultiBucket;
+        if (e.drafter) |dr| try dr.initSets(n);
+        try e.stream.synchronize();
+        e.multi = m;
+        if (e.rank == 0) std.log.info("glm53: batched decode of up to {d} conversations ({d} rows a window each, two-shot reduce from {d} rows)", .{ n, rows, m.ar2_rows });
+    }
+
+    fn mctx(e: *Engine) forward.Ctx {
+        const m = e.multi.?;
+        var c = e.ctxOf(&m.b, &m.xs, e.stream);
+        c.pick_log = e.pick_log_dev; // the MULTI windows are target decode rows too / MULTI のウィンドウも target の decode 行
+        c.par_streams = m.streams[0..m.n];
+        c.par_events = m.events[0 .. m.n + 1];
+        c.ar2_rows = m.ar2_rows;
+        return c;
+    }
+
+    /// A free conversation (null: all live).
+    /// 空いている会話 (null: すべて使用中)。
+    /// A window's indexer key range: `bucket`, or TF_GLM53_MULTI_BUCKET's multiple when that is shorter.
+    /// ウィンドウの indexer のキー範囲: `bucket`、または TF_GLM53_MULTI_BUCKET の倍数の方が短ければそれ。
+    fn multiBucket(e: *const Engine, t: usize) ?u32 {
+        const b = bucket(t, e.cfg.index_topk) orelse return null;
+        const g = e.multi.?.bucket_rows;
+        if (g == 0) return b;
+        const fine = @max(2 * e.cfg.index_topk, (t + g - 1) / g * g);
+        return @intCast(@min(@as(usize, b), fine));
+    }
+
+    pub fn multiFree(e: *const Engine) ?usize {
+        const m = e.multi orelse return null;
+        for (m.convs[0..m.n], 0..) |cv, k| if (!cv.live) return k;
+        return null;
+    }
+
+    /// The pool slots of the live conversations (their plans' X), for the planner to leave alone.
+    /// 使用中の会話の pool のスロット (プランの X)。プランナーが触れないようにする。
+    pub fn multiBusy(e: *const Engine, out: []u64) []u64 {
+        const m = e.multi orelse return out[0..0];
+        var n: usize = 0;
+        for (m.convs[0..m.n]) |cv| if (cv.live) if (cv.plan) |q| {
+            out[n] = q.X;
+            n += 1;
+        };
+        return out[0..n];
+    }
+
+    fn multiEmit(e: *Engine, cv: *Conv, sink: ?Sink, tok: u32) !void {
+        if (sink) |s| s.tokens(s.ctx, &.{tok});
+        try cv.out.append(e.gpa, tok);
+    }
+
+    /// Conversation k's prompt (after pool_serve.admitMulti set e.start and the drafter's resume): the prefill alone on
+    /// the engine's prompt buffers and map (the other conversations wait), its first token, its decode state.
+    /// 会話 k の prompt (pool_serve.admitMulti が e.start と drafter の再開を設定した後): エンジンの prompt 用のバッファと
+    /// 表で prefill だけを行い (他の会話は待つ)、最初のトークンと decode の状態を作る。
+    pub fn multiStart(e: *Engine, k: usize, prompt: []const i64, max_tokens: usize, stop_eos: bool, drafted: bool, samp: ?Sampling, sink: ?Sink) !void {
+        const m = e.multi.?;
+        const cv = &m.convs[k];
+        if (prompt.len == 0 or prompt.len > e.promptLimit()) return error.PromptLength;
+        cv.live = true;
+        cv.done = false;
+        cv.prompt.clearRetainingCapacity();
+        try cv.prompt.appendSlice(e.gpa, prompt);
+        cv.out.clearRetainingCapacity();
+        cv.stop_eos = stop_eos;
+        cv.drafted = drafted and e.drafter != null;
+        cv.want = @max(1, @min(max_tokens, e.capacity - prompt.len));
+        cv.st = .{ .prompt = prompt.len };
+        // the previous request's decode state: a prefill stopped before its first token must leave n 0, which is how
+        // pool_serve.commitMulti tells it from a reply (else it would commit the whole prompt, rows never computed)
+        // 前の要求の decode の状態: 最初のトークンの前に止まった prefill は n を 0 のままにすること。pool_serve.commitMulti
+        // はそれで応答と見分ける (そうでないと、計算していない行まで prompt 全体を確定してしまう)
+        cv.n = 0;
+        cv.P = 0;
+        cv.tok = 0;
+        cv.start = 0;
+        cv.prefill_done = 0;
+        cv.dr_snap_end = null;
+        cv.samp = samp;
+        // the prefill draws the first token with it (at position prompt.len, as prefill does for one request)
+        // prefill は最初のトークンをこれで抽選する (位置 prompt.len、1 つの要求の prefill と同じ)
+        e.samp = samp;
+        defer e.samp = null;
+        const prop: ?Proposer = if (cv.drafted) e.drafterProposer() else null;
+        if (cv.drafted) e.drafter.?.use(k);
+        if (prop) |p| if (p.begin) |f| try f(p.ctx, prompt);
+        const t0 = std.Io.Clock.awake.now(e.io);
+        e.pc_conv = @intCast(@min(k, std.math.maxInt(u16)));
+        defer e.pc_conv = 0;
+        const first = try e.prefill(prompt, prop, sink);
+        // the prefill's writes through the engine's map: a refused one stops every rank, as after a request
+        // エンジンの表を通した prefill の書き込み: 拒まれたものがあれば、要求の後と同じく全ランクが止まる
+        try e.poolCheck();
+        cv.start = e.start;
+        cv.prefill_done = e.prefill_done;
+        cv.dr_snap_end = e.dr_snap_end;
+        cv.st.prefill_ns = @intCast(t0.durationTo(std.Io.Clock.awake.now(e.io)).toNanoseconds());
+        cv.st.cached = e.start;
+        const tok = first orelse {
+            cv.done = true;
+            cv.st.finish = .cancelled;
+            return;
+        };
+        if (sink) |s| if (s.prefilled) |f| f(s.ctx);
+        cv.t1 = std.Io.Clock.awake.now(e.io);
+        cv.P = prompt.len;
+        cv.tok = tok;
+        cv.n = 1;
+        try e.multiEmit(cv, sink, tok);
+        if (cv.stop_eos and e.cfg.isEos(tok)) {
+            cv.done = true;
+            cv.st.finish = .stop;
+        } else if (cv.n >= cv.want) {
+            cv.done = true;
+            cv.st.finish = .length;
+        }
+    }
+
+    /// One batched round over conversations `ks` (live, not done; `stops`: rank 0's stop for each, `sinks` rank 0's
+    /// outputs): each conversation's drafts in turn, one window over all of them (Ctx.windowMulti: the linears,
+    /// experts and head once, the attention on each conversation's own cache and map), each conversation's drafts
+    /// equal to its picks kept and its first pick past them, as generateDrafted.
+    /// 会話 `ks` (使用中で未完了。`stops`: それぞれへの rank 0 の停止、`sinks`: rank 0 の出力) をまとめたラウンド 1 回:
+    /// 会話ごとに順に draft を作り、全会話で 1 つのウィンドウを走らせ (Ctx.windowMulti: linear・expert・head は 1 回、
+    /// attention は各会話自身のキャッシュと表で)、会話ごとに選択と一致する draft と、その次の選択を残す
+    /// (generateDrafted と同じ)。
+    pub fn multiRound(e: *Engine, ks: []const u8, stops: []const bool, sinks: []const ?Sink) !void {
+        const m = e.multi.?;
+        if (ks.len > m.n or stops.len != ks.len or sinks.len != ks.len) return error.MultiRoundShape;
+        var live: [multi_max]usize = undefined; // indices into ks / ks の中の位置
+        var nl: usize = 0;
+        for (ks, stops, 0..) |k, stp, j| {
+            if (k >= m.n) return error.MultiRoundShape;
+            const cv = &m.convs[k];
+            if (!cv.live or cv.done) return error.MultiNotLive;
+            if (stp) {
+                cv.done = true;
+                cv.st.finish = .cancelled;
+                continue;
+            }
+            live[nl] = j;
+            nl += 1;
+        }
+        if (nl == 0) return;
+        var drafts: [multi_max][vrows]u32 = undefined;
+        var nd: [multi_max]usize = @splat(0);
+        var room: [multi_max]usize = @splat(0);
+        const depth_max = vrows - 1;
+        var tp = std.Io.Clock.awake.now(e.io);
+        const t_start = tp;
+        for (live[0..nl], 0..) |j, i| {
+            const cv = &m.convs[ks[j]];
+            room[i] = @min(depth_max, cv.want - cv.n - 1, e.capacity - cv.P - 1);
+            if (cv.drafted and room[i] > 0) {
+                const dr = e.drafter.?;
+                dr.use(ks[j]);
+                nd[i] = try dr.propose(cv.tok, room[i], 0.4, cv.samp, drafts[i][0..room[i]]);
+                if (nd[i] > room[i]) return error.TooManyDrafts;
+            }
+        }
+        e.lap(&tp, 1);
+        const t_prop = tp;
+        // every rank's drafts checked once: [0, then a conversation each: k, P, tok, room, nd, drafts (7)]
+        // 全ランクの draft を一度だけ照合する: [0、続いて会話ごとに k、P、tok、room、nd、draft (7)]
+        var words: [64]i32 = @splat(-1);
+        words[0] = 0;
+        for (live[0..nl], 0..) |j, i| {
+            const cv = &m.convs[ks[j]];
+            const w = words[1 + 12 * i ..][0..12];
+            w[0] = ks[j];
+            w[1] = @intCast(cv.P);
+            w[2] = @intCast(cv.tok);
+            w[3] = @intCast(room[i]);
+            w[4] = @intCast(nd[i]);
+            for (drafts[i][0..nd[i]], 5..) |dd, x| w[x] = @intCast(dd);
+        }
+        _ = try e.agree(words[0 .. (1 + 12 * nl + 3) / 4 * 4]);
+        e.lap(&tp, 2);
+        const t_agree = tp;
+        // the window: each conversation's rows (vrows with a drafter while the capacity allows, so the graphs stay few;
+        // rows past its drafts repeat the last one, their picks unused and their cache rows past the new position),
+        // ids [tok, drafts.., padding]
+        // ウィンドウ: 会話ごとの行 (drafter があり容量が許す限り vrows。graph を少なく保つため。draft より後ろの行は
+        // 最後の draft を繰り返し、選択は使わず、キャッシュの行は新しい位置より後ろ)、id は [tok, draft.., 詰め物]
+        var ids: [multi_max * vrows]i64 = undefined;
+        var rows: [multi_max]u32 = undefined;
+        var seqs: [multi_max]forward.WindowSeq = undefined;
+        var key: MultiKey = .{ .n = @intCast(nl), .conv = @splat(0), .rows = @splat(0), .t = @splat(0) };
+        var R: u32 = 0;
+        for (live[0..nl], 0..) |j, i| {
+            const k = ks[j];
+            const cv = &m.convs[k];
+            // padded only beside others (one conversation alone keeps 1 + drafts rows, as generateDrafted)
+            // 詰め物はほかの会話がいるときだけ (1 会話だけなら generateDrafted と同じく 1 + draft の行)
+            const full = nl > 1 and cv.drafted and cv.P + vrows <= e.capacity;
+            const r: u32 = if (full) vrows else @intCast(1 + nd[i]);
+            ids[R] = cv.tok;
+            for (1..r) |x| ids[R + x] = if (x <= nd[i]) drafts[i][x - 1] else if (nd[i] > 0) drafts[i][nd[i] - 1] else cv.tok;
+            rows[i] = r;
+            try cv.pos.fill32(@intCast(cv.P), e.stream.handle);
+            const t = e.multiBucket(cv.P + r);
+            seqs[i] = .{ .rows = r, .kc = e.state.kc, .ic = e.state.ic, .pos = cv.pos.ptr, .t = t, .pmap = if (cv.pmap) |pm| pm.ptr else 0 };
+            key.conv[i] = @intCast(k);
+            key.rows[i] = @intCast(r);
+            key.t[i] = t orelse 0;
+            R += r;
+        }
+        try m.b.ids.uploadAsync(0, std.mem.sliceAsBytes(ids[0..R]), e.stream.handle);
+        const slot = try e.multiGraph(key, seqs[0..nl]);
+        try m.tev[0].record(e.stream);
+        try m.execs[slot].launchOn(e.stream);
+        try m.tev[1].record(e.stream);
+        var picks: [multi_max * vrows]i32 = undefined;
+        try m.b.tok_out.downloadAsync(0, std.mem.sliceAsBytes(picks[0..R]), e.stream.handle);
+        try e.stream.synchronize();
+        try e.roceCheck();
+        m.gpu_ns[0] += @intFromFloat(@as(f64, try cuda.Event.elapsedMs(m.tev[0], m.tev[1])) * 1e6);
+        if (m.taps_pending) {
+            m.gpu_ns[1] += @intFromFloat(@as(f64, try cuda.Event.elapsedMs(m.tev[2], m.tev[3])) * 1e6);
+            m.taps_pending = false;
+        }
+        // temperature > 0: the conversation's rows drawn from the window's logits as generateDrafted draws them (row i
+        // at position P + 1 + i, stopping after the first that differs from its draft), in place of the argmax picks
+        // temperature > 0: 会話の行を、generateDrafted と同じくウィンドウの logits から抽選する (行 i は位置 P + 1 + i、
+        // draft と違った最初の行のあとで止める)。argmax の選択の代わりに使う
+        {
+            var o2: usize = 0;
+            for (live[0..nl], 0..) |j, i| {
+                const cv = &m.convs[ks[j]];
+                if (cv.samp) |s| {
+                    var sp: [vrows]u32 = undefined;
+                    const np = try e.sampleRows(try m.b.lpart.at(o2 * e.vshare * 4), rows[i], cv.P + 1, s, drafts[i][0..nd[i]], &sp);
+                    for (sp[0..np], 0..) |v, x| picks[o2 + x] = @intCast(v);
+                }
+                o2 += rows[i];
+            }
+        }
+        e.lap(&tp, 3);
+        const t_win = tp;
+        const tok0 = blk: {
+            var s0: u64 = 0;
+            for (live[0..nl]) |j| s0 += m.convs[ks[j]].n;
+            break :blk s0;
+        };
+        const row_bytes: usize = @as(usize, e.n_taps) * e.cfg.hidden * 2;
+        if (e.drafter) |dr| try m.tev[2].record(dr.t.stream);
+        var o: usize = 0;
+        for (live[0..nl], 0..) |j, i| {
+            const k = ks[j];
+            const cv = &m.convs[k];
+            const pk = picks[o..][0..rows[i]];
+            var acc: usize = 0; // drafts equal to the picks before them / 手前の選択と一致した draft の数
+            while (acc < nd[i] and acc + 1 < rows[i] and drafts[i][acc] == @as(u32, @intCast(pk[acc]))) acc += 1;
+            e.liveRows(o, acc + 1, k, cv.P, ids[o .. o + acc + 1]);
+            cv.st.rounds += 1;
+            cv.st.drafted += nd[i];
+            cv.st.accepted += acc;
+            const sink = sinks[j];
+            if (sink) |s| if (s.round) |f| f(s.ctx, nd[i], acc);
+            if (cv.drafted) {
+                const dr = e.drafter.?;
+                dr.use(k);
+                try dr.addTaps(m.b.taps.?.ptr + o * row_bytes, acc + 1);
+            }
+            for (pk[0 .. acc + 1]) |pv| {
+                cv.tok = @intCast(pv);
+                cv.n += 1;
+                try e.multiEmit(cv, sink, cv.tok);
+                if (cv.stop_eos and e.cfg.isEos(cv.tok)) {
+                    cv.done = true;
+                    cv.st.finish = .stop;
+                    break;
+                }
+                if (cv.n >= cv.want) {
+                    cv.done = true;
+                    cv.st.finish = .length;
+                    break;
+                }
+            }
+            cv.P += acc + 1;
+            o += rows[i];
+        }
+        if (e.drafter) |dr| {
+            try m.tev[3].record(dr.t.stream);
+            m.taps_pending = true;
+        }
+        e.lap(&tp, 4);
+        const ns = struct {
+            fn f(a: std.Io.Timestamp, b: std.Io.Timestamp) u64 {
+                return @intCast(@max(0, a.durationTo(b).toNanoseconds()));
+            }
+        }.f;
+        m.ns[0] += ns(t_start, t_prop);
+        m.ns[1] += ns(t_prop, t_agree);
+        m.ns[2] += ns(t_agree, t_win);
+        m.ns[3] += ns(t_win, tp);
+        m.rounds += 1;
+        m.conv_rounds += nl;
+        var tok1: u64 = 0;
+        for (live[0..nl]) |j| tok1 += m.convs[ks[j]].n;
+        m.tokens += tok1 - tok0;
+        if (m.rounds % 200 == 0) {
+            const r: f64 = @floatFromInt(m.rounds);
+            if (e.rank == 0) std.debug.print("[multi] {d} rounds: {d:.2} conversations a round, {d:.2} tokens a round; ms a round: drafts {d:.1}, agree {d:.1}, window {d:.1} (gpu {d:.1}, capture {d:.1}), accept {d:.1}, taps gpu {d:.1}; graphs captured {d}\n", .{
+                m.rounds, @as(f64, @floatFromInt(m.conv_rounds)) / r, @as(f64, @floatFromInt(m.tokens)) / r,
+                @as(f64, @floatFromInt(m.ns[0])) / r / 1e6, @as(f64, @floatFromInt(m.ns[1])) / r / 1e6, @as(f64, @floatFromInt(m.ns[2])) / r / 1e6,
+                @as(f64, @floatFromInt(m.gpu_ns[0])) / r / 1e6, @as(f64, @floatFromInt(m.cap_ns)) / r / 1e6,
+                @as(f64, @floatFromInt(m.ns[3])) / r / 1e6, @as(f64, @floatFromInt(m.gpu_ns[1])) / r / 1e6, m.captures,
+            });
+            m.ns = @splat(0);
+            m.gpu_ns = @splat(0);
+            m.cap_ns = 0;
+            m.rounds = 0;
+            m.conv_rounds = 0;
+            m.tokens = 0;
+        }
+    }
+
+    /// The window's graph for `key` (captured on a miss, the least recently used dropped when full).
+    /// `key` のウィンドウの graph (なければ capture し、満杯なら最も前に使ったものを捨てる)。
+    fn multiGraph(e: *Engine, key: MultiKey, seqs: []const forward.WindowSeq) !usize {
+        const m = e.multi.?;
+        m.tick += 1;
+        var slot: usize = 0;
+        for (m.keys, 0..) |kk, i| {
+            if (kk) |x| if (std.meta.eql(x, key)) {
+                m.used[i] = m.tick;
+                return i;
+            };
+        }
+        for (m.keys, 0..) |kk, i| {
+            if (kk == null) {
+                slot = i;
+                break;
+            }
+            if (m.used[i] < m.used[slot]) slot = i;
+        }
+        if (m.keys[slot] != null) {
+            m.execs[slot].deinit();
+            m.keys[slot] = null;
+        }
+        var c = e.mctx();
+        const tc = std.Io.Clock.awake.now(e.io);
+        defer if (e.rank == 0) std.debug.print("[multi] window graph for {d} conversations captured in {d} ms ({d} so far)\n", .{ key.n, @divTrunc(tc.durationTo(std.Io.Clock.awake.now(e.io)).toNanoseconds(), 1000000), m.captures });
+        try cuda.graph.beginCapture(e.stream, .thread_local);
+        c.windowMulti(seqs, e.embed.ptr, e.layers, e.final_norm.ptr, e.lm_head.ptr, e.vshare, .par) catch |err| {
+            if (cuda.graph.endCapture(e.stream)) |g| {
+                var gg = g;
+                gg.deinit();
+            } else |_| {}
+            return err;
+        };
+        var g = try cuda.graph.endCapture(e.stream);
+        defer g.deinit();
+        m.execs[slot] = try g.instantiate();
+        m.keys[slot] = key;
+        m.used[slot] = m.tick;
+        m.captures += 1;
+        m.cap_ns += @intCast(@max(0, tc.durationTo(std.Io.Clock.awake.now(e.io)).toNanoseconds()));
+        return slot;
+    }
+
+    /// Conversation k's stats once it is done (after pool_serve.commitMulti), its map's error flag checked on every
+    /// rank, the conversation freed.
+    /// 会話 k が終わった後の統計 (pool_serve.commitMulti の後)。全ランクで表の異常フラグを確かめ、会話を空ける。
+    pub fn multiEnd(e: *Engine, k: usize) !Stats {
+        const m = e.multi.?;
+        const cv = &m.convs[k];
+        var st = cv.st;
+        st.generated = cv.n;
+        if (cv.n > 0) st.decode_ns = @intCast(cv.t1.durationTo(std.Io.Clock.awake.now(e.io)).toNanoseconds());
+        cv.live = false;
+        cv.done = false;
+        if (cv.pmap) |pm| try e.mapCheck(pm);
+        return st;
     }
 
     fn capture(e: *Engine, R: u32, t: ?u32) !usize {
@@ -1622,7 +2440,21 @@ fn upload(gpa: std.mem.Allocator, d: *const cuda.Driver, r: *weights.Reader, nam
 /// leaves out the page cache), one line a step a rank. `last` holds the previous reading (0: the first, not printed).
 /// TF_GLM53_MEMTRACE=1: 起動の各段階が取ったデバイスメモリ (cuMemGetInfo の free の前後。GB10 ではページキャッシュを
 /// 含まない)。段階ごと・ランクごとに 1 行。`last` は前回の値 (0 は最初で、表示しない)。
+/// Every start-up step's DeviceBuffer bytes (memMark, always on; the control panel's /v1/memory shows rank 0's).
+/// 起動の各段階の DeviceBuffer のバイト (memMark、常に記録。制御パネルの /v1/memory は rank 0 のものを出す)。
+pub var mem_steps: [48]@import("memory_live.zig").Step = undefined;
+pub var mem_n: usize = 0;
+var ms_held: u64 = 0;
+
 pub fn memMark(ctx: *const cuda.Context, rank: u32, label: []const u8, last: *usize) void {
+    {
+        const now = cuda.usage(false).device;
+        if (!std.mem.eql(u8, label, "-") and mem_n < mem_steps.len) {
+            mem_steps[mem_n] = .{ .label = label, .bytes = now -| ms_held };
+            mem_n += 1;
+        }
+        ms_held = now;
+    }
     const on = std.c.getenv("TF_GLM53_MEMTRACE") orelse return;
     if (!std.mem.eql(u8, std.mem.span(on), "1")) return;
     ctx.synchronize() catch {};
@@ -1636,6 +2468,104 @@ pub fn memMark(ctx: *const cuda.Context, rank: u32, label: []const u8, last: *us
     mt_held = held;
 }
 var mt_held: u64 = 0;
+
+/// TF_GLM53_EXPERT_PLAN: the MoE layers' routed experts from the banks the plan names, checked (manifests, layer file
+/// headers and sizes) before any weight is read; a plan that cannot fit is refused before its first layer (the
+/// non-expert weights estimated).
+/// TF_GLM53_EXPERT_PLAN: MoE 層の routed expert を計画の指すバンクから読む。重みを読む前に検査する (manifest、層ファイルの
+/// header と大きさ)。入らない計画は最初の層の前に断る (非 expert の重みは見積もり)。
+fn planCheck(gpa: std.mem.Allocator, io: std.Io, cfg: Config, rank: u32, world: u32, out: *?expert_plan.Plan) !void {
+    out.* = try expert_plan.fromEnv(gpa, io, cfg);
+    if (out.*) |*p| {
+        try expert_plan.checkFiles(p, gpa);
+        if (rank == 0) logPlan(p);
+        try memAdmit(io, rank, "routed experts of the plan + non-expert weights (estimate)", planBytes(p, cfg, world) + nonexpert_estimate / world);
+    }
+}
+
+/// One layer of `create`'s load: its weights and routed experts (from the plan's banks when there is one), the file
+/// pages returned, MemAvailable checked.
+/// `create` の読み込みの 1 層: 重みと routed expert (計画があればそのバンクから)、ファイルのページを返し、MemAvailable を見る。
+fn loadLayerAt(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, reader: *weights.Reader, plan: ?*const expert_plan.Plan, cfg: Config, i: usize, heads: u32, rank: u32, world: u32, stored_world: usize, L: *model.Layer) !void {
+    L.* = try model.loadLayer(gpa, d, reader, cfg, i, heads);
+    if (cfg.isMoe(i)) L.experts = if (plan) |p| try loadPlanned(gpa, io, d, reader, p, cfg, i, rank, world, stored_world) else try moe.load(gpa, d, reader, cfg, i);
+    reader.release();
+    try memCheck(io, i);
+}
+
+/// A MoE layer's routed experts from the plan's banks: each bank the layer uses opened on its own file, read, then
+/// dropped from the page cache and closed. A layer outside the plan reads the checkpoint.
+/// MoE 層の routed expert を計画のバンクから: 層が使うバンクごとにその層ファイルだけを開いて読み、ページキャッシュから
+/// 落として閉じる。計画の外の層はチェックポイントから読む。
+fn loadPlanned(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, ckpt: *weights.Reader, p: *const expert_plan.Plan, cfg: Config, layer: usize, rank: usize, world: usize, stored_world: usize) !moe.Routed {
+    const pick = p.row(layer) orelse return moe.load(gpa, d, ckpt, cfg, layer);
+    var opened: [expert_plan.max_banks]?weights.Reader = @splat(null);
+    defer for (&opened) |*r| if (r.*) |*x| {
+        x.release();
+        x.close();
+    };
+    var readers: [expert_plan.max_banks]*weights.Reader = @splat(ckpt);
+    for (p.banks, 0..) |b, bi| if (p.uses(layer, bi)) {
+        var name: [64]u8 = undefined;
+        const fname = try std.fmt.bufPrint(&name, "experts-layer-{d:0>3}.safetensors", .{layer});
+        opened[bi] = try weights.Reader.openFile(gpa, io, b.dir, fname, rank, world, stored_world);
+        readers[bi] = &opened[bi].?;
+    };
+    return moe.loadFrom(gpa, d, .{ .readers = readers[0..p.banks.len], .pick = pick }, cfg, layer);
+}
+
+/// GLM-5.3's non-expert weights over all ranks (attention, shared experts, dense layers, embedding and head, MTP layer):
+/// about 31 GiB, 7.8 GiB a rank at TP=4 (measured on the panel lane). An estimate for memAdmit only.
+/// GLM-5.3 の非 expert の重みの全ランク合計 (約 31 GiB、TP=4 で 1 ランク 7.8 GiB、パネルのレーンで実測)。memAdmit 用の見積もり。
+const nonexpert_estimate: usize = 31 << 30;
+
+/// This rank's bytes of the plan's routed experts: per projection the trellis (aligned like moe.load), the scales
+/// (the D-sized ones replicated, the I-sized ones split), and the pointer and width tables.
+/// 計画の routed expert のこのランクのバイト数: 射影ごとの trellis (moe.load と同じく整列)、scale (D の大きさのものは
+/// 複製、I の大きさのものは分割)、ポインタと幅の表。
+fn planBytes(p: *const expert_plan.Plan, cfg: Config, world: usize) usize {
+    const D = cfg.hidden;
+    const I = cfg.moe_inter / world;
+    var n: usize = 0;
+    for (p.bank_of) |bi| {
+        const bits = p.banks[bi].bits;
+        n += 3 * ((D * I * bits / 8 + 255) & ~@as(usize, 255)) + 6 * (D + I) + 3 * 12;
+    }
+    return n;
+}
+
+/// Refuses `what` (`need` bytes on this rank) before it is allocated when MemAvailable less TF_GLM53_MEM_RESERVE_GIB
+/// (default 4: what is allocated after it) cannot hold it; an unreadable MemAvailable refuses too.
+/// `what` (このランクで `need` バイト) を、MemAvailable から TF_GLM53_MEM_RESERVE_GIB (既定 4: その後に確保する分) を
+/// 引いた量に入らなければ確保の前に断る。MemAvailable が読めなくても断る。
+fn memAdmit(io: std.Io, rank: u32, what: []const u8, need: usize) !void {
+    const reserve_gib: u64 = if (std.c.getenv("TF_GLM53_MEM_RESERVE_GIB")) |v| std.fmt.parseInt(u64, std.mem.span(v), 10) catch return error.BadMemReserve else 4;
+    const avail = memAvailable(io) orelse {
+        std.log.err("glm53: rank {d}: MemAvailable unreadable before {s}: refusing", .{ rank, what });
+        return error.MemAvailableUnknown;
+    };
+    const gib = @as(f64, 1 << 30);
+    if (avail < need + (reserve_gib << 30)) {
+        std.log.err("glm53: rank {d}: {s}: {d:.1} GiB + reserve {d} GiB > MemAvailable {d:.1} GiB: refusing before the allocation", .{ rank, what, @as(f64, @floatFromInt(need)) / gib, reserve_gib, @as(f64, @floatFromInt(avail)) / gib });
+        return error.NotEnoughMemory;
+    }
+    if (rank == 0) std.log.info("glm53: {s}: {d:.1} GiB, MemAvailable {d:.1} GiB (reserve {d} GiB)", .{ what, @as(f64, @floatFromInt(need)) / gib, @as(f64, @floatFromInt(avail)) / gib, reserve_gib });
+}
+
+fn memAvailable(io: std.Io) ?u64 {
+    var buf: [4096]u8 = undefined;
+    const text = std.Io.Dir.cwd().readFile(io, "/proc/meminfo", &buf) catch return null;
+    const at = std.mem.indexOf(u8, text, "MemAvailable:") orelse return null;
+    var it = std.mem.tokenizeAny(u8, text[at + 13 ..], " \n");
+    const kib = std.fmt.parseInt(u64, it.next() orelse return null, 10) catch return null;
+    return kib << 10;
+}
+
+fn logPlan(p: *const expert_plan.Plan) void {
+    const c = expert_plan.counts(p);
+    std.log.info("glm53: expert plan {s} ({x}): layers {d}..{d}, 2/3/4/5 bit {d}/{d}/{d}/{d}", .{ p.name, p.digest[0..8], p.first_layer, p.first_layer + p.layers - 1, c[2], c[3], c[4], c[5] });
+    for (p.banks) |b| std.log.info("glm53:   bank {s}: {d} bit, {s} ({s})", .{ b.id, b.bits, b.dir, b.calibration });
+}
 
 fn memCheck(io: std.Io, layer: usize) !void {
     var buf: [4096]u8 = undefined;

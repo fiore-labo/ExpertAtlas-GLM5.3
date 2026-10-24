@@ -31,9 +31,14 @@ const route_symbol = "_ZN8tf_exl3p12route_kernelEPKiiiPiS2_S2_ii";
 const gateup_symbol = "_ZN8tf_exl3p20prompt_gateup_kernelILi1EEEvPK13__nv_bfloat16iPKiS5_S5_PKlS7_S5_PK6__halfSA_SA_SA_SA_PS8_iiiifiP6float4x";
 const down_symbol = "_ZN8tf_exl3p18prompt_down_kernelILi1EEEvPK6__halfPKiS5_S5_PKlS5_S3_PKfPfiiiii";
 
-/// Whether the kernels cover `ex`: gate and up of an expert at one width, every width 2 / 3 / 4 bits, I % 128, D % 256,
+pub fn k10Enabled() bool {
+    const v = std.c.getenv("TF_GLM53_PE_K10") orelse return false;
+    return std.mem.eql(u8, std.mem.span(v), "1");
+}
+
+/// Whether the kernels cover `ex`: gate and up of an expert at one width, every width 2 / 3 / 4 bits (5 with TF_GLM53_PE_K10=1), I % 128, D % 256,
 /// and the codebook these instantiations take (1 = mcg).
-/// カーネルが `ex` を扱えるか: expert の gate と up が同じ幅、幅はどれも 2 / 3 / 4 ビット、I % 128、D % 256、
+/// カーネルが `ex` を扱えるか: expert の gate と up が同じ幅、幅はどれも 2 / 3 / 4 ビット (TF_GLM53_PE_K10=1 なら 5 も)、I % 128、D % 256、
 /// そしてこのインスタンスの codebook (1 = mcg)。
 pub fn supported(gpa: std.mem.Allocator, ex: *const moe.Routed) !bool {
     if (ex.cb != 1 or ex.width % 128 != 0 or ex.dims % 256 != 0) return false;
@@ -45,6 +50,7 @@ pub fn supported(gpa: std.mem.Allocator, ex: *const moe.Routed) !bool {
         if (k2[e] != k2[E + e]) return false;
         for (0..3) |p| switch (k2[p * E + e]) {
             4, 6, 8 => {},
+            10 => if (!k10Enabled()) return false,
             else => return false,
         };
     }
@@ -56,12 +62,16 @@ pub const Kernels = struct {
     route: cuda.Function,
     gateup: cuda.Function,
     down: cuda.Function,
+    gateup_k10: cuda.Function,
+    down_k10: cuda.Function,
 
     pub fn load(d: *const cuda.Driver) !Kernels {
         var m = try cuda.Module.load(d, cuda.kernels.glm53_prompt_experts);
-        var k: Kernels = .{ .module = m, .route = try m.function(route_symbol), .gateup = try m.function(gateup_symbol), .down = try m.function(down_symbol) };
+        var k: Kernels = .{ .module = m, .route = try m.function(route_symbol), .gateup = try m.function(gateup_symbol), .down = try m.function(down_symbol), .gateup_k10 = try m.function("tf_pe_gu_k10"), .down_k10 = try m.function("tf_pe_dn_k10") };
         try k.gateup.allowDynamicShared(gu_smem);
         try k.down.allowDynamicShared(dn_smem);
+        try k.gateup_k10.allowDynamicShared(gu_smem);
+        try k.down_k10.allowDynamicShared(dn_smem);
         return k;
     }
 };
@@ -123,6 +133,13 @@ pub fn run(ks: *const Kernels, s: cuda.Stream, x: u64, xstride: u32, pick: u64, 
     const D = ex.dims;
     const I = ex.width;
     const S = sc.slots;
+    // Caller checks supported(). Select per projection using the host-side upper bounds.
+    // With K10 disabled, retain the legacy entries even for conservatively widened ranges.
+    const enable_k10 = (ex.k2_gu[1] == 10 or ex.k2_d[1] == 10) and k10Enabled();
+    const gu_k10 = enable_k10 and ex.k2_gu[1] == 10;
+    const dn_k10 = enable_k10 and ex.k2_d[1] == 10;
+    const gateup = if (gu_k10) ks.gateup_k10 else ks.gateup;
+    const down = if (dn_k10) ks.down_k10 else ks.down;
     var r0: u32 = 0;
     while (r0 < R) : (r0 += sc.rows) {
         const n = @min(sc.rows, R - r0);
@@ -170,7 +187,7 @@ pub fn run(ks: *const Kernels, s: cuda.Stream, x: u64, xstride: u32, pick: u64, 
             a.add(@as(c_int, act_f32));
             a.add(o);
             a.add(@as(c_longlong, @intCast(@as(u64, n) * D * ob / 16)));
-            try cuda.launch.launch(ks.gateup, .{ .grid = .{ .x = I / 128, .y = items, .z = 1 }, .block = .{ .x = gu_threads, .y = 1, .z = 1 }, .shared = gu_smem }, s, &a);
+            try cuda.launch.launch(gateup, .{ .grid = .{ .x = I / 128, .y = items, .z = 1 }, .block = .{ .x = gu_threads, .y = 1, .z = 1 }, .shared = gu_smem }, s, &a);
         }
         {
             const ncb = autoNcb(n, D);
@@ -189,7 +206,7 @@ pub fn run(ks: *const Kernels, s: cuda.Stream, x: u64, xstride: u32, pick: u64, 
             a.add(@as(c_int, @intCast(S)));
             a.add(@as(c_int, @intCast(ncb)));
             a.add(@as(c_int, @intFromBool(half_sums))); // fp16 sums (TF_GLM53_PE_F16) / fp16 の和 (TF_GLM53_PE_F16)
-            try cuda.launch.launch(ks.down, .{ .grid = .{ .x = items, .y = D / 256 / ncb, .z = 1 }, .block = .{ .x = dn_threads, .y = 1, .z = 1 }, .shared = dn_smem }, s, &a);
+            try cuda.launch.launch(down, .{ .grid = .{ .x = items, .y = D / 256 / ncb, .z = 1 }, .block = .{ .x = dn_threads, .y = 1, .z = 1 }, .shared = dn_smem }, s, &a);
         }
         if (do_round) try round.roundBf16(s, o, @as(u64, n) * D);
     }

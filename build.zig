@@ -117,8 +117,8 @@ fn embedded(b: *std.Build, lib: std.Build.LazyPath, file: []const u8) *std.Build
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const release_version = b.option([]const u8, "version", "Release version: MAJOR.MINOR.PATCH, or a label rN-M");
-    if (release_version) |v| if (!dist_build.validVersion(v)) @panic("-Dversion must be MAJOR.MINOR.PATCH or rN-M");
+    const release_version = b.option([]const u8, "version", "Release version: MAJOR.MINOR.PATCH, or a label rN-M or rN.K-M");
+    if (release_version) |v| if (!dist_build.validVersion(v)) @panic("-Dversion must be MAJOR.MINOR.PATCH, rN-M or rN.K-M");
     const build_options = b.addOptions();
     // Keep the existing manifest version for developer builds; releases require an explicit override.
     const manifest = @import("build.zig.zon");

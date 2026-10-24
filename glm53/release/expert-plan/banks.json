@@ -1,0 +1,59 @@
+{
+ "format": "glm53-expert-banks",
+ "version": 1,
+ "note": "the routed experts of layers 3..77 at 2, 3, 4 and 5 bits (Hugging Face fiore-lab/GLM-5.3-EXL3-Experts-<N>bit), each in its own directory on every node with its manifest <id>.json; a width not downloaded is not offered",
+ "banks": [
+  {
+   "id": "glm53-exl3-experts-2bit",
+   "bits": 2,
+   "calibration": "exllamav3 1.6.1 default calibration rows (English, Chinese) plus Japanese text and agent / coding sessions, 320 x 2,048 tokens",
+   "dir": "~/models/GLM-5.3-EXL3-Experts-2bit",
+   "repo": "fiore-lab/GLM-5.3-EXL3-Experts-2bit",
+   "manifest_sha256": "cacb08f013c247f675f4732cc9f1db3a127ab0e0066ea3613395ce18e6843c5c",
+   "layers": 75,
+   "first_layer": 3,
+   "bytes": 187312905768,
+   "codebook": "mcg",
+   "stored_ranks": 8
+  },
+  {
+   "id": "glm53-exl3-experts-3bit",
+   "bits": 3,
+   "calibration": "exllamav3 1.6.1 default calibration data (250 x 2,048 tokens)",
+   "dir": "~/models/GLM-5.3-EXL3-Experts-3bit",
+   "repo": "fiore-lab/GLM-5.3-EXL3-Experts-3bit",
+   "manifest_sha256": "998f03580fb78c41e2904f23c0ce82b77a9fef9ce68ba7120fb2edc1e1246e6c",
+   "layers": 75,
+   "first_layer": 3,
+   "bytes": 277909992168,
+   "codebook": "mcg",
+   "stored_ranks": 8
+  },
+  {
+   "id": "glm53-exl3-experts-4bit",
+   "bits": 4,
+   "calibration": "exllamav3 1.6.1 default calibration data (250 x 2,048 tokens)",
+   "dir": "~/models/GLM-5.3-EXL3-Experts-4bit",
+   "repo": "fiore-lab/GLM-5.3-EXL3-Experts-4bit",
+   "manifest_sha256": "ed125376b978e5968ac571041f2af95c36a30f99a68bdb2fab121a0107663e80",
+   "layers": 75,
+   "first_layer": 3,
+   "bytes": 368507018568,
+   "codebook": "mcg",
+   "stored_ranks": 8
+  },
+  {
+   "id": "glm53-exl3-experts-5bit",
+   "bits": 5,
+   "calibration": "exllamav3 1.6.1 default calibration rows (English, Chinese) plus Japanese text and agent / coding sessions, 320 x 2,048 tokens",
+   "dir": "~/models/GLM-5.3-EXL3-Experts-5bit",
+   "repo": "fiore-lab/GLM-5.3-EXL3-Experts-5bit",
+   "manifest_sha256": "c2a680718d6d6ad3bb35be011ca6e160835edb67afe47fed436a7ba1654c6dd9",
+   "layers": 75,
+   "first_layer": 3,
+   "bytes": 459104020968,
+   "codebook": "mcg",
+   "stored_ranks": 8
+  }
+ ]
+}

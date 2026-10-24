@@ -127,12 +127,49 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     glm53_lock.addImport("cuda", cuda);
     glm53_lock.addImport("glm_moe_dsa", glm);
     b.installArtifact(b.addExecutable(.{ .name = "tf-glm53-lock", .root_module = glm53_lock }));
+    // Fiore-lab: a decode lane and a prefill lane on the first layers, alone, time-sliced and at once
+    const glm53_conc = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/glm53_concurrent.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    glm53_conc.addImport("cuda", cuda);
+    glm53_conc.addImport("glm_moe_dsa", glm);
+    b.installArtifact(b.addExecutable(.{ .name = "tf-glm53-concurrent", .root_module = glm53_conc }));
+    const glm53_batch = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/glm53_batch.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    glm53_batch.addImport("cuda", cuda);
+    glm53_batch.addImport("glm_moe_dsa", glm);
+    b.installArtifact(b.addExecutable(.{ .name = "tf-glm53-batch", .root_module = glm53_batch }));
     const glm53_q4 = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/glm53_q4.zig"), .target = target, .optimize = optimize, .link_libc = true });
     glm53_q4.addImport("glm_moe_dsa", glm);
     b.installArtifact(b.addExecutable(.{ .name = "tf-glm53-q4", .root_module = glm53_q4 }));
     // host-side tests of the glm_moe_dsa module (config, split, header words, ...): `zig build test-glm53`
     b.step("test-glm53", "glm_moe_dsa host-side unit tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm })).step);
     _ = nativeServer(b, target, optimize, cuda, mods.lanes, mods.nemotron, glm, mods.tokenizer, build_options, true);
+    serverTests(b, target, optimize, cuda, mods.lanes, mods.nemotron, glm, mods.tokenizer);
+}
+
+/// Fiore-lab: the server's unit tests and its frozen parity goldens on the CUDA build host too (build.zig builds them
+/// in the Metal build only), as build.zig makes them: `zig build test-server`, `zig build test-server-golden`.
+fn serverTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, glm: *std.Build.Module, tokenizer: *std.Build.Module) void {
+    const m = engines(b, target, optimize, cuda, lanes, nemotron, glm);
+    const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
+    const imports: []const std.Build.Module.Import = &.{ .{ .name = "engine_api", .module = m.api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } };
+    const server = b.createModule(.{ .root_source_file = b.path("zig/src/server/root.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = imports });
+    const step = b.step("test-server", "The server's unit tests (zig/src/server/root.zig) on this host");
+    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server })).step);
+    const fake_serve = b.addExecutable(.{ .name = "fake_serve", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/server/fake_serve.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "server", .module = server }, .{ .name = "engine_api", .module = m.api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } },
+    }) });
+    // libc linked explicitly: Linux, unlike macOS, does not link it by default
+    const golden_check = b.addExecutable(.{ .name = "golden_check", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/server/golden_check.zig"), .target = target, .optimize = .Debug, .link_libc = true }) });
+    const golden_run = b.addRunArtifact(golden_check);
+    golden_run.addArtifactArg(fake_serve);
+    golden_run.addFileArg(b.path("zig/tests/server/golden/cases.json"));
+    golden_run.addDirectoryArg(b.path("zig/tests/server/golden"));
+    golden_run.addDirectoryArg(b.path("zig/tests/server/fixtures"));
+    golden_run.setCwd(b.path("."));
+    b.step("test-server-golden", "The frozen server parity goldens (fake_serve) on this host").dependOn(&golden_run.step);
 }
 
 /// The GLM-5.3 (glm_moe_dsa) family module over the CUDA runtime and the core.

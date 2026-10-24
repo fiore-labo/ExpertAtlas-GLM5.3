@@ -797,7 +797,9 @@ __global__ void tf_glm53_n_dcp_combine(DcpCombineArgs a) {
 // WTS = 各選択の sigmoid / (選択順の和 + 1e-20) * scale、sigmoid = 1 / (1 + exp(-x)) は t_exp と t_div で計算する。
 // 選択は厳密な比較なので、丸めが入るのは sigmoid、和の順序、最後の除算だけ。grid (rows)、256 スレッド
 // (1 スレッド 1 expert)。
-typedef struct { Dev logits, bias, pick, wts; int rows; float scale; } TopkArgs;
+// log: 0, or a byte per pick at log[r * 8 + k] (the live expert usage, TF_GLM53_EXPERT_LIVE; decode windows only)
+// log: 0 か、選択ごとに 1 バイトを log[r * 8 + k] へ (expert の使用状況のライブ表示 TF_GLM53_EXPERT_LIVE、decode のウィンドウのみ)
+typedef struct { Dev logits, bias, pick, wts; int rows; float scale; Dev log; } TopkArgs;
 // ONE: the block's first thread compares the warps' winners and hands the result to the others - fewer instructions,
 // faster when the blocks fill the GPU, slower when a block's own critical path counts. Else every thread compares. The
 // same comparisons either way; the launcher takes ONE from 128 rows.
@@ -844,6 +846,7 @@ static __device__ __forceinline__ void topk_body(TopkArgs a, const int ONE, floa
         for (int k = 0; k < 8; k++) total = total + s_wts[k];
         ((int*)a.pick)[(long long)r * 8 + t] = s_pick[t];
         ((float*)a.wts)[(long long)r * 8 + t] = t_div(s_wts[t], total + 1e-20f) * a.scale;
+        if (a.log) ((unsigned char*)a.log)[(long long)r * 8 + t] = (unsigned char)s_pick[t];
     }
 }
 #define TOPK_ENTRY(name, ONE) \
@@ -857,6 +860,29 @@ __global__ void name(TopkArgs a) { \
 }
 TOPK_ENTRY(tf_glm53_n_topk, 0)
 TOPK_ENTRY(tf_glm53_n_topk_one, 1)
+
+// The prompt's picks counted (TF_GLM53_EXPERT_LIVE, rank 0): the N picks at PICK (int32, [rows, 8] as topk writes
+// them) added into HIST (u32, a word an expert: the layer's counts). grid (ceil(N / 2048)), 256 threads: a block counts
+// its 2048 picks in shared memory, then adds the nonzero counts to HIST. Integer adds, so the order does not matter.
+// prompt の選択を数える (TF_GLM53_EXPERT_LIVE、rank 0): PICK (int32、topk が書く [rows, 8]) の N 個の選択を HIST
+// (u32、expert ごとに 1 語: 層の数) に足す。grid (ceil(N / 2048))、256 スレッド: ブロックは自分の 2048 個を共有メモリで
+// 数えてから、0 でない数を HIST に足す。整数の加算なので順序は結果に関わらない。
+typedef struct { Dev pick, hist; int n, experts; } PickHistArgs;
+__global__ void tf_glm53_n_pick_hist(PickHistArgs a) {
+    __shared__ unsigned h[256];
+    for (int e = threadIdx.x; e < 256; e += blockDim.x) h[e] = 0;
+    __syncthreads();
+    const int* p = (const int*)a.pick;
+    const int end = min(a.n, ((int)blockIdx.x + 1) * 2048);
+    for (int i = blockIdx.x * 2048 + threadIdx.x; i < end; i += blockDim.x) {
+        const int e = p[i];
+        if (e >= 0 && e < a.experts) atomicAdd(&h[e], 1u);
+    }
+    __syncthreads();
+    unsigned* g = (unsigned*)a.hist;
+    for (int e = threadIdx.x; e < a.experts; e += blockDim.x)
+        if (h[e]) atomicAdd(&g[e], h[e]);
+}
 
 
 // 8 bf16 at p (16-byte aligned) as fp32

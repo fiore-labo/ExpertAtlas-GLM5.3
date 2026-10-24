@@ -1,6 +1,7 @@
 // From b12x (https://github.com/local-inference-lab/b12x): b12x/comm/roce/_roce_proxy.c at commit 1a7e3ec2, Apache-2.0,
 // Copyright (c) 2025 by the b12x authors; modified by Fiore-lab: a GID index for each RDMA device (picked from the
-// device's GID table when the caller passes a negative index), and the build note below.
+// device's GID table when the caller passes a negative index), the build note below, and the share mode of a doorbell
+// (top bit of its byte count: peer p gets share p of the payload, for the two-shot all-reduce; ABI 4).
 //
 // RDMA proxy for the b12x RoCE one-shot all-reduce.
 //
@@ -14,6 +15,9 @@
 //                                                   u32 missing_peer} doorbell; the
 //                                                  last two are set by the kernel
 //                                                  when a wait times out
+//
+// A byte count with its top bit set (ROCE_SHARES) splits the payload into world equal shares: peer p gets share p
+// alone, written at the same offset of its receive slot (the reduce-scatter of a two-shot all-reduce).
 //
 // The GPU kernel stages its input into send[seq & 1], publishes nbytes and seq
 // in ctrl, then spins on flag[peer][seq & 1][hca] for every peer and HCA.  The
@@ -45,7 +49,8 @@
 #define ROCE_FLAG_STRIDE 128
 #define ROCE_PORT 1
 #define ROCE_SEND_DEPTH 256
-#define ROCE_ABI_VERSION 3
+#define ROCE_ABI_VERSION 4
+#define ROCE_SHARES 0x80000000u
 // Model graphs leave sub-millisecond gaps between collectives.  Keep the
 // proxy hot across those gaps; sleeping there adds one scheduler wakeup to
 // every collective on the graph's critical path.
@@ -391,21 +396,25 @@ static int drain_cq(roce_ctx_t *c, int h) {
 }
 
 static int post_op(roce_ctx_t *c, uint32_t seq, uint32_t nbytes) {
-    if (nbytes == 0 || nbytes % 16 != 0) {
+    // share mode: peer p gets bytes [p * share, (p + 1) * share) alone
+    const int shares = (nbytes & ROCE_SHARES) != 0;
+    nbytes &= ~ROCE_SHARES;
+    if (nbytes == 0 || nbytes % 16 != 0 || (shares && nbytes % (16u * (uint32_t)c->world) != 0)) {
         snprintf(c->err, sizeof(c->err),
-                 "RoCE payload size must be a positive multiple of 16 bytes, got %u",
+                 "RoCE payload size must be a positive multiple of 16 bytes (of 16 x world in share mode), got %u",
                  nbytes);
         return -1;
     }
     uint32_t slot = seq & 1u;
     uint8_t *send = c->region + c->send_off + (size_t)slot * c->slot_bytes;
     uint32_t seq_copy = seq;
-    uint32_t total_packs = nbytes / 16;
+    uint32_t total_packs = shares ? nbytes / 16 / (uint32_t)c->world : nbytes / 16;
     for (int p = 0; p < c->world; p++) {
         if (p == c->rank) {
             continue;
         }
-        uint32_t pack_offset = 0;
+        // the stripes cover [pack_offset, pack_offset + total_packs) at the same offset on both sides
+        uint32_t pack_offset = shares ? total_packs * (uint32_t)p : 0;
         for (int h = 0; h < c->n_hca; h++) {
             roce_hca_t *hca = &c->hca[h];
             // Two work requests per stripe; keep the queue at most a quarter

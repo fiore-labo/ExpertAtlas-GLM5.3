@@ -106,6 +106,84 @@ pub const Drafter = struct {
     // block pass の結果のホスト側コピー
     host_packed: []f32,
     host_proj: []u16,
+    // TF_GLM53_MULTI: one context a conversation (its rings, snapshot, position, block ids, context end and the
+    // graphs that bake them in); `use` swaps one into the fields above, the weights and scratch stay shared
+    // TF_GLM53_MULTI: 会話ごとの context (リング、snapshot、位置、block の id、context の終わり、それらを焼き込んだ
+    // graph)。`use` が 1 つを上のフィールドへ入れ替える。重みと scratch は共有
+    sets: []Set = &.{},
+    cur: usize = 0,
+
+    pub const Set = struct {
+        kc: []Buf,
+        vc: []Buf,
+        snap: []Buf,
+        pos: Buf,
+        ids: Buf,
+        context_end: usize = 0,
+        block_exec: ?cuda.graph.Exec = null,
+        tap_execs: [16]?cuda.graph.Exec = @splat(null),
+    };
+
+    /// `n` contexts (TF_GLM53_MULTI), context 0 the rings made at create (and the snapshot buffers, when made).
+    /// `n` 個の context (TF_GLM53_MULTI)。context 0 は create で作ったリング (と、あれば snapshot のバッファ)。
+    pub fn initSets(e: *Drafter, n: usize) !void {
+        if (n == 0 or e.sets.len > 0) return error.DrafterSets;
+        const d = e.t.stream.d;
+        const bytes = e.layers[0].kc.len;
+        const sets = try e.gpa.alloc(Set, n);
+        for (sets, 0..) |*st, k| {
+            st.* = .{ .kc = try e.gpa.alloc(Buf, e.layers.len), .vc = try e.gpa.alloc(Buf, e.layers.len), .snap = &.{}, .pos = e.pos, .ids = e.ids };
+            if (k == 0) {
+                for (e.layers, 0..) |*L, i| {
+                    st.kc[i] = L.kc;
+                    st.vc[i] = L.vc;
+                }
+                st.snap = e.snap;
+                st.context_end = e.context_end;
+                st.block_exec = e.block_exec;
+                st.tap_execs = e.tap_execs;
+                continue;
+            }
+            for (st.kc, st.vc) |*kb, *vb| {
+                kb.* = try zeros(d, bytes);
+                vb.* = try zeros(d, bytes);
+            }
+            if (e.snap.len > 0) {
+                st.snap = try e.gpa.alloc(Buf, e.snap.len);
+                for (st.snap) |*b| b.* = try zeros(d, bytes);
+            }
+            st.pos = try zeros(d, 16);
+            st.ids = try zeros(d, e.cfg.block * 4);
+            var mask: [16]i32 = undefined;
+            @memset(mask[0..e.cfg.block], @intCast(e.cfg.mask_id));
+            try st.ids.upload(0, std.mem.sliceAsBytes(mask[0..e.cfg.block]));
+        }
+        e.sets = sets;
+        e.cur = 0;
+    }
+
+    /// Context k into the live fields (the current one's state kept in its set first). Stream-ordered: nothing copies.
+    /// context k を live のフィールドへ (先に今の context の状態をその set に戻す)。stream の順のまま、コピーはしない。
+    pub fn use(e: *Drafter, k: usize) void {
+        if (e.sets.len == 0 or k == e.cur) return;
+        const old = &e.sets[e.cur];
+        old.context_end = e.context_end;
+        old.block_exec = e.block_exec;
+        old.tap_execs = e.tap_execs;
+        old.snap = e.snap;
+        const st = &e.sets[k];
+        for (e.layers, 0..) |*L, i| {
+            L.kc = st.kc[i];
+            L.vc = st.vc[i];
+        }
+        e.snap = st.snap;
+        e.pos = st.pos;
+        e.ids = st.ids;
+        e.context_end = st.context_end;
+        e.block_exec = st.block_exec;
+        e.tap_execs = st.tap_execs;
+        e.cur = k;
+    }
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, t: Target) !*Drafter {
         var w = try dw.load(gpa, io, dir, t.rank, t.world);
@@ -487,6 +565,16 @@ pub const Drafter = struct {
     /// The graphs go before the communicator (NCCL holds a captured collective's plan until its graph is gone).
     /// graph は communicator より先に破棄する (NCCL は capture した collective の plan を graph が消えるまで持つ)。
     pub fn destroyGraphs(e: *Drafter) void {
+        // every context's (the live fields hold the current one's)
+        // 全 context の分 (live のフィールドは今の context のもの)
+        for (e.sets, 0..) |*st, k| if (k != e.cur) {
+            if (st.block_exec) |*x| x.deinit();
+            st.block_exec = null;
+            for (&st.tap_execs) |*t| if (t.*) |*x| {
+                x.deinit();
+                t.* = null;
+            };
+        };
         if (e.block_exec) |*x| x.deinit();
         e.block_exec = null;
         for (&e.tap_execs) |*t| if (t.*) |*x| {

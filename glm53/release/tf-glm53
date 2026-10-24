@@ -4,11 +4,14 @@
 #   tf-glm53 [-c CONF] deploy     copy this directory to every node (same path) and check SHA256SUMS there
 #   tf-glm53 [-c CONF] check      nodes, files, weights, libraries, RDMA devices, GPUs and memory, before a start
 #   tf-glm53 [-c CONF] verify     the weights against their SHA256SUMS on every node at once (a few minutes)
+#   tf-glm53 [-c CONF] verify-banks [BITS...]   the expert banks' layer files against their manifests' sha256
 #   tf-glm53 [-c CONF] up         check, start the last rank .. rank 0, wait for the server, run the smoke test
 #   tf-glm53 [-c CONF] down       stop every rank (TERM, then KILL after 30 s)
-#   tf-glm53 [-c CONF] status     ranks, free memory, the conversation cache and the server's /health
+#   tf-glm53 [-c CONF] status     ranks, free memory, the conversation cache, the server's /health and METRICS_LISTEN
 #   tf-glm53 [-c CONF] smoke      three requests whose answers are checked, the last one reusing the cached prompt
 #   tf-glm53 [-c CONF] logs [R]   follow rank R's log (default 0)
+#   tf-glm53 [-c CONF] launcher [stop|status]   the control panel's launcher on this node, always on (start / stop /
+#                                 status); it serves /panel and /v1/launch/* on LAUNCHER_PORT (glm53/launcher)
 #   -d KIND, before the command: the drafter for this start (mtp, dflash2 or none) instead of DRAFTER_KIND in CONF
 #
 # Run it on the first node of NODES (rank 0). Settings: glm53.conf next to this script (see glm53.conf.example;
@@ -18,6 +21,7 @@ PKG=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SELF="$PKG/$(basename "${BASH_SOURCE[0]}")"
 CONF=$PKG/glm53.conf
 DRAFTER_KIND_ARG=
+usage() { awk 'NR > 1 && /^#/ {sub(/^# ?/, ""); print; next} NR > 1 {exit}' "$SELF"; }
 while [ $# -gt 0 ]; do
   case $1 in
     -c) CONF=${2:?-c needs a settings file}; shift 2 ;;
@@ -25,6 +29,16 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
+# -h / --help anywhere: the usage, before the settings are read or anything runs; arguments a command does not take
+# are refused (a command never runs with an argument it ignores)
+for a in "$@"; do case $a in -h|--help) usage; exit 0 ;; esac; done
+[ $# -eq 0 ] && { usage; exit 1; }
+case "${1:-}" in
+  deploy|check|verify|up|down|status|smoke|watch) [ $# -le 1 ] || { echo "$1 takes no arguments (got: ${*:2})"; exit 2; } ;;
+  logs) [ $# -le 2 ] && [[ ${2:-0} =~ ^[0-9]+$ ]] || { echo "logs [RANK]: a rank number"; exit 2; } ;;
+  verify-banks) for a in "${@:2}"; do [[ $a =~ ^[2-5]$ ]] || { echo "verify-banks [BITS...]: widths 2 to 5 (got: $a)"; exit 2; }; done ;;
+  launcher) [ $# -le 2 ] || { echo "launcher [start|stop|status]"; exit 2; } ;;
+esac
 [ -f "$CONF" ] || { echo "no settings file $CONF: copy glm53.conf.example to glm53.conf and edit it"; exit 2; }
 # shellcheck source=/dev/null
 . "$CONF"
@@ -34,6 +48,7 @@ NAME=${NAME:-glm-5.3}
 HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-8000}
 API_KEY_FILE=${API_KEY_FILE:-}
+METRICS_LISTEN=${METRICS_LISTEN:-} # HOST:PORT: rank 0 also answers GET /metrics and /health there, read-only, no key
 DRAFTER_KIND=${DRAFTER_KIND:-mtp}
 MTP_K=${MTP_K:-3}
 DRAFTER=${DRAFTER:-}
@@ -49,6 +64,11 @@ MASTER_PORT=${MASTER_PORT:-29551}
 GID_INDEX=${GID_INDEX:-}
 READY_TIMEOUT=${READY_TIMEOUT:-900}
 EXTRA_ENV=${EXTRA_ENV:-}
+LAUNCH_ENV=${LAUNCH_ENV:-}  # from the launcher (the environment, not CONF): the expert plan and the progress file
+# from the launcher too: the KV format the launch screen chose, and the context and store that format holds (over CONF's)
+KV=${LAUNCH_KV:-$KV}
+CONTEXT=${LAUNCH_CONTEXT:-$CONTEXT}
+STORE=${LAUNCH_STORE:-$STORE}
 LOGS=$PKG/logs
 BIN=$PKG/bin/tensorfold-native
 # 4 nodes (TP=4) or 8 (TP=8); the checkpoint keeps the experts cut for 8 either way (TF_GLM53_STORED_WORLD=8)
@@ -57,6 +77,7 @@ WORLD=${#NODES[@]}
 LAST=$((WORLD - 1))
 [ -n "${WEIGHTS:-}" ] && [ -n "${SOCKET_IFNAME:-}" ] && [ -n "${IB_HCA:-}" ] || { echo "set WEIGHTS, SOCKET_IFNAME and IB_HCA in $CONF"; exit 2; }
 case $CACHE in pool|slots) ;; *) echo "CACHE must be pool or slots"; exit 2 ;; esac
+[ -z "$METRICS_LISTEN" ] || [[ $METRICS_LISTEN =~ ^(\[[0-9A-Fa-f:.]+\]|[^]:[]+):[0-9]{1,5}$ ]] || { echo "METRICS_LISTEN must be HOST:PORT (an IPv6 host in brackets)"; exit 2; }
 case $KV in fp8|fp4) ;; *) echo "KV must be fp8 or fp4"; exit 2 ;; esac
 case $DRAFTER_KIND in
   mtp) [[ $MTP_K =~ ^[1-7]$ ]] || { echo "MTP_K must be 1 .. 7"; exit 2; } ;;
@@ -93,17 +114,22 @@ rank_env() {
     dflash2) e="$e TF_GLM53_DFLASH=$DRAFTER"; [ "$CACHE" = pool ] && e="$e TF_GLM53_POOL_DRAFT_SAVES=$DRAFT_SAVES" ;;
   esac
   [ -n "$EXTRA_ENV" ] && e="$e $EXTRA_ENV"
+  [ -n "$LAUNCH_ENV" ] && e="$e $LAUNCH_ENV"
   echo "$e"
 }
+
+# this directory's identity on a node: every file of SHA256SUMS checked but expert-plan/banks.json, which is settings
+# (the banks' directories) like glm53.conf; then SHA256SUMS and banks.json together, so every node needs the same one
+PKGSUM="grep -v ' \\./expert-plan/banks\\.json\$' SHA256SUMS | sha256sum -c --quiet && { sha256sum SHA256SUMS; cat expert-plan/banks.json 2>/dev/null; } | sha256sum | cut -c1-64"
 
 cmd_deploy() {
   local n tmp want key=(); tmp=$(mktemp -d)
   # the API key stays on this node
   [ -n "$API_KEY_FILE" ] && case $(readlink -f "$API_KEY_FILE") in "$PKG"/*) key=(--exclude "/$(readlink -f "$API_KEY_FILE" | sed "s|^$PKG/||")") ;; esac
-  want=$(cd "$PKG" && sha256sum -c SHA256SUMS --quiet && sha256sum SHA256SUMS | cut -c1-64) || { echo "SHA256SUMS does not match here"; return 1; }
+  want=$(cd "$PKG" && eval "$PKGSUM") || { echo "SHA256SUMS does not match here"; return 1; }
   for n in "${NODES[@]:1}"; do
     ( on "$n" "mkdir -p $PKG" && rsync -a --exclude logs --exclude glm53.conf "${key[@]}" "$PKG/" "$n:$PKG/" \
-      && [ "$(on "$n" "cd $PKG && sha256sum -c SHA256SUMS --quiet && sha256sum SHA256SUMS | cut -c1-64")" = "$want" ] \
+      && [ "$(on "$n" "cd $PKG && $PKGSUM")" = "$want" ] \
       && echo "  ok $n" || { echo "  FAIL $n"; : > "$tmp/fail"; } ) &
   done; wait
   if [ -f "$tmp/fail" ]; then rm -rf "$tmp"; echo "deploy: FAIL"; return 1; fi
@@ -112,28 +138,33 @@ cmd_deploy() {
 
 cmd_check() {
   local tmp ng=0 n need; tmp=$(mktemp -d)
-  local sums; sums=$(sha256sum "$PKG/SHA256SUMS" | cut -c1-64)
+  local sums; sums=$(cd "$PKG" && eval "$PKGSUM") || { echo "  SHA256SUMS does not match here"; rm -rf "$tmp"; echo "check: NG"; return 1; }
   # GiB a node must have available before the start (measured with CONTEXT and STORE 819,200: the ranks use about 108
   # with MTP or no drafts, 111 with DFlash2), 4 to spare; each 100,000 positions of STORE fewer need 2.7 less
   need=${NEED_GB:-112}; [ "$DRAFTER_KIND" = dflash2 ] && need=$((need + 3))
   need=$(( need - (819200 - STORE) * 27 / 1000000 ))
-  local wsum; wsum=$(cd "$WEIGHTS" && { find . -maxdepth 1 -type f -printf '%f %s\n' | LC_ALL=C sort | sha256sum; sha256sum config.json; } | sha256sum | cut -c1-64) || { echo "no weights at $WEIGHTS"; return 1; }
+  # a start from the control panel: its plan's need (the experts, the KV it sized, the reserve) instead of the estimate
+  [ -n "${LAUNCH_NEED_GB:-}" ] && need=$LAUNCH_NEED_GB
+  local wsum; wsum=$(cd "$WEIGHTS" 2>/dev/null && { find . -maxdepth 1 -type f -printf '%f %s\n' | LC_ALL=C sort | sha256sum; sha256sum config.json; } | sha256sum | cut -c1-64) || { echo "  no weights at $WEIGHTS"; rm -rf "$tmp"; echo "check: NG"; return 1; }
   if [ "$DRAFTER_KIND" = mtp ] && ! grep -q '\.eh_proj\.weight"' "$WEIGHTS/model.safetensors.index.json" 2>/dev/null; then
     echo "  the checkpoint at $WEIGHTS has no MTP layer (eh_proj): use one that has it, or set DRAFTER_KIND=none"; ng=1
   fi
   if [ "$DRAFTER_KIND" = dflash2 ] && [ ! -f "$DRAFTER/config.json" ]; then echo "  no DFlash2 model at $DRAFTER"; ng=1; fi
+  # the pool holds the context and two blocks of 256 at least (the engine refuses fewer with PoolTooSmall)
+  if [ "$CACHE" = pool ] && [ "$STORE" -lt 512 ]; then echo "  STORE $STORE: the pool cache (CACHE=pool) needs at least 512 positions beyond CONTEXT"; ng=1; fi
   echo "  drafter: $(drafter_line)"
   [ -n "$DRAFTER" ] && [ "$DRAFTER_KIND" != dflash2 ] && echo "  (DRAFTER is set but not used: DRAFTER_KIND=$DRAFTER_KIND)"
   for r in $(seq 0 $LAST); do
     n=${NODES[$r]}
-    ( o=$(on "$n" "cd $PKG 2>/dev/null && sha256sum -c SHA256SUMS --quiet >/dev/null 2>&1 && echo -n files=\$(sha256sum SHA256SUMS | cut -c1-64) || echo -n files=bad
+    ( o=$(on "$n" "cd $PKG 2>/dev/null && echo -n files=\$($PKGSUM 2>/dev/null) || echo -n files=bad
         echo -n ' weights='\$(cd $WEIGHTS 2>/dev/null && { find . -maxdepth 1 -type f -printf '%f %s\\n' | LC_ALL=C sort | sha256sum; sha256sum config.json; } | sha256sum | cut -c1-64)
         echo -n ' nccl='\$([ -r $NCCL_LIB ] && basename \$(readlink -f $NCCL_LIB) || echo missing)
         echo -n ' cublas='\$(ldconfig -p | grep -c 'libcublasLt.so.13 ')
         echo -n ' ibverbs='\$(ldconfig -p | grep -c 'libibverbs.so.1 ')
         echo -n ' hca='\$([ -d /sys/class/infiniband/$IB_HCA ] && echo 1 || echo 0)
         echo -n ' gid='\$($GID_PROBE)
-        echo -n ' running='\$( { $PIDS; nvidia-smi --query-compute-apps=pid --format=csv,noheader; } | grep -c .)
+        echo -n ' gpu='\$(nvidia-smi -L >/dev/null 2>&1 && echo ok || echo unreadable)
+        echo -n ' running='\$( { $PIDS; nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null; } | grep -c '^ *[0-9]')
         echo -n ' free_gb='\$(free -g | awk '/^Mem/{print \$7}')" 2>/dev/null)
       [ -n "$GID_INDEX" ] && o=$(echo "$o" | sed "s/gid=[0-9]*/gid=$GID_INDEX/")
       bad=""
@@ -144,6 +175,7 @@ cmd_check() {
       [[ $o == *"ibverbs=0"* ]] && bad="$bad libibverbs"
       [[ $o == *"hca=0"* ]] && bad="$bad $IB_HCA"
       [[ $o =~ gid=[0-9] ]] || bad="$bad RoCE-v2-GID"
+      [[ $o == *"gpu=unreadable"* ]] && bad="$bad GPU-unreadable(nvidia-smi fails)"
       [[ $o == *"running=0"* ]] || bad="$bad GPU-busy"
       fg=$(echo "$o" | grep -o 'free_gb=[0-9]*' | cut -d= -f2); [ "${fg:-0}" -ge "$need" ] || bad="$bad memory(${fg:-?}<$need GiB)"
       g=$(echo "$o" | grep -o 'gid=[0-9]*' | cut -d= -f2)
@@ -151,7 +183,8 @@ cmd_check() {
       if [ -n "$bad" ]; then echo "  rank $r $n: NG:$bad"; : > "$tmp/ng"; else echo "  rank $r $n: ok (GID $g, $fg GiB available, $nc)"; fi ) > "$tmp/$r" &
   done; wait
   cat $(for r in $(seq 0 $LAST); do echo "$tmp/$r"; done); [ -f "$tmp/ng" ] && ng=1; rm -rf "$tmp"
-  if ! loopback "$HOST" && [ -z "$API_KEY_FILE" ]; then echo "  HOST $HOST is not loopback: set API_KEY_FILE (refusing an open server)"; ng=1; fi
+  # a non-loopback HOST without a key is allowed: the API is then open to anyone who can reach it (a warning)
+  if ! loopback "$HOST" && [ -z "$API_KEY_FILE" ]; then echo "  warning: HOST $HOST is not loopback and API_KEY_FILE is unset: the API is open to anyone who can reach it (set API_KEY_FILE to require a key)"; fi
   if [ -n "$API_KEY_FILE" ]; then                  # what the server requires of it, or it refuses to start
     if [ -L "$API_KEY_FILE" ] || [ ! -f "$API_KEY_FILE" ]; then echo "  API_KEY_FILE $API_KEY_FILE: not a regular file"; ng=1
     elif [ $(( 8#$(stat -c %a "$API_KEY_FILE") & 8#044 )) -ne 0 ]; then echo "  API_KEY_FILE $API_KEY_FILE: readable by other users (chmod 600 it)"; ng=1
@@ -174,6 +207,65 @@ cmd_verify() {                                     # the weights against their S
   done; wait
   cat "$tmp"/[0-9]*; [ -f "$tmp/ng" ] && ng=1; rm -rf "$tmp"
   [ $ng -eq 0 ] && echo "verify: ok" || echo "verify: NG (copy the files named above to that node again)"
+  return $ng
+}
+
+# verify-banks' check on a node: argv banks.json [BITS...]; prints files=N bad=N, then up to 5 of what differs. A bank
+# with neither its manifest nor any layer file is absent (said, not a failure, unless BITS names it).
+VERIFY_BANKS_PY=$(cat <<'PY'
+import json, os, sys, subprocess
+banks = json.load(open(sys.argv[1]))["banks"]
+want = {int(x) for x in sys.argv[2:]}
+seen, bad, absent, n = set(), [], [], 0
+for b in banks:
+    if b["bits"] in seen or (want and b["bits"] not in want):
+        continue
+    seen.add(b["bits"])
+    b["dir"] = os.path.expanduser(b["dir"])
+    path = os.path.expanduser(b.get("manifest") or os.path.join(b["dir"], b["id"] + ".json"))
+    try:
+        m = json.load(open(path))
+    except (OSError, ValueError):
+        if not want and not any(f.startswith("experts-layer-") for f in (os.listdir(b["dir"]) if os.path.isdir(b["dir"]) else [])):
+            absent.append("%d bit" % b["bits"])
+        else:
+            bad.append("%d bit %s: no manifest %s" % (b["bits"], b["id"], path))
+        continue
+    files = [(os.path.join(b["dir"], x["file"]), x["sha256"]) for x in m["layers"]]
+    r = subprocess.run(["nice", "-n", "19", "ionice", "-c3", "xargs", "-0", "-P", "4", "-n", "1", "sha256sum"],
+                       input="\0".join(p for p, _ in files).encode(), capture_output=True)
+    got = {}
+    for line in r.stdout.decode().splitlines():
+        if line.strip():
+            h, p = line.split(None, 1)
+            got[p.strip()] = h
+    for p, h in files:
+        n += 1
+        if got.get(p) != h:
+            bad.append("%d bit %s: %s" % (b["bits"], os.path.basename(p), "missing" if p not in got else "differs from the manifest"))
+print("files=%d bad=%d%s" % (n, len(bad), (" absent=" + ",".join(absent)) if absent else ""))
+for x in bad[:5]:
+    print(x)
+PY
+)
+
+cmd_verify_banks() {                               # every width's bank against its manifest's sha256, every node at once
+  # the start checks a bank's files by size and header only (cheap); this reads them whole, at low priority (each
+  # node about 1.3 TB for 2/3/4/5 bits: minutes), and finds a file of the right size that differs. BITS: only those
+  # widths. Run it after downloading or copying banks, or when a bank is suspected.
+  local tmp r ng=0 banks="$PKG/expert-plan/banks.json" code
+  [ -f "$banks" ] || { echo "no $banks"; return 1; }
+  code=$(printf '%s\n' "$VERIFY_BANKS_PY" | base64 | tr -d '\n')
+  echo "checking the banks of $banks on every node (sha256 of every layer file against its manifest, low priority)"
+  tmp=$(mktemp -d)
+  for r in "${!NODES[@]}"; do
+    ( n=${NODES[$r]}; t0=$(date +%s)
+      o=$(on "$n" "python3 -c \"\$(echo $code | base64 -d)\" $banks $*" 2>&1)
+      if [[ $o == *"bad=0"* ]]; then echo "  rank $r $n: ok, $(echo "$o" | grep -o 'files=[0-9]*')$(echo "$o" | grep -o ' absent=[0-9a-z ,]*' | sed 's/ absent=/, absent: /') ($(( $(date +%s) - t0 )) s)"
+      else echo "  rank $r $n: NG $(echo "$o" | tr '\n' ' ' | cut -c1-300)"; : > "$tmp/ng"; fi ) > "$tmp/$r" &
+  done; wait
+  cat "$tmp"/[0-9]*; [ -f "$tmp/ng" ] && ng=1; rm -rf "$tmp"
+  [ $ng -eq 0 ] && echo "verify-banks: ok" || echo "verify-banks: NG (copy the bank files named above to that node again)"
   return $ng
 }
 
@@ -204,7 +296,7 @@ gone_ranks() {                                      # each rank not running, wit
     ( n=${NODES[$r]}
       case $(alive "$n") in
         1) ;;
-        0) echo "  rank $r $n stopped: $(on "$n" "grep -a -i -E 'error|panic' $LOGS/rank$r.log 2>/dev/null | tail -2 | tr '\n' ' '" | cut -c1-300)" ;;
+        0) echo "  rank $r $n stopped: $(on "$n" "grep -a -i -E 'error|panic|cannot' $LOGS/rank$r.log 2>/dev/null | grep -a -v -E 'SafeAllocator|stack trac' | tail -2 | tr '\n' ' '" | cut -c1-300)" ;;
         *) echo "  rank $r $n: not reachable over ssh" ;;
       esac ) > "$tmp/$r" &
   done; wait
@@ -230,9 +322,11 @@ cmd_up() {
     gid=${GID_INDEX:-$(on "$n" "$GID_PROBE")}
     # ranks above 0 refuse requests; they listen on loopback only
     a=$args; [ "$r" -gt 0 ] && a="--host 127.0.0.1 --port $PORT --name $NAME --context $CONTEXT"
+    # rank 0 alone opens METRICS_LISTEN (the others' counters stay at 0)
+    m=""; [ "$r" -eq 0 ] && [ -n "$METRICS_LISTEN" ] && m="TENSORFOLD_METRICS_LISTEN='$METRICS_LISTEN' "
     # the last start's log is kept as rankR.log.prev; only the server goes to the background, its output to the log:
     # ssh returns at once
-    on "$n" "mkdir -p $LOGS; cd $PKG || exit 1; [ -f $LOGS/rank$r.log ] && mv -f $LOGS/rank$r.log $LOGS/rank$r.log.prev; export $(rank_env "$r" "$gid"); nohup ./bin/tensorfold-native serve $WEIGHTS $a > $LOGS/rank$r.log 2>&1 < /dev/null &"
+    on "$n" "mkdir -p $LOGS; cd $PKG || exit 1; [ -f $LOGS/rank$r.log ] && mv -f $LOGS/rank$r.log $LOGS/rank$r.log.prev; export $(rank_env "$r" "$gid"); ${m}nohup ./bin/tensorfold-native serve $WEIGHTS $a > $LOGS/rank$r.log 2>&1 < /dev/null &"
   done
   [ -f "$LOGS/watch.log" ] && mv -f "$LOGS/watch.log" "$LOGS/watch.log.prev"
   drafter_line > "$LOGS/drafter"
@@ -265,6 +359,10 @@ cmd_status() {
   echo "${h:0:300}"
   # the pool's counters sit past the first 300 characters
   p=$(echo "$h" | grep -o '"pool": *{[^}]*}'); [ -n "$p" ] && echo "$p"
+  if [ -n "$METRICS_LISTEN" ]; then                # reached here through loopback when it listens on every address
+    local mu=$METRICS_LISTEN; case $mu in 0.0.0.0:*) mu=127.0.0.1:${mu#0.0.0.0:} ;; "[::]":*) mu="[::1]:${mu#\[::\]:}" ;; esac
+    echo "metrics (read-only, no key): http://$METRICS_LISTEN/metrics - $(curl -s -m 3 "http://$mu/metrics" | grep -c '^tensorfold') samples"
+  fi
 }
 
 # the slot cache's store as the last start allocated it (rank 0's log); 0 with STORE above 0: a rank lacked the memory.
@@ -292,6 +390,22 @@ ask() {                                            # ask JSON_MESSAGES -> the re
   echo "$out" | grep -o '"content": *"[^"]*"' | tail -1 | sed 's/.*: *"//;s/"$//'
 }
 
+cmd_launcher() {                                   # start (default), stop or status of this lane's launcher
+  local pat="^python3 $PKG/launcher/tf_launcher.py -c $CONF\$" p
+  p=$(pgrep -f "$pat")
+  case ${1:-start} in
+    start) [ -n "$p" ] && { echo "launcher: running (pid $p)"; return 0; }
+      [ -f "$PKG/launcher/tf_launcher.py" ] || { echo "no $PKG/launcher/tf_launcher.py"; return 1; }
+      mkdir -p "$LOGS"; [ -f "$LOGS/launcher.log" ] && mv -f "$LOGS/launcher.log" "$LOGS/launcher.log.prev"
+      ( nohup python3 "$PKG/launcher/tf_launcher.py" -c "$CONF" > "$LOGS/launcher.log" 2>&1 < /dev/null & )
+      sleep 3; p=$(pgrep -f "$pat")
+      [ -n "$p" ] && echo "launcher: started (pid $p): $(grep -m1 -o 'http://[^ ]*/panel' "$LOGS/launcher.log")" || { echo "launcher: did not start:"; tail -5 "$LOGS/launcher.log"; return 1; } ;;
+    stop) [ -z "$p" ] && { echo "launcher: not running"; return 0; }; kill -TERM $p; echo "launcher: stopped (pid $p)" ;;
+    status) [ -n "$p" ] && echo "launcher: running (pid $p): $(grep -m1 -o 'http://[^ ]*/panel' "$LOGS/launcher.log")" || echo "launcher: not running" ;;
+    *) echo "launcher [start|stop|status]"; return 2 ;;
+  esac
+}
+
 cmd_smoke() {
   local ok=0 c doc q1 q2 cached
   c=$(ask '[{"role": "user", "content": "What is 17 + 25? Answer with the number only."}]' 2>/dev/null)
@@ -312,11 +426,13 @@ case "${1:-}" in
   deploy) cmd_deploy ;;
   check)  cmd_check ;;
   verify) cmd_verify ;;
+  verify-banks) shift; cmd_verify_banks "$@" ;;
   up)     cmd_up ;;
   down)   cmd_down ;;
   status) cmd_status ;;
   smoke)  cmd_smoke ;;
   watch)  cmd_watch ;;
   logs)   on "${NODES[${2:-0}]}" "tail -f $LOGS/rank${2:-0}.log" ;;
-  *)      sed -n '2,12p' "$SELF" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  launcher) cmd_launcher "${2:-start}" ;;
+  *)      usage; exit 1 ;;
 esac

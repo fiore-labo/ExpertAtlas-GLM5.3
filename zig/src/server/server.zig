@@ -190,11 +190,12 @@ pub const Server = struct {
         return null;
     }
 
-    /// Counts one finished request for /metrics.
-    pub fn noteRequest(srv: *Server, prompt_len: usize, generated: usize, drafted: u64, accepted: u64, rounds: u64, received: i96, first: ?i96, last: ?i96, prefill: ?f64, cached: ?usize) void {
+    /// Counts one finished request for /metrics. `decode` / `queue`: the engine's own decode and queue seconds, when it
+    /// measures them (the decode otherwise runs from the first token's arrival to now).
+    pub fn noteRequest(srv: *Server, prompt_len: usize, generated: usize, drafted: u64, accepted: u64, rounds: u64, received: i96, first: ?i96, last: ?i96, prefill: ?f64, cached: ?usize, decode: ?f64, queue: ?f64) void {
         const now = clock.nowNs(srv.io);
         const tpot = srv.metrics.tpotValue(first, last, generated);
-        srv.metrics.note(srv.io, prompt_len, generated, drafted, accepted, rounds, @max(0, clock.seconds(now - received)), if (first) |f| clock.seconds(f - received) else null, if (first) |f| @max(0, clock.seconds(now - f)) else null, prefill, tpot, cached);
+        srv.metrics.note(srv.io, prompt_len, generated, drafted, accepted, rounds, @max(0, clock.seconds(now - received)), if (first) |f| clock.seconds(f - received) else null, decode orelse if (first) |f| @max(0, clock.seconds(now - f)) else null, prefill, tpot, cached, queue);
     }
 
     /// Accepts connections until ``stop`` is set, each on its own thread.
@@ -233,6 +234,47 @@ pub const Server = struct {
             if (!srv.authenticate(&conn, a)) break;
             if (conn.header("Expect")) |expect| if (std.ascii.eqlIgnoreCase(expect, "100-continue") and std.mem.order(u8, conn.version, "HTTP/1.1") != .lt) conn.sendContinue();
             routes.dispatch(srv, &conn, a);
+            if (conn.close or conn.broken) break;
+        }
+    }
+
+    /// Fiore-lab: the read-only listener (TENSORFOLD_METRICS_LISTEN), until ``stop`` is set: /metrics and /health for
+    /// monitors on other hosts while the API listens on loopback. Its connections are not logged; a stop waits for
+    /// them as for the API's.
+    pub fn serveMetrics(srv: *Server, listener: listener_mod.Listener, stop: *const std.atomic.Value(bool)) void {
+        while (listener.accept(stop)) |c| {
+            const t = std.Thread.spawn(.{ .stack_size = 1 << 20 }, metricsConnection, .{ srv, c }) catch {
+                _ = std.posix.system.close(c.fd);
+                continue;
+            };
+            t.detach();
+        }
+    }
+
+    fn metricsConnection(srv: *Server, accepted: listener_mod.Listener.Accepted) void {
+        // counted with the API's connections, so a stop does not free the server under one (release review 10-24)
+        // API の接続といっしょに数える: 停止がこの接続の下でサーバーを解放しないように
+        _ = srv.open_connections.fetchAdd(1, .acq_rel);
+        defer _ = srv.open_connections.fetchSub(1, .acq_rel);
+        defer _ = std.posix.system.close(accepted.fd);
+        var peer_buf: [64]u8 = undefined;
+        const peer = listener_mod.peerText(&peer_buf, accepted.peer);
+        var conn = http_conn.Conn.init(srv.gpa, accepted.fd, peer) catch return;
+        defer conn.deinit();
+        conn.timeouts = srv.config.timeouts;
+        var arena: std.heap.ArenaAllocator = .init(srv.gpa);
+        defer arena.deinit();
+        while (true) {
+            _ = arena.reset(.retain_capacity);
+            const a = arena.allocator();
+            const outcome = conn.readRequest(a, true) catch break;
+            switch (outcome) {
+                .closed => break,
+                .handled => if (conn.close) break else continue,
+                .ready => {},
+            }
+            conn.quiet_log = true;
+            routes.metricsOnly(srv, &conn, a);
             if (conn.close or conn.broken) break;
         }
     }

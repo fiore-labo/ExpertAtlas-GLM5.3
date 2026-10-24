@@ -30,11 +30,15 @@ done
 printf '%s\n' "$version" > "$stage/VERSION"
 [ -n "${TF_DIST_COMMIT:-}" ] && printf 'commit %s\n' "$TF_DIST_COMMIT" >> "$stage/VERSION"
 if [ -n "${TF_DIST_EXTRA:-}" ]; then
-    for f in "$TF_DIST_EXTRA"/*; do
-        [ -f "$f" ] || continue
-        cp -p "$f" "$stage/"
+    # its subdirectories too (the control panel's launcher, the expert plan tool, the bank list), modes kept
+    (cd "$TF_DIST_EXTRA" && find . -type f ! -name '*.pyc' | sed 's|^\./||') | while IFS= read -r f; do
+        mkdir -p "$stage/$(dirname "$f")"
+        cp -p "$TF_DIST_EXTRA/$f" "$stage/$f"
     done
 fi
+# the control panel's page for the launcher: the server embeds the same file (this script runs from the source tree)
+panel="$(dirname "$0")/../../zig/src/server/panel.html"
+[ -n "${TF_DIST_EXTRA:-}" ] && [ -f "$panel" ] && cp "$panel" "$stage/panel.html"
 if [ -n "${TF_DIST_LIB:-}" ]; then
     for lib in "$TF_DIST_LIB"/*.so*; do
         [ -f "$lib" ] || continue

@@ -44,6 +44,9 @@ pub const Metrics = struct {
     cached: u64 = 0, // prompt tokens the engine found cached (finished requests)
     cached_known: bool = false, // some request's engine said how many (an engine with a prompt cache)
     disconnects: u64 = 0,
+    // requests refused because the engine's queue was full (503); queue waits of finished requests
+    rejected: u64 = 0,
+    queue: Histogram = .{},
     latency: Histogram = .{},
     ttft: Histogram = .{},
     decode: Histogram = .{},
@@ -51,7 +54,7 @@ pub const Metrics = struct {
     tpot: TpotHistogram = .{},
     requests: std.ArrayList(struct { key: []const u8, status: u16, count: u64 }) = .empty,
 
-    pub fn note(m: *Metrics, io: std.Io, prompt: usize, generation: usize, drafted: u64, accepted: u64, rounds: u64, latency: f64, ttft: ?f64, decode: ?f64, prefill: ?f64, tpot: ?f64, cached: ?usize) void {
+    pub fn note(m: *Metrics, io: std.Io, prompt: usize, generation: usize, drafted: u64, accepted: u64, rounds: u64, latency: f64, ttft: ?f64, decode: ?f64, prefill: ?f64, tpot: ?f64, cached: ?usize, queue: ?f64) void {
         m.mutex.lockUncancelable(io);
         defer m.mutex.unlock(io);
         m.prompt += prompt;
@@ -68,6 +71,14 @@ pub const Metrics = struct {
         if (decode) |d| m.decode.observe(d);
         if (prefill) |p| m.prefill.observe(p);
         if (tpot) |t| m.tpot.observe(t);
+        if (queue) |q| m.queue.observe(q);
+    }
+
+    /// A request the engine refused because its queue was full (the 503 reply).
+    pub fn refused(m: *Metrics, io: std.Io) void {
+        m.mutex.lockUncancelable(io);
+        defer m.mutex.unlock(io);
+        m.rejected += 1;
     }
 
     pub fn tpotValue(_: *const Metrics, first: ?i96, last: ?i96, generated: usize) ?f64 {
@@ -162,15 +173,66 @@ pub const Metrics = struct {
         // (cached_tokens_total until an engine reports its prompt cache's hits, e.g. GLM-5.3's slot cache) is left out, as there
         var buf: [40]u8 = undefined;
         try healthFamily(w, "requests_total", "counter", "Finished requests (as /health's requests_total).", "{d}", snap.latency.n);
-        try healthFamily(w, "completion_tokens_total", "counter", "Reply tokens, the running replies' tokens so far included.", "{d}", snap.generation + status.generation_tokens);
-        try healthFamily(w, "rounds_total", "counter", "Decode rounds of finished requests.", "{d}", snap.rounds);
-        try healthFamily(w, "prefill_seconds_total", "counter", "Engine prefill seconds of finished requests.", "{s}", num(&buf, snap.prefill.total));
-        try healthFamily(w, "decode_seconds_total", "counter", "Engine decode seconds of finished requests.", "{s}", num(&buf, snap.decode.total));
-        if (snap.cached_known) try healthFamily(w, "cached_tokens_total", "counter", "Prompt tokens found cached, finished requests.", "{d}", snap.cached);
+        if (status.progress) |p| {
+            // Fiore-lab: an engine that reports its own totals (the GLM-5.3 host) gives them with the running request's
+            // progress in them, read under one lock: every pair a monitor divides (tokens over seconds) moves together
+            // and no total falls back when a request ends
+            try healthFamily(w, "completion_tokens_total", "counter", "Reply tokens, the running reply's tokens so far included.", "{d}", p.generated_total);
+            try healthFamily(w, "rounds_total", "counter", "Decode rounds, the running reply's so far included.", "{d}", p.rounds_total);
+            try healthFamily(w, "drafted_total", "counter", "Draft tokens verified, the running reply's so far included.", "{d}", p.drafted_total);
+            try healthFamily(w, "accepted_total", "counter", "Draft tokens kept, the running reply's so far included.", "{d}", p.accepted_total);
+            try healthFamily(w, "prompt_tokens_total", "counter", "Prompt tokens, a running request's counted as its prefill starts.", "{d}", p.prompt_total);
+            try healthFamily(w, "cached_tokens_total", "counter", "Prompt tokens resumed from the prompt cache, a running request's counted as its prefill starts.", "{d}", p.cached_total);
+            try healthFamily(w, "prefill_tokens_total", "counter", "Prompt tokens the prefill computed (resumed ones excluded), the running prefill's chunks so far included.", "{d}", p.computed_total);
+            try healthFamily(w, "prefill_seconds_total", "counter", "Engine prefill seconds, the running prefill's so far included.", "{s}", num(&buf, p.prefill_seconds_total));
+            try healthFamily(w, "decode_seconds_total", "counter", "Engine decode seconds, the running reply's so far included.", "{s}", num(&buf, p.decode_seconds_total));
+        } else {
+            try healthFamily(w, "completion_tokens_total", "counter", "Reply tokens, the running replies' tokens so far included.", "{d}", snap.generation + status.generation_tokens);
+            try healthFamily(w, "rounds_total", "counter", "Decode rounds of finished requests.", "{d}", snap.rounds);
+            try healthFamily(w, "prefill_seconds_total", "counter", "Engine prefill seconds of finished requests.", "{s}", num(&buf, snap.prefill.total));
+            try healthFamily(w, "decode_seconds_total", "counter", "Engine decode seconds of finished requests.", "{s}", num(&buf, snap.decode.total));
+            if (snap.cached_known) try healthFamily(w, "cached_tokens_total", "counter", "Prompt tokens found cached, finished requests.", "{d}", snap.cached);
+        }
         try healthFamily(w, "context_length", "gauge", "Tokens a request's prompt and reply may hold (the server's effective window).", "{d}", window);
         try healthFamily(w, "streams_max", "gauge", "Streams the concurrent engine decodes at most (--parallel).", "{d}", engine.info().lanes);
+        if (status.progress) |p| try renderProgress(w, &snap, p, status.pool, engine.info());
     }
 };
+
+/// Fiore-lab: what an engine that reports its progress adds (the GLM-5.3 host): the running request's phase and
+/// position, the queue, refusals, the KV pool, and the engine's settings.
+fn renderProgress(w: *std.Io.Writer, snap: *const Metrics, p: api.Progress, pool: ?api.PoolStatus, info: api.Info) !void {
+    var buf: [40]u8 = undefined;
+    try gauge(w, "requests_prefilling", "gauge", "1 while a request's prompt is being prefilled (or planned), else 0.", @intFromBool(p.phase == .prefill));
+    try gauge(w, "requests_decoding", "gauge", "1 while a request is decoding its reply, else 0.", @intFromBool(p.phase == .decode));
+    try gauge(w, "prompt_tokens_running", "gauge", "The running request's prompt tokens (0: none).", p.prompt);
+    try gauge(w, "prompt_tokens_cached_running", "gauge", "Of them, the tokens resumed from the prompt cache.", p.cached);
+    try gauge(w, "prefill_tokens_remaining", "gauge", "Prompt tokens the running prefill has still to compute.", if (p.phase == .prefill) p.prompt -| @max(p.prompt_done, p.cached) else 0);
+    try gauge(w, "queued_prompt_tokens", "gauge", "Prompt tokens of the requests waiting in the queue.", p.queued_prompt);
+    try gauge(w, "requests_rejected_total", "counter", "Requests refused with 503 because the engine's queue was full.", snap.rejected);
+    try histogram(w, "queue_wait_seconds", "Seconds a finished request waited in the engine's queue before it ran.", snap.queue);
+    if (pool) |ps| {
+        try gauge(w, "pool_blocks", "gauge", "Blocks of the KV pool.", ps.blocks);
+        try gauge(w, "pool_block_positions", "gauge", "Positions one block holds.", ps.block_positions);
+        try gauge(w, "pool_free_blocks", "gauge", "Blocks no conversation holds.", ps.free_blocks);
+        try gauge(w, "pool_shared_blocks", "gauge", "Blocks two or more conversations hold.", ps.shared_blocks);
+        try gauge(w, "pool_conversations", "gauge", "Conversations kept in the pool.", ps.slots);
+        try family(w, "pool_usage_ratio", "gauge", "Blocks in use over all blocks.");
+        try w.print("{s}pool_usage_ratio {s}\n", .{ prefix, num(&buf, if (ps.blocks == 0) 0 else @as(f64, @floatFromInt(ps.blocks -| ps.free_blocks)) / @as(f64, @floatFromInt(ps.blocks))) });
+        try gauge(w, "pool_evicted_total", "counter", "Conversations evicted to make room.", ps.evicted_total);
+        try gauge(w, "pool_cold_total", "counter", "Requests that dropped every conversation first (a check failed).", ps.cold_total);
+        try family(w, "pool_requests_total", "counter", "Requests by what the pool did: continue (their own conversation), share (another's start), new.");
+        try w.print("{s}pool_requests_total{{action=\"continue\"}} {d}\n{s}pool_requests_total{{action=\"share\"}} {d}\n{s}pool_requests_total{{action=\"new\"}} {d}\n", .{ prefix, ps.continued_total, prefix, ps.shared_total, prefix, ps.new_total });
+        try family(w, "pool_check_seconds_total", "counter", "Seconds the pool spent checking the rows requests resumed.");
+        try w.print("{s}pool_check_seconds_total {s}\n", .{ prefix, num(&buf, ps.check_seconds_total) });
+        try family(w, "pool_hash_seconds_total", "counter", "Seconds the pool spent hashing the rows requests wrote.");
+        try w.print("{s}pool_hash_seconds_total {s}\n", .{ prefix, num(&buf, ps.hash_seconds_total) });
+    }
+    if (info.labels.len > 0) {
+        try family(w, "engine_info", "gauge", "The engine's settings as labels (always 1).");
+        try w.print("{s}engine_info{{{s}}} 1\n", .{ prefix, info.labels });
+    }
+}
 
 const health_prefix = "tensorfold_health:";
 
@@ -243,7 +305,7 @@ test "edges and numbers" {
 test "metrics record rounds prefill and per-token timing" {
     const gpa = std.testing.allocator;
     var m: Metrics = .{ .gpa = gpa };
-    m.note(std.testing.io, 10, 3, 0, 0, 2, 1.0, null, null, 0.25, m.tpotValue(1_000_000_000, 1_024_000_000, 3), null);
+    m.note(std.testing.io, 10, 3, 0, 0, 2, 1.0, null, null, 0.25, m.tpotValue(1_000_000_000, 1_024_000_000, 3), null, null);
     try std.testing.expectEqual(@as(u64, 2), m.rounds);
     try std.testing.expectEqual(@as(u64, 1), m.prefill.n);
     try std.testing.expectEqual(@as(u64, 1), m.tpot.n);
@@ -256,8 +318,9 @@ test "metrics record rounds prefill and per-token timing" {
 }
 
 const RenderStub = struct {
-    pub fn info(_: *anyopaque) api.Info {
-        return .{};
+    pub fn info(ctx: *anyopaque) api.Info {
+        const s: *@This() = @ptrCast(@alignCast(ctx));
+        return s.info_value;
     }
     pub fn submit(_: *anyopaque, _: api.Id, _: *const api.Request, _: api.Sink) api.SubmitError!void {
         unreachable;
@@ -273,6 +336,7 @@ const RenderStub = struct {
     }
     status_value: api.Status = .{ .running = 1, .waiting = 2, .generation_tokens = 3 },
     memory_value: ?api.Memory = null,
+    info_value: api.Info = .{},
 
     pub fn engine(s: *@This()) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
@@ -282,7 +346,7 @@ const RenderStub = struct {
 test "render exposes live counters, rounds, prefill and TPOT without cache family" {
     const gpa = std.testing.allocator;
     var m: Metrics = .{ .gpa = gpa };
-    m.note(std.testing.io, 10, 3, 0, 0, 2, 1.0, null, null, 0.25, m.tpotValue(1_000_000_000, 3_000_000_000, 3), null);
+    m.note(std.testing.io, 10, 3, 0, 0, 2, 1.0, null, null, 0.25, m.tpotValue(1_000_000_000, 3_000_000_000, 3), null, null);
     var stub: RenderStub = .{};
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
@@ -294,12 +358,55 @@ test "render exposes live counters, rounds, prefill and TPOT without cache famil
     try std.testing.expect(std.mem.indexOf(u8, body, "tensorfold:request_time_per_output_token_seconds_sum 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "prompt_tokens_cached_total") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "device_memory_bytes") == null); // unknown memory: no gauge
+    try std.testing.expect(std.mem.indexOf(u8, body, "requests_prefilling") == null); // no progress: none of its families
+    try std.testing.expect(std.mem.indexOf(u8, body, "engine_info") == null);
     stub.memory_value = .{ .active = 7 << 30, .peak = 8 << 30 };
     var known: std.Io.Writer.Allocating = .init(gpa);
     defer known.deinit();
     try m.render(std.testing.io, &known.writer, stub.engine(), 4096);
     try std.testing.expect(std.mem.indexOf(u8, known.written(), "tensorfold:device_memory_bytes 7516192768\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, known.written(), "tensorfold:device_memory_peak_bytes 8589934592\n") != null);
+}
+
+test "an engine's progress gives live totals, the running request's phase, the queue, the pool and engine_info" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var m: Metrics = .{ .gpa = gpa };
+    defer m.requests.deinit(gpa);
+    m.note(io, 10, 3, 0, 0, 2, 1.0, null, null, 0.25, null, 4, 0.5);
+    m.refused(io);
+    var stub: RenderStub = .{};
+    stub.status_value.progress = .{ .phase = .prefill, .prompt = 1000, .cached = 200, .prompt_done = 600, .queued_prompt = 50, .prompt_total = 1010, .cached_total = 204, .computed_total = 406, .generated_total = 7, .prefill_seconds_total = 1.5, .decode_seconds_total = 0.25, .rounds_total = 3, .drafted_total = 6, .accepted_total = 4 };
+    stub.status_value.pool = .{ .blocks = 100, .free_blocks = 75, .block_positions = 256, .continued_total = 1, .new_total = 2, .check_seconds_total = 0.002 };
+    stub.info_value = .{ .labels = "tp=\"8\",dcp=\"2\"" };
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try m.render(io, &out.writer, stub.engine(), 4096);
+    const body = out.written();
+    for ([_][]const u8{
+        "tensorfold:requests_prefilling 1\n",            "tensorfold:requests_decoding 0\n",
+        "tensorfold:prefill_tokens_remaining 400\n",     "tensorfold:queued_prompt_tokens 50\n",
+        "tensorfold:requests_rejected_total 1\n",        "tensorfold:queue_wait_seconds_count 1\n",
+        "tensorfold_health:completion_tokens_total 7\n", "tensorfold_health:prefill_tokens_total 406\n",
+        "tensorfold_health:prompt_tokens_total 1010\n",  "tensorfold_health:cached_tokens_total 204\n",
+        "tensorfold_health:prefill_seconds_total 1.5\n", "tensorfold_health:decode_seconds_total 0.25\n",
+        "tensorfold_health:drafted_total 6\n",           "tensorfold_health:accepted_total 4\n",
+        "tensorfold:pool_usage_ratio 0.25\n",            "tensorfold:pool_requests_total{action=\"new\"} 2\n",
+        "tensorfold:pool_check_seconds_total 0.002\n",   "tensorfold:engine_info{tp=\"8\",dcp=\"2\"} 1\n",
+        "tensorfold:prompt_tokens_total 10\n", // the finished requests' families keep their meaning
+    }) |line| {
+        if (std.mem.indexOf(u8, body, line) == null) {
+            std.debug.print("missing: {s}", .{line});
+            return error.TestExpectedEqual;
+        }
+    }
+    // decoding: nothing left to prefill
+    stub.status_value.progress.?.phase = .decode;
+    var out2: std.Io.Writer.Allocating = .init(gpa);
+    defer out2.deinit();
+    try m.render(io, &out2.writer, stub.engine(), 4096);
+    try std.testing.expect(std.mem.indexOf(u8, out2.written(), "tensorfold:prefill_tokens_remaining 0\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out2.written(), "tensorfold:requests_decoding 1\n") != null);
 }
 
 test "metrics snapshot allocation failure releases the mutex" {
@@ -326,7 +433,7 @@ test "metrics snapshot allocation failure releases the mutex" {
     try std.testing.expect(failing.has_induced_failure);
     failing.fail_index = std.math.maxInt(usize);
     m.httpRequest(io, "client", 200);
-    m.note(io, 10, 3, 0, 0, 2, 1.0, null, null, 0.25, null, null);
+    m.note(io, 10, 3, 0, 0, 2, 1.0, null, null, 0.25, null, null, null);
     try m.render(io, &out.writer, stub.engine(), 4096);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "requests_total{key=\"client\",status=\"200\"} 2") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "prompt_tokens_total 10") != null);
@@ -339,11 +446,11 @@ test "cached_tokens_total only once an engine reports its prompt cache" {
     var stub: RenderStub = .{};
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
-    m.note(io, 10, 3, 0, 0, 2, 1.0, null, null, 0.25, null, null);
+    m.note(io, 10, 3, 0, 0, 2, 1.0, null, null, 0.25, null, null, null);
     try m.render(io, &out.writer, stub.engine(), 4096);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "cached_tokens_total") == null);
-    m.note(io, 100, 3, 0, 0, 2, 1.0, null, null, 0.25, null, 64);
-    m.note(io, 100, 3, 0, 0, 2, 1.0, null, null, 0.25, null, 0);
+    m.note(io, 100, 3, 0, 0, 2, 1.0, null, null, 0.25, null, 64, null);
+    m.note(io, 100, 3, 0, 0, 2, 1.0, null, null, 0.25, null, 0, null);
     var out2: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out2.deinit();
     try m.render(io, &out2.writer, stub.engine(), 4096);

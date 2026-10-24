@@ -1,4 +1,4 @@
-[English](README.md) | [日本語](README.ja.md) | 简体中文
+[English](README.md) | [日本語](README.ja.md) | 简体中文 | [한국어](README.ko.md)
 
 # 在四台或八台 DGX Spark 上运行完整版 GLM-5.3
 
@@ -8,10 +8,22 @@
 
 ## 功能
 
-- 张量并行 8 或 4，KV 缓存在 rank 对之间切分（解码上下文并行 2）。引擎和模型最多支持 1M（1,048,576 个 token）；上下文上限由 DGX Spark 的内存决定：**八个节点（FP8 KV 缓存）为 1M，四个节点（4 bit KV 缓存）约 800K（819,200）**。设置示例中为 819,200 和 737,280；在相同内存下，八个节点可设 `CONTEXT=1048576` `STORE=589824`，四个节点可设 `CONTEXT=819200` `STORE=18080`（KV 池保存 `CONTEXT` + `STORE` 个位置）。
+- 张量并行 8 或 4，KV 缓存在 rank 对之间切分（解码上下文并行 2）。引擎和模型最多支持 1M（1,048,576 个 token）；上下文上限由 DGX Spark 的内存决定：**八个节点（FP8 KV 缓存）为 1M，四个节点（4 bit KV 缓存）约 800K（819,200）**。设置示例中为 819,200 和 737,280；在相同内存下，八个节点可设 `CONTEXT=1048576` `STORE=589824`，四个节点可设 `CONTEXT=819200` `STORE=18080`（KV 池保存 `CONTEXT` + `STORE` 个 token）。
 - 长提示词按序列并行分段读入；解码步的集合通信走 RoCE。
-- 所有对话共用一个对话缓存，以 256 个位置为一块：请求会从任意对话中已缓存的最长前缀接着处理；开头相同的对话（智能体的系统提示词、其子智能体）共享的块只保存一份。
+- 所有对话共用一个对话缓存，以 256 个 token为一块：请求会从任意对话中已缓存的最长前缀接着处理；开头相同的对话（智能体的系统提示词、其子智能体）共享的块只保存一份。
 - 每一轮由模型校验草稿：草稿默认来自 GLM-5.3 自带的 MTP 层，也可来自可选的 DFlash2 草稿模型。无论哪种情况，回复都由模型本身决定。
+- `/metrics`（Prometheus 文本格式）和 `/health` 也统计正在运行的请求，因此监控程序在请求运行期间也能读取 prefill 与解码速度、缓存命中和草稿接受情况。设置 `METRICS_LISTEN` 后，这两个端点会在单独的地址上以只读方式开放，供其他主机上的监控程序使用。
+
+## Expert Atlas（r3-102 新功能，四个节点）
+
+GLM-5.3 为每个 token 在每层 256 个路由专家中选出 8 个，而不同专家被选中的频率相差很大。Expert Atlas 让 19,200 个路由专家（第 3 至 77 层）各自以自己的位宽（2、3、4 或 5 bit）载入，在有限的内存中让使用最多的专家得到最多的位：
+
+- **bank**：每种位宽的路由专家，位于 Hugging Face：`fiore-lab/GLM-5.3-EXL3-Experts-2bit`、`-3bit`、`-4bit` 和 `-5bit`。面板提供每个节点都具备的位宽。
+- **控制面板**：由启动器（`./tf-glm53 launcher`）提供的页面。启动前它规划位宽，并显示每个节点的内存、计划能否容纳以及 KV 缓存还剩多少；也从这里启动和停止引擎。引擎运行时，它显示每个 token 选中的专家、被选中专家的平均位宽和速度。
+- **使用次数**：引擎统计每个提示行和每个解码 token 选中的专家；停止时可以把这次运行的次数加入学习数据。计划按这些次数为专家排序（在保存第一次运行之前，按 Fiore-lab 测得并随页面提供的次数排序）。
+- **专家优化**：保持每种位宽的专家数量不变，按使用情况重新排列专家：相同内存下，模型实际选中的专家的平均位宽更高。可在运行中的引擎上进行（在四个节点上，75 层的完整更改用了 83 至 90 秒，在请求之间进行），也可在停止的引擎上为下次启动进行。
+
+本版本的控制面板在四个节点上运行；八个节点仍像以前一样，所有路由专家为 4 bit。详见 `packaging/RUNTIME.zh-CN.md`（“控制面板”）和 `glm53/release/T4.zh-CN.md`。
 
 ## 所需环境
 
@@ -19,10 +31,11 @@
 - DGX OS（Ubuntu 24.04），NVIDIA 驱动 580 或更高版本，以及 cuBLAS 13。
 - 每个节点上都有 NCCL 2.30.7：即 NVIDIA 的 `nvidia-nccl-cu13` wheel，由 pip 解包（见 `packaging/RUNTIME.md`）。
 - 与节点数相符的 Fiore-lab EXL3 检查点（Hugging Face），在每个节点上放在相同路径下：八个节点用 `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`（390 GB），四个节点用 `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`（344.6 GB）。四节点检查点中，第 3 至 77 层的路由专家里使用最少的一半为 3 bit，其余为 4 bit；其他部分与八节点检查点相同。
+- 控制面板（四个节点）需要 3 bit 和 4 bit 的专家 bank（277.9 GB 和 368.5 GB；八节点检查点可以作为 4 bit bank；只有 4 bit 时上下文会更短），以及供启动器使用的各节点上的 `python3`。
 
 ## 运行
 
-下载发布归档 `tensorfold-r2-102-linux-aarch64.tar.gz`，并按照其中的 `RUNTIME.md`（本仓库中为 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)）操作。四个节点和八个节点使用同一个归档和同一个启动脚本：将 `glm53.conf.example`（八个节点）或 `glm53.t4.conf.example`（四个节点，见 [glm53/release/T4.zh-CN.md](glm53/release/T4.zh-CN.md)）复制为 `glm53.conf`，填写节点、网络名称、NCCL、权重和草稿模型，然后执行 `./tf-glm53 deploy` 和 `./tf-glm53 up`。除非为服务器指定地址和 API 密钥文件，否则它在 `127.0.0.1` 上提供 OpenAI chat API。
+下载发布归档 `tensorfold-r3-102-linux-aarch64.tar.gz`，并按照其中的 `RUNTIME.md`（本仓库中为 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)）操作。四个节点和八个节点使用同一个归档和同一个启动脚本：将 `glm53.conf.example`（八个节点）或 `glm53.t4.conf.example`（四个节点，见 [glm53/release/T4.zh-CN.md](glm53/release/T4.zh-CN.md)）复制为 `glm53.conf`，填写节点、网络名称、NCCL、权重和草稿模型，然后执行 `./tf-glm53 deploy` 和 `./tf-glm53 up`。除非为服务器指定地址和 API 密钥文件，否则它在 `127.0.0.1` 上提供 OpenAI chat API。
 
 ## 草稿模型
 
@@ -49,9 +62,10 @@
 
 本方案的输出分布相对于原始 BF16 模型输出分布的 KL 散度（原始模型指以官方实现运行官方 BF16 权重、以 FP32 计算），使用本方案的服务配置：
 
-- 八个节点（FP8 KV 缓存，DCP 2；用本引擎的较早版本在相同权重上测得），四段 2,048 token 的文本（对话、法律、散文、推理），每段取最后 1,023 个位置，运行五次：平均 0.0133（0.0128 至 0.0146）；top-1 token 的一致率约为 96%。
-- 八个节点，四段 8,192 token 的文本（两段英文、两段代码），按位置区间：0.012（位置 1,024 至 2,047）、0.018、0.019 和 0.013（6,144 至 8,190）。作为参照，官方 BF16 权重若以 BF16 而非 FP32 计算，在相同区间上与同一基准的差异为 0.007 至 0.010。
-- 四个节点（四节点检查点，4 bit KV 缓存，DCP 2），四段 8,192 token 的文本，按相同的位置区间：0.019（位置 1,024 至 2,047）、0.032、0.029 和 0.019（6,144 至 8,190）。
+- 八个节点（FP8 KV 缓存，DCP 2；用本引擎的较早版本在相同权重上测得），四段 2,048 token 的文本（对话、法律、散文、推理），每段取最后 1,023 个 token，运行五次：平均 0.0133（0.0128 至 0.0146）；top-1 token 的一致率约为 96%。
+- 八个节点，四段 8,192 token 的文本（两段英文、两段代码），按token 区间：0.012（token 1,024 至 2,047）、0.018、0.019 和 0.013（6,144 至 8,190）。作为参照，官方 BF16 权重若以 BF16 而非 FP32 计算，在相同区间上与同一基准的差异为 0.007 至 0.010。
+- 四个节点（四节点检查点，4 bit KV 缓存，DCP 2），四段 8,192 token 的文本，按相同的token 区间：0.019（token 1,024 至 2,047）、0.032、0.029 和 0.019（6,144 至 8,190）。
+- Expert Atlas 的各位宽（所有路由专家为同一位宽，其他权重同上，相同的四段文本，token 6,144 至 8,190）：2 bit 0.0517、3 bit 0.0203、4 bit 0.0127（四个节点），5 bit 0.0114（八个节点）。在相同内存下，含 2 bit 专家的配置比不含的配置离基准远 13% 至 30%；把其他专家降到 3 bit 来换取 5 bit 专家，没有可测出的改善。
 
 ## 从源代码构建
 
@@ -60,7 +74,7 @@
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so
-zig build dist -Dversion=r2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 
@@ -70,6 +84,7 @@ zig build dist -Dversion=r2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platf
 
 - 仅支持四台或八台 GB10 系统；不支持其他 GPU，也不支持其他 rank 数量。
 - 一次只运行一个请求；其他请求最多 32 个按到达顺序等待（聊天标题生成请求排在最后），超过 32 个时服务器会拒绝（返回 503，流式请求则为错误事件）。对于并行运行子智能体的智能体，最好让子智能体改用另一个模型。
+- 本版本的控制面板在四个节点上运行。
 - 其余限制见 `packaging/RUNTIME.md`。
 
 ## 许可证与致谢

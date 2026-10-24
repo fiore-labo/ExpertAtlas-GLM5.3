@@ -85,6 +85,12 @@ pub const Stats = struct {
     loop_period: ?u32 = null,
     /// Prompt prefill duration measured by the engine host, in seconds.
     prefill_seconds: ?f64 = null,
+    /// Decode duration measured by the engine host (the first token to the last), in seconds; null: not measured.
+    decode_seconds: ?f64 = null,
+    /// Prompt tokens the prefill computed (a prompt cache's resumed ones excluded); null: not reported.
+    computed: ?u64 = null,
+    /// Seconds the request waited in the engine's queue before it ran; null: not measured.
+    queue_seconds: ?f64 = null,
     /// The drafter's own counters as a JSON object, or empty.
     telemetry_json: []const u8 = "",
 };
@@ -123,6 +129,8 @@ pub const Info = struct {
     /// Positions kept for earlier conversations beside the running one (a slot cache's store), shown on /health;
     /// 0: the store could not be allocated; null: the engine keeps no such store.
     slot_positions: ?u64 = null,
+    /// The engine's settings as Prometheus labels for /metrics' engine_info (`tp="8",dcp="2"`); empty: no such family.
+    labels: []const u8 = "",
     /// The Python CUDA server's fields too (cuda/health.py's /health totals and /v1/health, the engine stats names in
     /// a reply's "tensorfold" object), for clients and monitors written against it; off: the Mac server's shapes only.
     cuda_fields: bool = false,
@@ -157,6 +165,27 @@ pub const Opened = struct { engine: Engine, close: *const fn (ctx: *anyopaque) v
 
 pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0 };
 
+/// Fiore-lab: GET /v1/experts/usage?window=SECONDS, GET /v1/experts/recent?after=SEQ&max=N, GET /v1/memory,
+/// GET /v1/experts/swap (the last change of the experts' bits and its progress), or GET /v1/experts/prefill?after=SEQ&max=N
+/// (the prompt chunks' pick counts).
+pub const ExpertsQuery = union(enum) { usage: u32, recent: struct { after: ?u64, max: u32, text: ?TokenBytes = null }, memory: void, swap: void, prefill: struct { after: ?u64, max: u32 } };
+
+/// Fiore-lab (the control panel): a token's raw bytes for the pick log's text (`records[].text`), from the server's
+/// tokenizer: null for a special token, else the bytes (allocated in `a`; byte-level BPE: the vocabulary string mapped
+/// back through the byte-level byte alphabet, so a token may end inside a UTF-8 character).
+/// Fiore-lab (コントロールパネル): 選択ログの文字 (`records[].text`) のための token の生のバイト。サーバーのトークナイザー
+/// から: 特殊 token は null、それ以外はバイト (`a` に確保。byte-level BPE: 語彙の文字列をバイトの表で戻す
+/// ので、token が UTF-8 の文字の途中で終わることがある)。
+pub const TokenBytes = struct {
+    ctx: *anyopaque,
+    bytes: *const fn (ctx: *anyopaque, a: std.mem.Allocator, id: u32) ?[]const u8,
+};
+
+/// Fiore-lab: POST /v1/experts/swap (the bits wanted: one byte an expert, the MoE layers in order; run between
+/// requests) or POST /v1/experts/save (a name for the bits in use).
+pub const ExpertsControl = union(enum) { swap: []const u8, save: []const u8 };
+pub const ControlError = error{ Unsupported, UnsupportedWithMulti, Busy, BadRequest, Exists, Failed, OutOfMemory };
+
 /// A backend's words for its own refusals (a request it cannot serve); null: the error's name.
 pub const Explain = struct {
     ctx: ?*anyopaque = null,
@@ -184,6 +213,9 @@ pub const Status = struct {
     generation_tokens: u64 = 0,
     /// A KV pool's state (the GLM-5.3 engine's TF_GLM53_PREFIX=pool), shown on /health; null: no pool.
     pool: ?PoolStatus = null,
+    /// The engine's own totals with the running request's progress in them, and that request's phase (the GLM-5.3
+    /// host); null: not reported, and /metrics and /health leave these out.
+    progress: ?Progress = null,
 };
 
 pub const PoolStatus = struct {
@@ -193,6 +225,43 @@ pub const PoolStatus = struct {
     shared_blocks: u64 = 0,
     evicted_total: u64 = 0,
     cold_total: u64 = 0,
+    /// Positions one block holds.
+    block_positions: u64 = 0,
+    /// Requests by what the pool did with them: resumed their own conversation, shared another's start, or began a
+    /// new one (a cold request counts as new, and in cold_total).
+    continued_total: u64 = 0,
+    shared_total: u64 = 0,
+    new_total: u64 = 0,
+    /// Seconds the pool spent checking the rows a request resumed, and hashing the rows it wrote.
+    check_seconds_total: f64 = 0,
+    hash_seconds_total: f64 = 0,
+};
+
+/// Totals since the engine started, the running request's progress included, read under one lock so that each
+/// only grows; and the running request's own position.
+pub const Progress = struct {
+    phase: enum { idle, prefill, decode } = .idle,
+    /// The running request: its prompt tokens, those a prompt cache resumed, those in the caches so far (resumed
+    /// ones included), and the reply tokens so far.
+    prompt: u64 = 0,
+    cached: u64 = 0,
+    prompt_done: u64 = 0,
+    generated: u64 = 0,
+    /// Prompt tokens of the requests waiting in the queue.
+    queued_prompt: u64 = 0,
+    /// Every request so far, the running one's progress included: prompt tokens (counted as its prefill starts),
+    /// those resumed, those computed, reply tokens, prefill and decode seconds, decode rounds, drafts verified and
+    /// drafts kept.
+    prompt_total: u64 = 0,
+    cached_total: u64 = 0,
+    computed_total: u64 = 0,
+    generated_total: u64 = 0,
+    prefill_seconds_total: f64 = 0,
+    decode_seconds_total: f64 = 0,
+    rounds_total: u64 = 0,
+    drafted_total: u64 = 0,
+    accepted_total: u64 = 0,
+    requests_total: u64 = 0,
 };
 
 pub const SubmitError = error{ Closed, Busy };
@@ -213,7 +282,22 @@ pub const Engine = struct {
         keepalive: ?*const fn (ctx: *anyopaque) ?keepalive.Target = null,
         /// One logit per label, and the vocabulary logsumexp. Null until a family scores decisions.
         score: ?*const fn (ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64) error{Failed}!f64 = null,
+        /// Fiore-lab: the live expert usage as a JSON body (GET /v1/experts/...), null when the backend keeps none.
+        /// Read from HTTP threads, so it must not touch the GPU.
+        experts: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, q: ExpertsQuery) ?[]u8 = null,
+        /// Fiore-lab: a change of the experts' bits asked for, or the bits in use saved; a JSON body.
+        experts_control: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, c: ExpertsControl) ControlError![]u8 = null,
     };
+
+    pub fn expertsControl(e: Engine, a: std.mem.Allocator, c: ExpertsControl) ControlError![]u8 {
+        const f = e.vtable.experts_control orelse return error.Unsupported;
+        return f(e.ctx, a, c);
+    }
+
+    pub fn experts(e: Engine, a: std.mem.Allocator, q: ExpertsQuery) ?[]u8 {
+        const f = e.vtable.experts orelse return null;
+        return f(e.ctx, a, q);
+    }
 
     pub fn info(e: Engine) Info {
         return e.vtable.info(e.ctx);

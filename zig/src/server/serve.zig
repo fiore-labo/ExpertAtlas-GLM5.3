@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! A server's life: keys, the listening socket, the startup lines, the live line, and a clean stop on SIGTERM or SIGINT.
 const std = @import("std");
 const api = @import("engine_api");
@@ -137,6 +138,20 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         std.debug.print("tensorfold: cannot listen on {s}:{d} ({s})\n", .{ args.host, args.port, @errorName(e) });
         return 1;
     };
+    // Fiore-lab: TENSORFOLD_METRICS_LISTEN=HOST:PORT - a second listener, read-only: GET /metrics and /health without a
+    // key, for monitors on other hosts while the API listens on loopback
+    const metrics_lis: ?listener_mod.Listener = if (env(s, "TENSORFOLD_METRICS_LISTEN")) |spec| blk: {
+        const addr = listenAddress(io, spec) orelse {
+            std.debug.print("tensorfold: TENSORFOLD_METRICS_LISTEN={s}: HOST:PORT (an IPv6 host in brackets)\n", .{spec});
+            lis.close();
+            return 1;
+        };
+        break :blk listener_mod.Listener.open(addr) catch |e| {
+            std.debug.print("tensorfold: cannot listen on {s} for /metrics ({s})\n", .{ spec, @errorName(e) });
+            lis.close();
+            return 1;
+        };
+    } else null;
     installSignals(store.enabled());
     const port = lis.port();
     if (s.on_listen) |f| f(port);
@@ -155,14 +170,30 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     var ticker: live.Ticker = .{ .engine = s.engine };
     const drawing = live.wanted(io, if (env(s, "TENSORFOLD_NO_LIVE")) |v| std.mem.eql(u8, v, "1") else false);
     if (drawing) ticker.start();
+    const metrics_accept: ?std.Thread = if (metrics_lis) |ml| blk: {
+        log.line("metrics (read-only: /metrics, /health) at http://{s}/metrics", .{env(s, "TENSORFOLD_METRICS_LISTEN").?});
+        break :blk std.Thread.spawn(.{}, server_mod.Server.serveMetrics, .{ srv, ml, &stop_requested }) catch return 1;
+    } else null;
     const accept = std.Thread.spawn(.{}, server_mod.Server.serve, .{ srv, lis, &stop_requested }) catch return 1;
     accept.join();
+    if (metrics_accept) |t| t.join();
+    if (metrics_lis) |ml| ml.close();
     lis.close();
     if (drawing) ticker.finish();
     var waited: u32 = 0;
     while (srv.open_connections.load(.acquire) > 0 and waited < 40) : (waited += 1) std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
     if (srv.open_connections.load(.acquire) > 0) std.process.exit(0); // replies still open: end without freeing what they read
     return 0;
+}
+
+/// Fiore-lab: HOST:PORT as an address (an IPv6 host in brackets, [::]:9100); null when malformed.
+fn listenAddress(io: std.Io, spec: []const u8) ?std.Io.net.IpAddress {
+    const colon = std.mem.lastIndexOfScalar(u8, spec, ':') orelse return null;
+    const port = std.fmt.parseInt(u16, spec[colon + 1 ..], 10) catch return null;
+    var host = spec[0..colon];
+    if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') host = host[1 .. host.len - 1];
+    if (host.len == 0) return null;
+    return resolve(io, host, port);
 }
 
 /// ``--host`` as an address: an IP literal, else a name the resolver knows (localhost first).

@@ -188,6 +188,14 @@ pub const Meta = struct {
     /// リクエストの間と、プランを適用した直後に成り立つ POOL.md 6.1 の不変条件 (`x`: 処理中の要求のスロット。表は確定長より
     /// 長くてよい)。
     pub fn check(m: *const Meta, x: ?u64) Error!void {
+        return m.checkBusy(if (x) |v| &[1]u64{v} else &.{});
+    }
+
+    /// `check` with several slots in flight (TF_GLM53_MULTI: every conversation being prefilled or decoded may hold
+    /// more blocks than its valid end needs, up to its plan's write_hi).
+    /// 処理中のスロットが複数あるときの `check` (TF_GLM53_MULTI: prefill 中・decode 中の各会話は、確定長が要る数より
+    /// 多いブロックをプランの write_hi まで持ちうる)。
+    pub fn checkBusy(m: *const Meta, xs: []const u64) Error!void {
         const gpa = m.gpa;
         const count = try gpa.alloc(u32, m.cfg.n_blocks);
         defer gpa.free(count);
@@ -200,7 +208,7 @@ pub const Meta = struct {
             const v = s.validEnd();
             if (s.kv_end > v or s.prompt_end > v) return error.Invariant;
             const k = s.blocks.items.len;
-            if (x != null and x.? == s.id) {
+            if (std.mem.indexOfScalar(u64, xs, s.id) != null) {
                 if (k < ceilDiv(v, block)) return error.Invariant;
             } else if (k != ceilDiv(v, block)) return error.Invariant;
             for (s.blocks.items, 0..) |b, j| {
@@ -335,6 +343,16 @@ fn lessOld(a: *const Slot, b: *const Slot) bool {
 /// `m` 上の `prompt` (n トークン、1 <= n < capacity) の要求のプラン。`m` は変えない。`resume_ok` が false なら
 /// キャッシュを使わない (どの c_S も 0)。
 pub fn makePlan(m: *const Meta, prompt: []const i64, max_tokens: i64, resume_ok: bool) Error!Plan {
+    return makePlanBusy(m, prompt, max_tokens, resume_ok, &.{});
+}
+
+/// `makePlan` beside the slots in `busy` (TF_GLM53_MULTI: conversations being prefilled or decoded): none of them is
+/// a candidate to continue or share from (their sequences grow until their commit), and none is evicted or shrunk.
+/// error.Invariant: the blocks the others can give up are too few (the caller waits for a conversation to end).
+/// `busy` のスロット (TF_GLM53_MULTI: prefill 中・decode 中の会話) と並ぶ `makePlan`: どれも続き・共有の候補にしない
+/// (確定までは列が伸びる)。追い出しも縮めもしない。error.Invariant: ほかが手放せるブロックが足りない (呼び出し側は
+/// 会話が終わるのを待つ)。
+pub fn makePlanBusy(m: *const Meta, prompt: []const i64, max_tokens: i64, resume_ok: bool, busy: []const u64) Error!Plan {
     const gpa = m.gpa;
     const cfg = m.cfg;
     const n: u64 = prompt.len;
@@ -361,6 +379,7 @@ pub fn makePlan(m: *const Meta, prompt: []const i64, max_tokens: i64, resume_ok:
     var best_e: u64 = 0;
     var best_cont = false;
     if (resume_ok) for (m.slots.items, 0..) |*s, i| {
+        if (std.mem.indexOfScalar(u64, busy, s.id) != null) continue;
         const seq = s.seq.items;
         const lim = @min(seq.len, prompt.len);
         const h: u64 = std.mem.findDiff(i64, seq[0..lim], prompt[0..lim]) orelse lim;
@@ -476,7 +495,7 @@ pub fn makePlan(m: *const Meta, prompt: []const i64, max_tokens: i64, resume_ok:
     for (order) |i| {
         if (alive <= cfg.max_slots) break;
         const s = &m.slots.items[i];
-        if (s.id == x_id) continue;
+        if (s.id == x_id or std.mem.indexOfScalar(u64, busy, s.id) != null) continue;
         for (s.blocks.items[0..len[i]]) |b| ref[b] -= 1;
         len[i] = 0;
         gone[i] = true;
@@ -490,7 +509,7 @@ pub fn makePlan(m: *const Meta, prompt: []const i64, max_tokens: i64, resume_ok:
     for (order) |i| {
         if (free >= need) break;
         const s = &m.slots.items[i];
-        if (s.id == x_id or gone[i]) continue;
+        if (s.id == x_id or gone[i] or std.mem.indexOfScalar(u64, busy, s.id) != null) continue;
         while (len[i] > 0 and free < need) {
             len[i] -= 1;
             const b = s.blocks.items[len[i]];

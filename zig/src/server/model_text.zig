@@ -36,6 +36,9 @@ pub const Text = struct {
         template_source: *const fn (ctx: *anyopaque) []const u8,
         /// Whether an id is a special token (an added token flagged special); null: none are known.
         special: ?*const fn (ctx: *anyopaque, id: u32) bool = null,
+        /// Fiore-lab: whether an id is an added token (special or not: GLM-5.3's <think> / </think> are not flagged
+        /// special); null: none are known.
+        added: ?*const fn (ctx: *anyopaque, id: u32) bool = null,
     };
 
     pub fn encode(t: Text, a: Allocator, text: []const u8, add_special: bool) Error![]u32 {
@@ -78,6 +81,11 @@ pub const Text = struct {
 
     pub fn isSpecial(t: Text, id: u32) bool {
         const f = t.vtable.special orelse return false;
+        return f(t.ctx, id);
+    }
+
+    pub fn isAdded(t: Text, id: u32) bool {
+        const f = t.vtable.added orelse return t.isSpecial(id);
         return f(t.ctx, id);
     }
 

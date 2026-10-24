@@ -92,14 +92,27 @@ pub const Pool = struct {
     st_shared: std.atomic.Value(u64) = .init(0),
     st_evicted: std.atomic.Value(u64) = .init(0),
     st_cold: std.atomic.Value(u64) = .init(0),
+    // /metrics: requests by the plan's action (CONTINUE, SHARE, NEW; a cold request is NEW), and the microseconds of
+    // the checks and hashes around them
+    // /metrics: 計画の種類ごとの要求数 (CONTINUE、SHARE、NEW。cold の要求は NEW) と、その前後の照合とハッシュの
+    // マイクロ秒
+    st_action: [3]std.atomic.Value(u64) = @splat(std.atomic.Value(u64).init(0)),
+    st_check_us: std.atomic.Value(u64) = .init(0),
+    st_hash_us: std.atomic.Value(u64) = .init(0),
 
-    pub const Stats = struct { blocks: u64, free_blocks: u64, slots: u64, shared_blocks: u64, evicted_total: u64, cold_total: u64 };
+    pub const Stats = struct { blocks: u64, block_positions: u64, free_blocks: u64, slots: u64, shared_blocks: u64, evicted_total: u64, cold_total: u64, continued_total: u64, shared_total: u64, new_total: u64, check_seconds_total: f64, hash_seconds_total: f64 };
 
     pub fn status(p: *const Pool) Stats {
-        return .{ .blocks = p.meta.cfg.n_blocks, .free_blocks = p.st_free.load(.monotonic), .slots = p.st_slots.load(.monotonic), .shared_blocks = p.st_shared.load(.monotonic), .evicted_total = p.st_evicted.load(.monotonic), .cold_total = p.st_cold.load(.monotonic) };
+        return .{
+            .blocks = p.meta.cfg.n_blocks, .block_positions = devmap.block, .free_blocks = p.st_free.load(.monotonic), .slots = p.st_slots.load(.monotonic), .shared_blocks = p.st_shared.load(.monotonic), .evicted_total = p.st_evicted.load(.monotonic), .cold_total = p.st_cold.load(.monotonic),
+            .continued_total = p.st_action[0].load(.monotonic), .shared_total = p.st_action[1].load(.monotonic), .new_total = p.st_action[2].load(.monotonic),
+            .check_seconds_total = @as(f64, @floatFromInt(p.st_check_us.load(.monotonic))) / 1e6, .hash_seconds_total = @as(f64, @floatFromInt(p.st_hash_us.load(.monotonic))) / 1e6,
+        };
     }
 
-    fn noteStats(p: *Pool, evicted: usize, cold_: bool) void {
+    // `action`: the request's plan (null at start-up, before any request); `check_ms` / `hash_ms`: its pool work
+    // `action`: 要求の計画 (起動時は要求の前なので null)。`check_ms` / `hash_ms`: その要求での pool の処理時間
+    fn noteStats(p: *Pool, evicted: usize, cold_: bool, action: ?plan.Action, check_ms: f64, hash_ms: f64) void {
         var shared: u64 = 0;
         for (p.meta.ref) |r| shared += @intFromBool(r >= 2);
         p.st_free.store(p.meta.freeCount(), .monotonic);
@@ -107,6 +120,9 @@ pub const Pool = struct {
         p.st_shared.store(shared, .monotonic);
         _ = p.st_evicted.fetchAdd(evicted, .monotonic);
         if (cold_) _ = p.st_cold.fetchAdd(1, .monotonic);
+        if (action) |a| _ = p.st_action[if (cold_) 2 else @intFromEnum(a)].fetchAdd(1, .monotonic);
+        _ = p.st_check_us.fetchAdd(@intFromFloat(@max(0, check_ms) * 1000), .monotonic);
+        _ = p.st_hash_us.fetchAdd(@intFromFloat(@max(0, hash_ms) * 1000), .monotonic);
     }
 
     fn digestWords(d: [32]u8) [8]i32 {
@@ -216,7 +232,7 @@ pub const Pool = struct {
 
     /// A common cold: every slot dropped (the rows stay, nothing claims them).
     /// 共通の cold: 全スロットを捨てる (行は残るが、どこからも参照しない)。
-    fn cold(p: *Pool) !void {
+    pub fn cold(p: *Pool) !void {
         const cfg = p.meta.cfg;
         p.meta.deinit();
         p.meta = try plan.Meta.init(p.gpa, cfg);
@@ -294,6 +310,9 @@ pub fn setup(ch: *lockstep.Channel, e: *engine.Engine) !void {
         try e.stream.synchronize();
     }
     e.pool = p;
+    // /health and /metrics read the empty pool's counts from the start
+    // /health と /metrics は起動直後から空の pool の数を読める
+    p.noteStats(0, false, null, 0, 0);
     if (e.rank == 0) std.debug.print("[tensorfold] pool: {d} blocks of 256 positions + Z ({d} positions, capacity {d}), {d} slots at most, verify {s}, DFlash2 saves {d}, MTP rows cached {}\n", .{ cfg.n_blocks, env.positions, e.capacity, env.slots, @tagName(env.verify), env.draft_saves, cfg.mtp });
 }
 
@@ -479,7 +498,7 @@ pub fn serve(ch: *lockstep.Channel, e: *engine.Engine, h: lockstep.Header, promp
         try p.ring_seq.appendSlice(gpa, seq);
     }
     st.cached = r;
-    p.noteStats(if (why == null) qp.evicted.len else 0, why != null);
+    p.noteStats(if (why == null) qp.evicted.len else 0, why != null, qp.action, check_ms, hash_ms);
     if (e.rank == 0) {
         var shared: usize = 0;
         if (p.meta.find(qp.X)) |i| for (p.meta.slots.items[i].blocks.items) |b| {
@@ -490,5 +509,175 @@ pub fn serve(ch: *lockstep.Channel, e: *engine.Engine, h: lockstep.Header, promp
             e.prefill_done - r, if (st.finish == .cancelled) (if (st.generated == 0) " (stopped in the prompt)" else " (stopped while decoding)") else "", @as(f64, @floatFromInt(st.prefill_ns)) / 1e9, ke, V, if (e.dr_resume) |rr| @tagName(rr) else "-", p.meta.slots.items.len, p.meta.freeCount(),
         });
     }
+    return st;
+}
+
+
+// ------------------------------------------------- several conversations at once (TF_GLM53_MULTI) / 複数の会話 ---
+
+/// TF_GLM53_MULTI, rank 0 before an admission is shared: `lead` beside the conversations in flight (`busy`: their
+/// slots, never continued, shared from, shrunk or evicted). error.Invariant: too few blocks while they run (the job
+/// waits for one to end).
+/// TF_GLM53_MULTI、受け付けを共有する前の rank 0: 処理中の会話 (`busy`: そのスロット。続き・共有元・縮め・追い出しの
+/// 対象にしない) と並ぶ `lead`。error.Invariant: それらが動いている間はブロックが足りない (要求はどれかが終わるのを待つ)。
+pub fn leadBusy(e: *engine.Engine, h: *lockstep.Header, prompt: []const i64, busy: []const u64) !plan.Plan {
+    const p = e.pool.?;
+    var q = try plan.makePlanBusy(&p.meta, prompt, h.max_tokens, true, busy);
+    errdefer q.deinit(p.gpa);
+    const d0 = p.meta.digest();
+    var x: [21]i32 = undefined;
+    x[0] = 1;
+    x[1..9].* = Pool.digestWords(d0);
+    x[9..17].* = Pool.digestWords(q.digest(d0));
+    x[17] = if (e.drafter != null) @intCast(lockstep.dflash_depth) else 0;
+    lockstep.f64Words(if (e.drafter != null) dflash_confidence else 0, x[18..21]);
+    h.extra = x;
+    h.r0 = @intCast(q.resume_end);
+    return q;
+}
+
+/// TF_GLM53_MULTI, every rank once an admission is shared: conversation k's plan (rank 0's, moved in; others make it
+/// again beside the same busy slots) applied and checked, its table into the engine's map (the prefill's) and into
+/// conversation k's own, e.start, and the drafter's context k resumed from the slot's save. Ranks that disagree on
+/// the plan, or reused rows whose hashes fail, end every rank here (no common cold while other conversations run).
+/// TF_GLM53_MULTI、受け付けの共有後に全ランクで: 会話 k のプラン (rank 0 はそのプランを受け取り、他は同じ busy の
+/// スロットの横で作り直す) を適用して照合し、表をエンジンの表 (prefill 用) と会話 k 自身の表へ書き、e.start を設定し、
+/// drafter の context k をスロットの写しから再開する。プランがランク間で食い違う場合と、再利用する行のハッシュが合わない
+/// 場合は、全ランクがここで止まる (他の会話が動いている間は共通の cold を使わない)。
+pub fn admitMulti(ch: *lockstep.Channel, e: *engine.Engine, k: usize, h: lockstep.Header, prompt: []const i64, plan0: ?plan.Plan) !void {
+    const p = e.pool.?;
+    const m = e.multi.?;
+    const gpa = p.gpa;
+    var busy_buf: [engine.multi_max + 1]u64 = undefined;
+    const busy = e.multiBusy(busy_buf[0..engine.multi_max]);
+    const x = h.extra orelse return error.MissingSlotWords;
+    var q: ?plan.Plan = plan0;
+    errdefer if (q) |*qq| qq.deinit(gpa);
+    if (q == null) {
+        const d0 = p.meta.digest();
+        if (std.mem.eql(i32, &Pool.digestWords(d0), x[1..9])) {
+            if (plan.makePlanBusy(&p.meta, prompt, h.max_tokens, x[0] != 0, busy)) |qq| {
+                var mine = qq;
+                if (std.mem.eql(i32, &Pool.digestWords(mine.digest(d0)), x[9..17])) q = mine else mine.deinit(gpa);
+            } else |err| std.debug.print("[tensorfold] pool: rank {d} could not plan conversation {d} ({s})\n", .{ e.rank, k, @errorName(err) });
+        }
+    }
+    if (!try ch.allOk(q != null)) {
+        std.debug.print("[tensorfold] pool: rank {d}: the ranks disagree on conversation {d}'s plan beside {d} others - stopping\n", .{ e.rank, k, busy.len });
+        return error.MultiPlanDiffers;
+    }
+    const t0 = std.Io.Clock.awake.now(e.io);
+    const qp = &q.?;
+    try plan.apply(&p.meta, qp, prompt);
+    busy_buf[busy.len] = qp.X;
+    try p.meta.checkBusy(busy_buf[0 .. busy.len + 1]);
+    try p.verify(e, qp, prompt);
+    if (!try ch.allOk(try p.checkOk(e))) {
+        std.debug.print("[tensorfold] pool: rank {d}: conversation {d}'s reused rows failed their hashes - stopping\n", .{ e.rank, k });
+        return error.MultiCheckFailed;
+    }
+    try p.writeMap(e, qp, prompt.len);
+    const cv = &m.convs[k];
+    try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(cv.pmap.?.ptr, e.pmap.?.ptr, e.pmap.?.len, e.stream.handle), "cuMemcpyDtoDAsync");
+    const r: usize = @intCast(qp.resume_end);
+    e.start = r;
+    e.dr_live_end = null;
+    e.dr_snap_end = null;
+    e.dr_resume = null;
+    e.dr_pool = null;
+    cv.s_valid = 0;
+    const drafted = h.mode == lockstep.mode_dflash and e.drafter != null;
+    if (drafted) {
+        // the slot's save back into context k's live rings (always copied: each conversation has its own rings, so
+        // Meta.ring does not say what they hold), then the range-based resume
+        // スロットの写しを context k の live のリングへ戻し (いつもコピーする: 会話ごとにリングがあるので、Meta.ring は
+        // その中身を表さない)、範囲付きで再開する
+        const dr = e.drafter.?;
+        dr.use(k);
+        if (qp.restore) |kk| try dr.restoreFrom(kk);
+        const rg = plan.resumeAt(r, prompt.len, if (qp.restore_live) |g| .{ g.vlo, g.vhi } else null, if (qp.restore_snap) |g| .{ g.vlo, g.vhi } else null, qp.below, dr.cfg.window);
+        cv.s_valid = rg.s;
+        e.dr_pool = .{ .kind = switch (rg.kind) {
+            .none => .none,
+            .live => .live,
+            .saved => .saved,
+            .partial => .partial,
+        }, .copy = if (rg.copy) |c| .{ @intCast(c[0]), @intCast(c[1]) } else null };
+    }
+    cv.plan = q;
+    q = null;
+    if (e.rank == 0) std.debug.print("[tensorfold] pool: conversation {d}: prompt {d}, {s} slot {d} (h {d}, c {d}), resumed {d}, blocks +{d}, evicted {d}, shrunk {d}, beside {d} live; checks {d:.1} ms; {d} slots, {d} free blocks\n", .{
+        k, prompt.len, @tagName(cv.plan.?.action), cv.plan.?.X, cv.plan.?.h, cv.plan.?.c, r, cv.plan.?.alloc.len, cv.plan.?.evicted.len, cv.plan.?.shrunk.len, busy.len, ms(e.io, t0), p.meta.slots.items.len, p.meta.freeCount(),
+    });
+}
+
+/// TF_GLM53_MULTI, every rank when conversation k is done: its prompt and reply committed into its slot (as `serve`
+/// does after a request), the new rows' hashes, the drafter's context k saved into the slot's save; the conversation's
+/// stats (engine.multiEnd frees it).
+/// TF_GLM53_MULTI、会話 k が終わったとき全ランクで: prompt と応答をそのスロットへ確定し (`serve` が要求の後に行うのと
+/// 同じ)、新しい行のハッシュを取り、drafter の context k をスロットの写しへ保存する。会話の統計を返す
+/// (engine.multiEnd が会話を空ける)。
+pub fn commitMulti(e: *engine.Engine, k: usize) !engine.Stats {
+    const p = e.pool.?;
+    const m = e.multi.?;
+    const gpa = p.gpa;
+    const cv = &m.convs[k];
+    var qv = cv.plan orelse return error.MultiNoPlan;
+    cv.plan = null;
+    defer qv.deinit(gpa);
+    const qp = &qv;
+    const prompt = cv.prompt.items;
+    const out = cv.out.items;
+    const in_prompt = cv.st.finish == .cancelled and cv.n == 0;
+    // a reply's rows are the whole prompt: never commit rows the prefill did not reach
+    // 応答の行は prompt 全体: prefill が届いていない行は確定しない
+    if (!in_prompt and cv.prefill_done != prompt.len) return error.MultiCommitBeyondPrefill;
+    const seq = if (in_prompt) try gpa.dupe(i64, prompt[0..cv.prefill_done]) else blk: {
+        const s2 = try gpa.alloc(i64, prompt.len + out.len - @min(out.len, 1));
+        @memcpy(s2[0..prompt.len], prompt);
+        if (out.len > 1) @memcpy(s2[prompt.len..], out[0 .. out.len - 1]);
+        break :blk s2;
+    };
+    defer gpa.free(seq);
+    const V: u64 = seq.len;
+    try plan.commit(&p.meta, qp, seq, if (in_prompt) cv.prefill_done else prompt.len, @max(V, qp.resume_end));
+    var busy_buf: [engine.multi_max]u64 = undefined;
+    try p.meta.checkBusy(e.multiBusy(&busy_buf));
+    const xi = p.meta.find(qp.X);
+    const ke: u64 = if (xi) |i| p.meta.slots.items[i].kv_end else 0;
+    const th = std.Io.Clock.awake.now(e.io);
+    if (ke > 0) {
+        const xs = &p.meta.slots.items[xi.?];
+        const pids = try p.pidsOf(seq[0..@intCast(ke)]);
+        defer gpa.free(pids);
+        var js: std.ArrayList(usize) = .empty;
+        defer js.deinit(gpa);
+        var j: usize = @intCast(qp.resume_end / devmap.block);
+        while (j * devmap.block < ke) : (j += 1) try js.append(gpa, j);
+        try p.hashBlocks(e, pids, xs.blocks.items, js.items, ke, false);
+    }
+    try e.stream.synchronize();
+    const hash_ms = ms(e.io, th);
+    if (p.meta.saves.len > 0) {
+        const drafted = cv.drafted;
+        if (drafted and !in_prompt) {
+            const dr = e.drafter.?;
+            dr.use(k);
+            const live = plan.Ring.live(dr.context_end, V, cv.s_valid, dr.cfg.block);
+            const snap: ?plan.Ring = if (cv.dr_snap_end != null) plan.Ring.snap(prompt.len, cv.s_valid) else null;
+            if (try plan.commitSave(&p.meta, qp, live, snap, true)) |kk| try dr.saveTo(kk);
+        } else _ = try plan.commitSave(&p.meta, qp, null, null, drafted);
+        // each conversation has its own live rings: Meta.ring (what "the" live ring holds) would mislead the next plan
+        // 会話ごとに live のリングがあるので、Meta.ring (「その」live のリングの中身) は次のプランを誤らせる
+        p.meta.ring = null;
+        try p.meta.checkBusy(e.multiBusy(&busy_buf));
+    }
+    p.noteStats(qp.evicted.len, false, qp.action, 0, hash_ms);
+    const st0 = cv.st;
+    var st = try e.multiEnd(k);
+    st.cached = cv.start;
+    if (e.rank == 0) std.debug.print("[tensorfold] pool: conversation {d} done: {s}, prompt {d}, generated {d} ({d} rounds, {d}/{d} drafts kept), prefilled {d} in {d:.2}s, kv_end {d}/{d}, hashes {d:.1} ms; {d} slots, {d} free blocks\n", .{
+        k, @tagName(st0.finish), prompt.len, st.generated, st.rounds, st.accepted, st.drafted, cv.prefill_done - cv.start, @as(f64, @floatFromInt(st.prefill_ns)) / 1e9, ke, V, hash_ms, p.meta.slots.items.len, p.meta.freeCount(),
+    });
     return st;
 }

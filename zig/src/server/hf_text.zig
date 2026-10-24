@@ -201,7 +201,13 @@ pub const HfText = struct {
             .render = renderFn,
             .template_source = sourceFn,
             .special = specialFn,
+            .added = addedFn,
         } };
+    }
+
+    fn addedFn(ctx: *anyopaque, id: u32) bool {
+        for (self(ctx).tok.added) |x| if (x.id == id) return true;
+        return false;
     }
 
     fn specialFn(ctx: *anyopaque, id: u32) bool {

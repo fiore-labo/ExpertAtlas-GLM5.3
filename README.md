@@ -1,4 +1,4 @@
-English | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+English | [日本語](README.ja.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md)
 
 # Full GLM-5.3 on four or eight DGX Sparks
 
@@ -24,6 +24,30 @@ other models, weights and machines. For TensorFold itself, see its repository.
   blocks they share once.
 - Drafts checked by the model in each round: by GLM-5.3's own MTP layer by default, or by the optional DFlash2 drafter.
   The reply is the model's own choice in every case.
+- `/metrics` (Prometheus text) and `/health` count the running request too, so a monitor reads prefill and decode
+  speed, cache hits and draft acceptance while a request runs. `METRICS_LISTEN` serves the two read-only on an address
+  of their own, for a monitor on another host.
+
+## Expert Atlas (new in r3-102, four nodes)
+
+GLM-5.3 picks 8 of 256 routed experts a layer for each token, and some experts are picked far more often than others.
+Expert Atlas loads each of the 19,200 routed experts (layers 3 to 77) at its own width, 2, 3, 4 or 5 bits, so the
+experts in most use get the most bits for the memory there is:
+
+- **Banks**: the routed experts at each width, on Hugging Face: `fiore-lab/GLM-5.3-EXL3-Experts-2bit`, `-3bit`,
+  `-4bit` and `-5bit`. The panel offers the widths every node holds.
+- **The control panel**: a page served by the launcher (`./tf-glm53 launcher`). Before a start it plans the widths
+  and shows each node's memory, whether the plan fits and the KV cache left; it starts and stops the engine. While
+  the engine runs it shows the experts each token picks, the mean width of the picked experts and the speeds.
+- **Usage**: the engine counts the experts every prompt row and decoded token picks; at a stop the run's counts can
+  be added to the learning data. Plans rank the experts by these counts (before the first saved run, by counts
+  Fiore-lab measured and ships with the page).
+- **Expert optimisation**: re-sorts the experts by use with each width's number of experts kept: the same memory, a
+  higher mean width for the experts the model actually picks. It runs on a live engine (a full change took 83 to
+  90 s on four nodes, between requests) or on a stopped one for the next start.
+
+In this release the control panel runs on four nodes; eight nodes run as before, every routed expert at 4 bits.
+`packaging/RUNTIME.md` ("The control panel") and `glm53/release/T4.md` give the details.
 
 ## What you need
 
@@ -35,10 +59,12 @@ other models, weights and machines. For TensorFold itself, see its repository.
   `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks` (390 GB) for eight nodes, `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks` (344.6 GB)
   for four. The four-node checkpoint holds the routed experts of layers 3 to 77 at 3 bits for the least used half and
   at 4 bits for the rest; everything else is as in the eight-node checkpoint.
+- For the control panel (four nodes): the 3- and 4-bit expert banks (277.9 and 368.5 GB; the eight-node checkpoint can
+  serve as the 4-bit bank; with 4 bits alone the context is shorter), and `python3` on the nodes for the launcher.
 
 ## Run
 
-Download the release archive `tensorfold-r2-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
+Download the release archive `tensorfold-r3-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
 ([packaging/RUNTIME.md](packaging/RUNTIME.md) here). The same archive and launcher serve four or eight nodes: copy
 `glm53.conf.example` (eight nodes) or `glm53.t4.conf.example` (four nodes, see
 [glm53/release/T4.md](glm53/release/T4.md)) to `glm53.conf`, fill in the nodes, network names, NCCL, weights and
@@ -89,6 +115,10 @@ the official implementation, computed in FP32), with this recipe's serving confi
   from the same reference by 0.007 to 0.010 over the same ranges.
 - Four nodes (the four-node checkpoint, 4-bit KV cache, DCP 2), four 8,192-token texts by the same position ranges:
   0.019 (positions 1,024 to 2,047), 0.032, 0.029 and 0.019 (6,144 to 8,190).
+- Expert Atlas's widths, every routed expert at one width with the other weights as above, the same four texts,
+  positions 6,144 to 8,190: 2 bits 0.0517, 3 bits 0.0203, 4 bits 0.0127 (four nodes), 5 bits 0.0114 (eight nodes).
+  At the same memory, a mix with 2-bit experts was 13 to 30 % further from the reference than one without, and 5-bit
+  experts paid for by moving others down to 3 bits gained nothing measurable.
 
 ## Build from source
 
@@ -98,7 +128,7 @@ libibverbs headers (`libibverbs-dev`):
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so
-zig build dist -Dversion=r2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 
@@ -110,6 +140,7 @@ The archive lands in `zig-out/dist/`.
 - One request runs at a time; up to 32 others wait in arrival order, chat-title requests last, and past 32 the server
   refuses them (a 503, or an error event in a stream). Agents that run sub-agents in parallel are better served by
   pointing the sub-agents at another model.
+- The control panel runs on four nodes in this release.
 - `packaging/RUNTIME.md` lists the rest.
 
 ## License and credits

@@ -4,7 +4,8 @@ const std = @import("std");
 const root = @import("../../build.zig");
 const cuda = @import("cuda.zig");
 
-/// MAJOR.MINOR.PATCH, or a release label rN-M (r1-102: the first release on TensorFold 1.0.2).
+/// MAJOR.MINOR.PATCH, or a release label rN-M or rN.K-M (r1-102: the first release on TensorFold 1.0.2; Fiore-lab:
+/// r2.1-102: the first revision of release 2).
 pub fn validVersion(v: []const u8) bool {
     if (v.len > 0 and v[0] == 'r') return validLabel(v[1..]);
     var it = std.mem.splitScalar(u8, v, '.');
@@ -20,10 +21,17 @@ pub fn validVersion(v: []const u8) bool {
 
 fn validLabel(v: []const u8) bool {
     const dash = std.mem.indexOfScalar(u8, v, '-') orelse return false;
-    for ([_][]const u8{ v[0..dash], v[dash + 1 ..] }) |part| {
-        if (part.len == 0 or (part.len > 1 and part[0] == '0')) return false;
-        for (part) |c| if (!std.ascii.isDigit(c)) return false;
+    var it = std.mem.splitScalar(u8, v[0..dash], '.'); // N, or N.K (a revision)
+    var count: usize = 0;
+    while (it.next()) |part| : (count += 1) {
+        if (!labelNumber(part)) return false;
     }
+    return count <= 2 and labelNumber(v[dash + 1 ..]);
+}
+
+fn labelNumber(part: []const u8) bool {
+    if (part.len == 0 or (part.len > 1 and part[0] == '0')) return false;
+    for (part) |c| if (!std.ascii.isDigit(c)) return false;
     return true;
 }
 
@@ -45,7 +53,7 @@ pub fn targets(b: *std.Build, ids: *std.Build.Module, options: *std.Build.Step.O
     const runtime = b.option([]const u8, "dist-runtime", "RUNTIME.md for the Linux archives instead of packaging/RUNTIME.md");
     const commit = b.option([]const u8, "dist-commit", "The source commit, written into the archives' VERSION");
     if (version == null) {
-        step.dependOn(&b.addFail("dist requires -Dversion=MAJOR.MINOR.PATCH or rN-M; the release owner chooses the version").step);
+        step.dependOn(&b.addFail("dist requires -Dversion=MAJOR.MINOR.PATCH, rN-M or rN.K-M; the release owner chooses the version").step);
         return;
     }
     if (fatbins == null and !host_only) {
@@ -125,7 +133,7 @@ pub fn targets(b: *std.Build, ids: *std.Build.Module, options: *std.Build.Step.O
     }
 }
 
-test "release versions have exactly three canonical numeric components, or are a label rN-M" {
-    for ([_][]const u8{ "0.0.0", "1.2.3", "123.456.789", "r1-102", "r12-3" }) |v| try std.testing.expect(validVersion(v));
-    for ([_][]const u8{ "", "1.2", "1.2.3.4", "1..3", "01.2.3", "1.2.3-rc1", "1.2.3+build", "v1.2.3", "1.2.-3", "1.2.3/", "4294967296.0.0", "r", "r1", "r-102", "r1-", "r01-102", "r1-102a", "R1-102", "r1-1-2" }) |v| try std.testing.expect(!validVersion(v));
+test "release versions have exactly three canonical numeric components, or are a label rN-M or rN.K-M" {
+    for ([_][]const u8{ "0.0.0", "1.2.3", "123.456.789", "r1-102", "r12-3", "r2.1-102", "r10.12-3" }) |v| try std.testing.expect(validVersion(v));
+    for ([_][]const u8{ "", "1.2", "1.2.3.4", "1..3", "01.2.3", "1.2.3-rc1", "1.2.3+build", "v1.2.3", "1.2.-3", "1.2.3/", "4294967296.0.0", "r", "r1", "r-102", "r1-", "r01-102", "r1-102a", "R1-102", "r1-1-2", "r2.-102", "r.1-102", "r2..1-102", "r2.01-102", "r2.1.1-102", "r2.1", "r2.1-", "r2.1-1.2" }) |v| try std.testing.expect(!validVersion(v));
 }

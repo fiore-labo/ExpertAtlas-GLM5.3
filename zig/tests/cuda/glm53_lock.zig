@@ -284,6 +284,18 @@ pub fn main(init: std.process.Init) !u8 {
     try glm.slots_serve.setup(&ch, eng, &ctx, try glm.slots.Env.fromEnv(), &.{ckpt}); // TF_GLM53_PREFIX=slots
     try glm.pool_serve.setup(&ch, eng); // TF_GLM53_PREFIX=pool
 
+    // Fiore-lab: TF_GLM53_EXPERT_BITS=<set>.json (glm53-expert-bits v1, the same file on every node; the banks from
+    // TF_GLM53_EXPERT_BANKS): every rank changes the routed experts to it before anything runs (lockstep.swapEvery)
+    // Fiore-lab: TF_GLM53_EXPERT_BITS=<set>.json (glm53-expert-bits v1、全ノードに同じファイル。バンクは
+    // TF_GLM53_EXPERT_BANKS): 何かを実行する前に、全ランクが routed expert をそれに変える (lockstep.swapEvery)
+    if (std.c.getenv("TF_GLM53_EXPERT_BITS")) |p| {
+        const bits = try glm.expert_swap.readSet(gpa, io, std.mem.span(p), eng);
+        defer gpa.free(bits);
+        var st: glm.expert_swap.Stats = .{};
+        try glm.lockstep.swapEvery(&ch, eng, bits, null, &st);
+        std.debug.print("[lock] rank {d}: expert bits from {s}: {d} experts in {d} layers ({d} up, {d} down), {d} MiB read, {d} ms\n", .{ rank, std.mem.span(p), st.experts, st.layers, st.up, st.down, st.read_bytes >> 20, st.ms });
+    }
+
     // TF_ZIG_SCORE=a.npy[,b.npy..] (for KLD): each token file (npy, int32 / int64, one row) teacher-forced on every
     // rank (TF_ZIG_SCORE_P0 rows through the prefill, then decode windows of TF_ZIG_SCORE_WIN); rank 0 writes the
     // logits of positions p0 .. len - 2 as fp32 [rows, world * vshare] to <OUT>-<i>.f32
