@@ -16,6 +16,13 @@ GID_INDEX=
 #   pip3 install --no-deps --target ~/nccl-2.30.7 nvidia-nccl-cu13==2.30.7
 NCCL_LIB=~/nccl-2.30.7/nvidia/nccl/lib/libnccl.so.2
 
+# How the ranks run: host (the default: from this directory, with cuBLAS 13, libibverbs and NCCL on every node) or
+# docker (each rank in a container of IMAGE, this release as an image built from docker/Dockerfile or pulled: every
+# node needs Docker and the NVIDIA container toolkit, and the libraries are the image's, so NCCL_LIB is not used).
+# RUNTIME.md, "Running in containers".
+#RUNTIME=docker
+#IMAGE=glm53-tensorfold:r3-102
+
 # The checkpoint for eight ranks, the same path on every node (RUNTIME.md: fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks).
 WEIGHTS=~/models/GLM-5.3-EXL3-8x-DGX-Sparks
 

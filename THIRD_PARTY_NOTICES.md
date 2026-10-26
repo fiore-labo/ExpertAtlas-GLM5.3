@@ -149,6 +149,18 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+The control panel's page (`panel.html`, which `bin/tensorfold-native` also carries) holds a subset of the font
+M PLUS 1 Code, Copyright 2021 The M+ FONTS Project Authors (https://github.com/coz-m/MPLUS_FONTS), under the SIL Open
+Font License, Version 1.1 (`LICENSES/OFL-1.1.txt`); the subset keeps the font's copyright and license fields.
+
+The container image built from the archive's `docker/Dockerfile` adds to the archive's files: the Ubuntu 24.04 base
+system and the packages it installs, each under its own license (listed in the image's `/usr/share/doc`); NVIDIA's
+cuBLAS 13 (`libcublas-13-0` from NVIDIA's CUDA repository), under the NVIDIA CUDA Toolkit End User License Agreement
+(its text in the image's `/usr/share/doc/libcublas-13-0/`); rdma-core's `libibverbs1` and `ibverbs-providers`, under
+the GNU General Public License version 2 or the OpenIB.org BSD license; and NCCL 2.30.7 (NVIDIA's `nvidia-nccl-cu13`
+wheel, unpacked in `/opt/nccl`), Copyright (c) 2015-2020 NVIDIA CORPORATION, under a BSD 3-clause license (its text in
+`/opt/nccl/nvidia_nccl_cu13-2.30.7.dist-info/licenses/License.txt`). The image carries no model weights.
+
 The archive's binaries are built with Zig 0.17.0, whose standard library and compiler runtime are linked in (MIT
 License, Copyright (c) Zig contributors, text below). Their GPU code is compiled with NVIDIA's CUDA 13.0 compiler and
 includes its device math routines, as CUDA programs do (NVIDIA CUDA Toolkit End User License Agreement).

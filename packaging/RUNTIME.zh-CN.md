@@ -2,15 +2,17 @@
 
 # 从本归档运行完整版 GLM-5.3
 
-本归档在四台或八台 NVIDIA DGX Spark 系统上以张量并行 4 或 8 提供完整版 GLM-5.3（`glm_moe_dsa`，755B）服务，每个 GB10 一个 rank。服务器不需要 Python、编译器或源代码检出；控制面板的启动器（四个节点）使用系统的 `python3`，只用其标准库。它是 Fiore-lab 基于 TensorFold 1.0.2 制作的非官方衍生版本，并非 TensorFold 项目的发布版本。本页同时适用于四个节点和八个节点；四个节点的不同之处及其测量结果见 `T4.zh-CN.md`。
+本归档在四台或八台 NVIDIA DGX Spark 系统上以张量并行 4 或 8 提供完整版 GLM-5.3（`glm_moe_dsa`，755B）服务，每个 GB10 一个 rank。服务器不需要 Python、编译器或源代码检出；控制面板的启动器使用系统的 `python3`，只用其标准库。它是 Fiore-lab 基于 TensorFold 1.0.2 制作的非官方衍生版本，并非 TensorFold 项目的发布版本。本页同时适用于四个节点和八个节点；四个节点的不同之处及其测量结果见 `T4.zh-CN.md`。
 
 ## 归档内容
 
 - `bin/tensorfold-native`：服务器，内含为 GB10（sm_121）构建的 CUDA 内核。Linux aarch64，glibc 2.28 或更高版本。
 - `lib/libroce_proxy.so`：解码集合通信使用的 RDMA 代理（需要 `libibverbs.so.1`）。
 - `tf-glm53`、`glm53.conf.example`（八个节点）和 `glm53.t4.conf.example`（四个节点）：用于启动、停止和检查各 rank。
-- 控制面板（四个节点）：`launcher/tf_launcher.py`（启动器）、`panel.html`（其页面；服务器内含同一页面）、`tools/quant/expert_plan.py`（编写专家计划）和 `expert-plan/banks.json`（专家 bank 及其位置）和 `PANEL-GUIDE.md`（面板页面的说明；另有日文版）。
-- `RUNTIME.md`（本页）和 `T4.md`（四个节点），各自另有日文版（`.ja.md`）和简体中文版（`.zh-CN.md`）。
+- 控制面板（四个或八个节点）：`launcher/tf_launcher.py`（启动器）、`panel.html`（其页面；服务器内含同一页面）、`tools/quant/expert_plan.py`（编写专家计划）和 `expert-plan/banks.json`（专家 bank 及其位置）和 `PANEL-GUIDE.md`（面板页面的说明；另有日文版）。
+- `RUNTIME.md`（本页）和 `T4.md`（四个节点），各自另有日文版（`.ja.md`）和简体中文版（`.zh-CN.md`）；`ATLAS-TESTS.md`（专家重新排序的测量；另有日文版）。
+- `AI-GUIDE.md`：为帮助你准备、使用系统或排查故障的 AI 助手，把整个系统写在一页上（英文；另有日文版）。
+- `docker/Dockerfile` 和 `docker/entry.sh`：把本发布做成容器镜像（见“在容器中运行”）。
 - `LICENSE`、`NOTICE`、`LICENSES/`、`THIRD_PARTY_NOTICES.md`、`VERSION`、`SHA256SUMS`。
 
 其中不含模型权重、草稿模型，也不含 NCCL。
@@ -24,7 +26,8 @@
 - 检查点所需的磁盘空间，在每个节点上放在相同路径下（见下文）：八个节点为 390 GB（363 GiB），四个节点为 344.6 GB（321 GiB）。
 - 八个节点：启动前每个节点需有 112 GiB 可用内存（使用 DFlash2 时为 115），以 `free -g` 的显示为准：当 `CONTEXT` 和 `STORE` 均为 819,200 时，各 rank 约使用 108 GiB（使用 DFlash2 时为 111）；使用 DFlash2 时，池（默认的对话缓存）每个 rank 比 slots（`CACHE=slots`）多用约 0.5 GiB。`STORE` 每减少 100,000 个 token，所需内存减少 2.7 GiB。可用内存不足的节点会被 `tf-glm53 check` 拒绝。
 - 四个节点：内存按只运行本服务器来分配（见 `T4.zh-CN.md`）；使用 DFlash2 时测得的最低可用内存为每个节点约 3.2 GiB（512K 时）。
-- 控制面板（四个节点）：所用专家 bank 的磁盘空间（见下文），以及每个节点上的 `python3`（DGX OS 自带）。
+- 控制面板（四个或八个节点）：所用专家 bank 的磁盘空间（见下文），以及每个节点上的 `python3`（DGX OS 自带）。
+- 在容器中运行时（见“在容器中运行”）：每个节点需要 Docker 和 NVIDIA Container Toolkit，而不是 cuBLAS、libibverbs 和 NCCL。
 
 ## 首次启动之前
 
@@ -165,7 +168,7 @@ conversation cache (pool): 837280 positions in 3271 blocks of 256, shared by up 
 
 ## 控制面板（Expert Atlas）
 
-在四个节点上，第 3 至 77 层的路由专家（19,200 个，每层 256 个）可以逐个以 2、3、4 或 5 bit 从四个 bank 载入；控制面板选择位宽，并能在引擎运行时更改。r3-102 中它只在四个节点上运行：启动器会拒绝其他节点数，八个节点仍像以前一样用 `./tf-glm53 up` 启动。四个节点需要哪些 bank、什么配置能容纳，见 `T4.zh-CN.md` 的“控制面板”。
+在四个或八个节点上，第 3 至 77 层的路由专家（19,200 个，每层 256 个）可以逐个以 2、3、4 或 5 bit 从四个 bank 载入；控制面板选择位宽，并能在引擎运行时更改。节点数在启动界面的“节点”中设定（首节点加三个或七个 worker，检查后保存到 `NODES`）；启动器会拒绝其他节点数，`./tf-glm53 up` 仍按检查点的位宽启动。八个节点时每个节点只持有一半的路由专家，因此能放下更宽的位宽。四个节点需要哪些 bank、什么配置能容纳，见 `T4.zh-CN.md`“控制面板”。
 
 **bank**：每个 bank 以一种位宽保存路由专家，并附带清单（`<id>.json`：每个文件的大小、头部和 sha256）：Hugging Face 上的 `fiore-lab/GLM-5.3-EXL3-Experts-2bit`、`-3bit`、`-4bit` 和 `-5bit`（187.3、277.9、368.5 和 459.1 GB）。`expert-plan/banks.json` 指定每个 bank 的目录，在每个节点上相同（`~/models/GLM-5.3-EXL3-Experts-<N>bit`；如放在别处，请在其中修改 `dir`，然后执行 `./tf-glm53 deploy`）。四个节点所需的 3 bit 和 4 bit bank：
 
@@ -195,9 +198,9 @@ done
 - **上下文**也在启动界面上按每次启动选择：128K、256K、512K、`CONTEXT` 或能容纳的最长值（最多 1,048,576 个 token）；计划内存容纳不下的长度会缩短到能容纳的长度。
 - **STORE**（在上下文之外为之前的对话保留的 token）也在那里选择：`STORE`、指定的大小，或上下文用剩的全部内存；**每个节点为操作系统保留的内存**（`RESERVE_GB`，默认 4 GiB，2 至 32）也可以选择。计划用这两者确定 KV 缓存的大小，启动时引擎自身的内存检查也保留同样的量。KV 缓存在启动时分配，运行中不会增长。
 - **节点**：引擎停止时，可以在启动界面上更改 worker 的地址（`NODES` 中第一个之后的）；第一台节点保持不变。“检查”会把本目录复制到这些节点（`tf-glm53 deploy`），并对该列表执行 `tf-glm53 check`；只有该列表通过检查后，“保存”才会改写 `glm53.conf` 中的 `NODES`，并在旁边保留之前的文件（`glm53.conf.bak-<时间>`）。
-- **使用次数**：引擎统计每个提示行和每个解码 token 选中的专家。停止时面板会询问是否把这次运行的次数加入学习数据（`launch/usage-total.json`）；以其他方式停止的运行会保持待定，直到你决定。计划按这些次数为专家排序：使用最多的专家得到最宽的位宽。在保存第一次运行之前，按页面自带的次数排序，这些次数是 Fiore-lab 在 12 类工作（编程、智能体、日文和英文文本、Linux 运维、安全）上测得的；保存第一次运行之后，只按本次安装保存的运行排序。还没有任何运行时，计划为全部 3 bit。
-- **专家优化**按次数重新排列专家，每种位宽的专家数量保持不变，因此在相同内存下，被选中专家的平均位宽会提高。引擎运行时按本次运行的选择排序：在没有正在运行或等待的请求后才开始更改（在此之前页面会重试）；引擎在每个 rank 上就地更改各层，丢弃所保留的对话（它们的 KV 是用旧专家计算的），然后继续服务，期间到达的请求会等待；在四个节点上，75 层的完整更改用了 83 至 90 秒。超过 `TF_GLM53_SWAP_DEADLINE_S`（默认 600 秒）仍卡住的 rank 会结束其进程，`tf-glm53` 的监视进程会停止所有 rank。引擎停止时，按上一次运行的选择排序，结果成为下次启动的计划。每次的结果都保存在 `ATLAS_DIR/allocs/user/`（`sort-<时间>.json`；默认为本目录下的 `atlas/`）。
-- `EXTRA_ENV` 中有 `TF_GLM53_MULTI` 时，引擎运行期间不更改位宽：专家优化会保存配置，供停止后以它启动。
+- **配置与使用记录**：引擎统计每个提示行和每个解码 token 选中的专家。计划的位宽作为配置保存在 `ATLAS_DIR/allocs/user/<名称>.json`（默认为本目录下的 `atlas/`），并带有保存它的那些运行的使用记录（运行开始时带有的记录加上该次运行的选择）。不会自动保存任何内容：停止时的“保存并停止”或运行中的“保存”会为其命名。默认名称是该次运行所基于的配置，并覆盖保存（旧版本移到 `ATLAS_DIR/allocs/trash/`）。启动界面以上一次运行的比例的新计划打开（还没有任何运行时为全部 3 bit）；“打开”会按位原样恢复上一次运行的配置或已保存的配置，从它启动时使用其位宽和保存时的 bank。计划按其来源配置的使用记录为专家排序，使用最多的专家得到最宽的位宽；没有记录的计划按页面自带的次数排序，这些次数是 Fiore-lab 在 12 类工作（编程、智能体、日文和英文文本、Linux 运维、安全）上测得的。
+- **专家优化**在引擎运行时按本次运行的使用记录重新排列已载入的专家，每种位宽的专家数量保持不变，因此在相同内存下，被选中专家的平均位宽会提高。排序所用的次数在面板的 Count 中选择：decode、prefill 或 Both（Both 以 0.7 加权专家的 decode 占比、以 0.3 加权其 prefill 占比，这组权重最能保持模型所写文本的精度，见 `ATLAS-TESTS.md`）。在没有正在运行或等待的请求后才开始更改（在此之前页面会重试）；引擎在每个 rank 上就地更改各层，丢弃所保留的对话（它们的 KV 是用旧专家计算的），然后继续服务，期间到达的请求会等待；在四个节点上，75 层的完整更改用了 83 至 90 秒。超过 `TF_GLM53_SWAP_DEADLINE_S`（默认 600 秒）仍卡住的 rank 会结束其进程，`tf-glm53` 的监视进程会停止所有 rank。结果不会自动保存：用“保存”保留。启动只载入给定的位宽，不会重新排序。
+- `EXTRA_ENV` 中有 `TF_GLM53_MULTI` 时，引擎运行期间不更改位宽：专家优化会以名称（`opt-<时间>`）保存估算的位宽，供停止后以它启动。
 - 页面的设置（配色、圆的排列方式等）是所有浏览器共用的一个文件：`launch/panel-settings.json`（可用 `EXTRA_ENV` 中的 `TF_PANEL_SETTINGS` 更改位置）。
 - `glm53.conf` 中的 `LAUNCH_SNAPSHOTS=1` 会在每次启动和停止的前后，把每个节点的 GPU、内存和日志末尾写入 `snapshots/`；`LAUNCH_DROP_CACHES=1` 会在启动前于每个节点丢弃页面缓存（需要免密码的 `sudo`）。两者默认关闭。
 
@@ -206,6 +209,27 @@ done
 `tf-glm53 up` 会留下一个监视进程，每 5 秒检查一次各 rank。如果一部分 rank 已退出而其他 rank 仍在运行（连续两次），它会停止所有 rank，因为剩下的 rank 会永远等待，并在 `logs/watch.log` 中记下已退出的 rank。请用 `tf-glm53 up` 重新启动。请只用 `tf-glm53` 启动和停止各 rank：手动启动的 rank 没有监视进程，若其中一个在启动时失败，其他 rank 会在集合通信中一直等待，直到被停止。
 
 启动失败时（某个 rank 停止、服务器未在 `READY_TIMEOUT` 内就绪、冒烟测试失败，或按下 Ctrl-C），`tf-glm53 up` 会在返回前停止所有 rank。每个节点将其 rank 的日志保存在 `logs/rankR.log` 中，上一次启动的日志保存在 `logs/rankR.log.prev` 中；`tf-glm53 logs R` 持续跟踪 rank R 的日志。
+
+每个 rank 以 `oom_score_adj` 1000 运行。节点内存耗尽时，内核的 OOM killer 会结束该 rank，监视进程再停止其余 rank，节点本身继续运行。（通过 ssh 启动的 shell 会继承 sshd 的 -1000；保持该值的 rank 不会被 OOM killer 选中，节点反而会卡死。）
+
+## 在容器中运行
+
+本发布也以容器镜像形式提供：`/opt/glm53` 中是归档的文件，另有服务器运行所需的内容（cuBLAS 13、libibverbs 及其 provider、NCCL 2.30.7）。在 `glm53.conf` 中设置 `RUNTIME=docker` 和 `IMAGE` 后，`tf-glm53` 会通过 ssh 在每个节点上把各 rank 作为 `IMAGE` 的容器启动。这时每个节点需要的是 Docker 和 NVIDIA Container Toolkit（DGX OS 两者都有），而不是 cuBLAS、libibverbs 和 NCCL；运行 `tf-glm53` 的用户必须能在每个节点上运行 `docker`（`docker` 组）。`tf-glm53`、控制面板的启动器和设置与使用归档时一样留在第一个节点的主机上；权重和专家 bank 也留在主机上。
+
+```sh
+I=ghcr.io/fiore-labo/fiore-glm5.3:r3-102
+docker pull $I                                                # 在每个节点上
+mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out $I install /out
+cd glm53 && cp glm53.conf.example glm53.conf                  # 或 glm53.t4.conf.example；设置 RUNTIME=docker 和 IMAGE=$I
+./tf-glm53 deploy && ./tf-glm53 check && ./tf-glm53 up
+```
+
+- `install` 把本发布的文件（与解开的归档相同）写到该目录。`./tf-glm53 pull` 在每个节点上执行 `docker pull IMAGE`。
+- 镜像也可以由归档构建：在刚解开的归档中执行 `docker build -f docker/Dockerfile -t glm53-tensorfold:r3-102 .`。只要有归档 `SHA256SUMS` 未列出的文件，构建就会失败，因此安装环境中的设置或日志不会进入镜像。用 `docker save` 和 `docker load` 复制到其他节点。
+- `tf-glm53 check` 在每个节点上检查：`IMAGE` 存在且层与第一个节点相同；容器能访问 GPU（`--gpus all`）；镜像中是与本目录相同的发布（否则为 `NG: image-not-this-release`）。
+- 每个 rank 的容器获得 GPU、`/dev/infiniband`、主机网络和 IPC、`--ulimit memlock=-1 --ulimit nofile=1048576:1048576`、`--oom-score-adj 1000`、主机用户和一个 init。以相同路径挂载：只读的 `WEIGHTS`、`DRAFTER`（DFlash2）以及该节点上 `expert-plan/banks.json` 中的每个 bank；可写的 `logs/` 和 `launch/`。容器名为 `glm53-p<PORT>-r<rank>`，停止后即删除。`tf-glm53 down`、`status`、监视进程和控制面板对它们的处理与从主机运行的 rank 相同。
+- 四个节点上的测量（八节点检查点，上下文 131,072 个 token，MTP）：启动用了 4 分钟，与在主机上相同；冒烟测试通过；`down` 在 4 秒内停止所有 rank；强制终止一个 rank 的容器后，监视进程停止了其余 rank，43 秒后所有容器都已消失。
+- 主机上的 `systemctl daemon-reload` 可能使运行中的 GPU 容器失去 GPU（容器内 `nvidia-smi` 失败）：执行 `tf-glm53 down` 再 `up`。
 
 ## 为其他机器提供服务
 
@@ -258,7 +282,6 @@ API 密钥文件只在第一个节点上读取。文件中每行一个密钥（`
 ## 限制
 
 - 仅支持四台或八台 GB10 系统（张量并行 4 或 8）；不支持其他 GPU 型号，也不支持其他 rank 数量。四个节点需要四节点检查点和 `KV=fp4`（使用控制面板时，任一检查点加 bank，见 `T4.zh-CN.md`）。
-- 本版本的控制面板只在四个节点上运行。
 - 一次只运行一个请求。其他请求最多 32 个按到达顺序等待；聊天标题生成请求（以及带 `"priority": "background"` 的请求）排在其他请求之后。超过 32 个时，请求会以 “the engine is busy; retry shortly” 被拒绝：非流式请求返回 503，流式请求则在流中收到一个错误事件。
 - 使用 MTP 草稿模型时，在保留对话的时刻，回复最后一轮中被接受的行尚未写入 MTP 层的缓存。使用 `CACHE=slots` 时，之后从该处继续的请求在这几个 token 上的起草效果会略差；使用池时，对话只保留到 MTP 层缓存完整之处（往前几个 token），并重新计算这几个 token。无论哪种情况，回复都由模型本身决定。
 - 无论使用哪种草稿模型，引擎的启动行都会显示 `drafts: on`：其含义是请求可以使用草稿。`tf-glm53` 会在其后打印实际使用的草稿模型。

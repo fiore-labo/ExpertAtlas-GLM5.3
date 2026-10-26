@@ -4,7 +4,7 @@ English | [日本語](RUNTIME.ja.md) | [简体中文](RUNTIME.zh-CN.md)
 
 This archive serves full GLM-5.3 (`glm_moe_dsa`, 755B) on four or eight NVIDIA DGX Spark systems, one rank per GB10,
 with tensor parallelism 4 or 8. The server needs no Python, compiler or source checkout; the control panel's launcher
-(four nodes) runs on the system `python3` with its standard library only. It is Fiore-lab's unofficial
+runs on the system `python3` with its standard library only. It is Fiore-lab's unofficial
 derivative of TensorFold 1.0.2, not a release of the TensorFold project. This page covers both node counts; `T4.md`
 gives what differs with four nodes, with its measurements.
 
@@ -15,11 +15,14 @@ gives what differs with four nodes, with its measurements.
 - `lib/libroce_proxy.so`: the RDMA proxy of the decode collectives (needs `libibverbs.so.1`).
 - `tf-glm53`, `glm53.conf.example` (eight nodes) and `glm53.t4.conf.example` (four nodes): start, stop and check the
   ranks.
-- The control panel (four nodes): `launcher/tf_launcher.py` (the launcher), `panel.html` (its page; the server holds
-  the same page), `tools/quant/expert_plan.py` (writes the expert plans), `expert-plan/banks.json` (the expert
-  banks and where they are) and `PANEL-GUIDE.md` (the panel's screens; also in Japanese).
+- The control panel (four or eight nodes): `launcher/tf_launcher.py` (the launcher), `panel.html` (its page; the
+  server holds the same page), `tools/quant/expert_plan.py` (writes the expert plans), `expert-plan/banks.json` (the
+  expert banks and where they are) and `PANEL-GUIDE.md` (the panel's screens; also in Japanese).
+- `docker/Dockerfile` and `docker/entry.sh`: the release as a container image ("Running in containers").
 - `RUNTIME.md` (this page) and `T4.md` (four nodes), each also in Japanese (`.ja.md`) and Simplified Chinese
-  (`.zh-CN.md`).
+  (`.zh-CN.md`); `ATLAS-TESTS.md` (the expert re-sort's measurements; also in Japanese).
+- `AI-GUIDE.md`: the whole system on one page for an AI assistant that helps you set it up, use it or find a fault
+  (also in Japanese).
 - `LICENSE`, `NOTICE`, `LICENSES/`, `THIRD_PARTY_NOTICES.md`, `VERSION`, `SHA256SUMS`.
 
 It holds no model weights, no draft model and no NCCL.
@@ -40,8 +43,10 @@ It holds no model weights, no draft model and no NCCL.
   fewer need 2.7 GiB less. `tf-glm53 check` refuses a node with less.
 - Four nodes: memory sized for this server alone (`T4.md`); with DFlash2 the lowest free memory measured was about
   3.2 GiB a node, at 512K.
-- The control panel (four nodes): disk for the expert banks it uses (below) and `python3` on every node (DGX OS has
-  it).
+- The control panel (four or eight nodes): disk for the expert banks it uses (below) and `python3` on every node (DGX
+  OS has it).
+- In containers ("Running in containers"): Docker and the NVIDIA container toolkit on every node instead of cuBLAS,
+  libibverbs and NCCL.
 
 ## Before the first start
 
@@ -236,10 +241,12 @@ The server's `/health` then holds a `pool` object: `blocks`, `free_blocks`, `slo
 
 ## The control panel (Expert Atlas)
 
-On four nodes, the routed experts of layers 3 to 77 (19,200, 256 a layer) can each be loaded at 2, 3, 4 or 5 bits,
-expert by expert, from four banks; the control panel chooses the widths and changes them while the engine runs. In
-r3-102 it runs on four nodes only: the launcher refuses other node counts, and eight nodes start with
-`./tf-glm53 up` as before. `T4.md`, "The control panel", gives which banks four nodes need and what fits.
+On four or eight nodes, the routed experts of layers 3 to 77 (19,200, 256 a layer) can each be loaded at 2, 3, 4 or 5
+bits, expert by expert, from four banks; the control panel chooses the widths and changes them while the engine runs.
+The node count is set on the launch screen's Nodes (the head and three or seven workers, checked, then saved to
+`NODES`); the launcher refuses other counts, and `./tf-glm53 up` still starts the nodes with the checkpoint's widths.
+On eight nodes each node holds half of the routed experts, so wider widths fit. `T4.md`, "The control panel", gives
+which banks four nodes need and what fits there.
 
 **The banks.** Each holds the routed experts at one width, with its manifest (`<id>.json`: every file's size, header
 and sha256): `fiore-lab/GLM-5.3-EXL3-Experts-2bit`, `-3bit`, `-4bit` and `-5bit` on Hugging Face (187.3, 277.9,
@@ -299,23 +306,27 @@ Japanese (by the browser's language, or Display > Language).
   launch screen; the first node stays. Check copies this directory to them (`tf-glm53 deploy`) and runs
   `tf-glm53 check` on the list; Save writes `NODES` in `glm53.conf` once that list passed, keeping the previous file
   beside it (`glm53.conf.bak-<time>`).
-- **Usage.** The engine counts the experts each prompt row and each decoded token picks. At a stop the panel asks
-  whether to add the run's counts to the learning data (`launch/usage-total.json`); a run stopped elsewhere waits as
-  pending until you decide. The plans rank the experts by these counts: the most used get the widest bits. Before
-  the first saved run they rank by the counts the page ships with, measured by Fiore-lab over 12 kinds of work
-  (coding, agents, Japanese and English text, Linux operations, security); from the first saved run on, by this
-  install's saved runs alone. Before any run the plan is all 3 bits.
-- **Expert optimisation** re-sorts the experts by the counts, each width keeping its number of experts, so the mean
-  width of the experts picked rises at the same memory. While the engine runs, it ranks by this run's picks: the
-  change starts once no request runs or waits (the page tries again until then); the engine changes the layers in
-  place on every rank, drops the conversations it keeps (their KV was computed with the old experts) and
-  serves again, and requests that arrive meanwhile wait; a full change of 75
-  layers took 83 to 90 s on four nodes. A rank stuck past `TF_GLM53_SWAP_DEADLINE_S` (600 s by default) ends its
-  process, and `tf-glm53`'s watcher stops every rank. While the engine is stopped, it ranks the last run's picks and
-  the result becomes the plan for the next start. Each result is saved in `ATLAS_DIR/allocs/user/`
-  (`sort-<time>.json`; `atlas/` in this directory by default).
+- **Allocations and usage records.** The engine counts the experts each prompt row and each decoded token picks. A
+  plan's widths are saved as an allocation in `ATLAS_DIR/allocs/user/<name>.json` (`atlas/` in this directory by
+  default) with the usage record of the runs it was saved from: the record the run started with plus that run's
+  picks. Nothing is saved by itself: Save and stop at a stop, or Save while the engine runs, names it. The name
+  offered is the allocation the run started from, saved over (its old version goes to `ATLAS_DIR/allocs/trash/`).
+  The launch screen opens with a new plan at the last run's shares (before any run: all 3 bits); Open brings back the
+  last run's allocation or a saved one bit for bit, and a start from it uses its bits and the banks it was saved
+  with. Plans rank the experts by the usage record of the allocation they come from, the most used getting the
+  widest bits; a plan without a record ranks them by the counts the page ships with, measured by Fiore-lab over 12
+  kinds of work (coding, agents, Japanese and English text, Linux operations, security).
+- **Expert optimisation**, while the engine runs, re-sorts the loaded experts by the run's usage record, each width
+  keeping its number of experts, so the mean width of the experts picked rises at the same memory. The panel's Count
+  picks the counts: decode, prefill, or both (an expert's decode share weighed 0.7 and its prefill share 0.3: the
+  weights that kept the most of the text the model writes, `ATLAS-TESTS.md`). The change starts once no request runs
+  or waits (the page tries again until then); the engine changes the layers in place on every rank, drops the
+  conversations it keeps (their KV was computed with the old experts) and serves again, and requests that arrive
+  meanwhile wait; a full change of 75 layers took 83 to 90 s on four nodes. A rank stuck past
+  `TF_GLM53_SWAP_DEADLINE_S` (600 s by default) ends its process, and `tf-glm53`'s watcher stops every rank. The
+  result is not saved by itself: Save keeps it. A start loads the widths it is given and never re-sorts.
 - With `TF_GLM53_MULTI` in `EXTRA_ENV` the engine changes no widths while it runs: expert optimisation saves the
-  allocation, for a stop and a start with it.
+  estimate's widths under a name (`opt-<time>`), for a stop and a start with it.
 - The page's settings (colours, the circle's order and the rest) are one file for every browser:
   `launch/panel-settings.json` (`TF_PANEL_SETTINGS` in `EXTRA_ENV` moves it).
 - `LAUNCH_SNAPSHOTS=1` in `glm53.conf` writes each node's GPU, memory and log tail before and after each start and
@@ -332,6 +343,46 @@ have no watcher, and if one fails while starting, the others wait in a collectiv
 A start that fails (a rank stops, the server is not ready within `READY_TIMEOUT`, the smoke test fails, or Ctrl-C)
 stops every rank before `tf-glm53 up` returns. Each node keeps its rank's log in `logs/rankR.log`, and the start before
 in `logs/rankR.log.prev`; `tf-glm53 logs R` follows rank R's.
+
+Each rank runs with `oom_score_adj` 1000. A node that runs out of memory then loses its rank to the kernel's OOM
+killer and the watcher stops the others; the node itself stays up. (A shell started over ssh inherits sshd's -1000,
+which the OOM killer never picks: a rank left at that value lets the node hang instead.)
+
+## Running in containers
+
+The release is also a container image: the archive's files in `/opt/glm53` with what the server needs at run time
+(cuBLAS 13, libibverbs and its providers, NCCL 2.30.7). With `RUNTIME=docker` and `IMAGE` in `glm53.conf`, `tf-glm53`
+starts each rank as a container of `IMAGE` on its node over ssh. The nodes then need Docker and the NVIDIA container
+toolkit (DGX OS has both) instead of cuBLAS, libibverbs and NCCL, and the user running `tf-glm53` must be allowed to
+run `docker` on every node (the `docker` group). `tf-glm53`, the control panel's launcher and the settings stay on the
+first node's host, as with the archive; the weights and the expert banks stay on the hosts.
+
+```sh
+I=ghcr.io/fiore-labo/fiore-glm5.3:r3-102
+docker pull $I                                                # on every node
+mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out $I install /out
+cd glm53 && cp glm53.conf.example glm53.conf                  # or glm53.t4.conf.example; set RUNTIME=docker, IMAGE=$I
+./tf-glm53 deploy && ./tf-glm53 check && ./tf-glm53 up
+```
+
+- `install` writes the release's files (the same as the unpacked archive) to the directory. `./tf-glm53 pull` runs
+  `docker pull IMAGE` on every node.
+- The image can be built from the archive instead: in a freshly unpacked archive,
+  `docker build -f docker/Dockerfile -t glm53-tensorfold:r3-102 .`. The build refuses any file the archive's
+  `SHA256SUMS` does not list, so nothing of an installation goes into the image. Copy it to the other nodes with
+  `docker save` and `docker load`.
+- `tf-glm53 check` checks, on every node, that `IMAGE` is there with the first node's layers, that a container reaches
+  the GPU (`--gpus all`), and that the image holds this directory's release (`NG: image-not-this-release` otherwise).
+- Each rank's container has the GPU, `/dev/infiniband`, the host network and IPC,
+  `--ulimit memlock=-1 --ulimit nofile=1048576:1048576`, `--oom-score-adj 1000`, the host user and an init. Mounted
+  at the same paths: `WEIGHTS`, `DRAFTER` (DFlash2) and every bank of `expert-plan/banks.json` the node has, read-only;
+  `logs/` and `launch/`, writable. Containers are named `glm53-p<PORT>-r<rank>` and removed when they stop.
+  `tf-glm53 down`, `status`, the watcher and the control panel work on them as on ranks run from the host.
+- Measured on four nodes (the eight-node checkpoint, 131,072 tokens of context, MTP): the start took 4 minutes, as
+  on the host; the smoke test passed; `down` stopped every rank in 4 s; with one rank's container killed, the watcher
+  stopped the others and every container was gone in 43 s.
+- A `systemctl daemon-reload` on a host can make running GPU containers lose the GPU (`nvidia-smi` fails in them):
+  `tf-glm53 down` and `up` again.
 
 ## Serving other machines
 
@@ -421,7 +472,6 @@ on the nodes or lower `STORE`, then `tf-glm53 down` and `tf-glm53 up`.
 - Four or eight GB10 systems only (tensor parallelism 4 or 8); other GPU models and other rank counts are not
   supported. Four nodes need the four-node checkpoint and `KV=fp4` (with the control panel, either checkpoint and the
   banks, `T4.md`).
-- The control panel runs on four nodes only in this release.
 - One request runs at a time. Up to 32 others wait in arrival order, chat-title requests (and those sent with
   `"priority": "background"`) behind the rest. Past 32 a request is refused with "the engine is busy; retry shortly":
   a 503, or an error event in a streamed reply.

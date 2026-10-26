@@ -12,6 +12,13 @@ GID_INDEX=
 # NCCL 2.30.7 at this path on every node (RUNTIME.md, "Before the first start").
 NCCL_LIB=~/nccl-2.30.7/nvidia/nccl/lib/libnccl.so.2
 
+# How the ranks run: host (the default: from this directory, with cuBLAS 13, libibverbs and NCCL on every node) or
+# docker (each rank in a container of IMAGE, this release as an image built from docker/Dockerfile or pulled: every
+# node needs Docker and the NVIDIA container toolkit, and the libraries are the image's, so NCCL_LIB is not used).
+# RUNTIME.md, "Running in containers".
+#RUNTIME=docker
+#IMAGE=glm53-tensorfold:r3-102
+
 # The four-node checkpoint, fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks on Hugging Face (the 3 / 4-bit expert mix, T4.md),
 # the same path on every node.
 WEIGHTS=~/models/GLM-5.3-EXL3-4x-DGX-Sparks

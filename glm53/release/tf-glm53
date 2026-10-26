@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# tf-glm53: full GLM-5.3 on eight or four DGX Sparks (tensor parallel 8 or 4) from this release directory.
+# tf-glm53: full GLM-5.3 on eight, four or two DGX Sparks (tensor parallel 8, 4 or 2) from this release directory;
+# three nodes (TP=3) are checked and deployed, not started yet.
 #
 #   tf-glm53 [-c CONF] deploy     copy this directory to every node (same path) and check SHA256SUMS there
 #   tf-glm53 [-c CONF] check      nodes, files, weights, libraries, RDMA devices, GPUs and memory, before a start
@@ -12,10 +13,13 @@
 #   tf-glm53 [-c CONF] logs [R]   follow rank R's log (default 0)
 #   tf-glm53 [-c CONF] launcher [stop|status]   the control panel's launcher on this node, always on (start / stop /
 #                                 status); it serves /panel and /v1/launch/* on LAUNCHER_PORT (glm53/launcher)
+#   tf-glm53 [-c CONF] pull       RUNTIME=docker: docker pull IMAGE on every node, then each node's image compared
 #   -d KIND, before the command: the drafter for this start (mtp, dflash2 or none) instead of DRAFTER_KIND in CONF
 #
 # Run it on the first node of NODES (rank 0). Settings: glm53.conf next to this script (see glm53.conf.example;
-# glm53.t4.conf.example and T4.md for four nodes).
+# glm53.t4.conf.example and T4.md for four nodes). RUNTIME=docker runs each rank in a container of IMAGE (this
+# release as an image, docker/Dockerfile) instead of from this directory: the nodes need Docker and the NVIDIA
+# container toolkit instead of cuBLAS, libibverbs and NCCL.
 set -uo pipefail
 PKG=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SELF="$PKG/$(basename "${BASH_SOURCE[0]}")"
@@ -34,7 +38,7 @@ done
 for a in "$@"; do case $a in -h|--help) usage; exit 0 ;; esac; done
 [ $# -eq 0 ] && { usage; exit 1; }
 case "${1:-}" in
-  deploy|check|verify|up|down|status|smoke|watch) [ $# -le 1 ] || { echo "$1 takes no arguments (got: ${*:2})"; exit 2; } ;;
+  deploy|check|verify|up|down|status|smoke|watch|pull) [ $# -le 1 ] || { echo "$1 takes no arguments (got: ${*:2})"; exit 2; } ;;
   logs) [ $# -le 2 ] && [[ ${2:-0} =~ ^[0-9]+$ ]] || { echo "logs [RANK]: a rank number"; exit 2; } ;;
   verify-banks) for a in "${@:2}"; do [[ $a =~ ^[2-5]$ ]] || { echo "verify-banks [BITS...]: widths 2 to 5 (got: $a)"; exit 2; }; done ;;
   launcher) [ $# -le 2 ] || { echo "launcher [start|stop|status]"; exit 2; } ;;
@@ -69,11 +73,31 @@ LAUNCH_ENV=${LAUNCH_ENV:-}  # from the launcher (the environment, not CONF): the
 KV=${LAUNCH_KV:-$KV}
 CONTEXT=${LAUNCH_CONTEXT:-$CONTEXT}
 STORE=${LAUNCH_STORE:-$STORE}
+RUNTIME=${RUNTIME:-host}    # host: the ranks run from this directory; docker: each in a container of IMAGE
+IMAGE=${IMAGE:-}
+case $RUNTIME in
+  host) ;;
+  docker) [ -n "$IMAGE" ] || { echo "RUNTIME=docker needs IMAGE (this release's image, e.g. ghcr.io/OWNER/glm53-tensorfold:VERSION)"; exit 2; } ;;
+  *) echo "RUNTIME must be host or docker"; exit 2 ;;
+esac
 LOGS=$PKG/logs
 BIN=$PKG/bin/tensorfold-native
-# 4 nodes (TP=4) or 8 (TP=8); the checkpoint keeps the experts cut for 8 either way (TF_GLM53_STORED_WORLD=8)
+# where a rank finds the release's library and NCCL: this directory and NCCL_LIB, or the image's own
+RUN_PKG=$PKG; RUN_NCCL=$NCCL_LIB
+[ "$RUNTIME" = docker ] && { RUN_PKG=/opt/glm53; RUN_NCCL=/opt/nccl/nvidia/nccl/lib/libnccl.so.2; }
+CN=glm53-p$PORT-r           # RUNTIME=docker: rank R's container is $CN$R (the port tells lanes on one node apart)
+# 2 nodes (TP=2), 3 (TP=3), 4 (TP=4) or 8 (TP=8); the checkpoint keeps the experts cut for 8 either way
+# (TF_GLM53_STORED_WORLD=8: 2, 4 and 8 ranks join 8 / world of each expert's shares, 3 ranks hold 3 / 3 / 2 of them)
 WORLD=${#NODES[@]}
-[ "$WORLD" -eq 8 ] || [ "$WORLD" -eq 4 ] || { echo "NODES must list 4 or 8 nodes (rank 0 first)"; exit 2; }
+case $WORLD in 2|3|4|8) ;; *) echo "NODES must list 2, 3, 4 or 8 nodes (rank 0 first)"; exit 2 ;; esac
+# the need measured below is for 4 and 8 nodes: 2 and 3 nodes name theirs (NEED_GB in CONF, or the panel's plan)
+case $WORLD in 2|3) [ -n "${NEED_GB:-}${LAUNCH_NEED_GB:-}" ] || { echo "$WORLD nodes: set NEED_GB in $CONF (the GiB a node must have available before the start)"; exit 2; } ;; esac
+# decode context parallelism: pairs of ranks (on 2 nodes the pair is every rank), the three ranks together on 3;
+# DCP=1 keeps the whole KV on each rank. The KV pool (CACHE=pool) takes DCP 1 or 2
+[ "$WORLD" -eq 3 ] && DCP=${DCP:-3}
+DCP=${DCP:-2}
+[[ $DCP =~ ^[1-8]$ ]] && [ $((WORLD % DCP)) -eq 0 ] || { echo "DCP=$DCP does not divide $WORLD nodes"; exit 2; }
+[ "$CACHE" = pool ] && [ "$DCP" -gt 2 ] && { echo "CACHE=pool takes DCP 1 or 2, not $DCP (CACHE=slots, or DCP=1)"; exit 2; }
 LAST=$((WORLD - 1))
 [ -n "${WEIGHTS:-}" ] && [ -n "${SOCKET_IFNAME:-}" ] && [ -n "${IB_HCA:-}" ] || { echo "set WEIGHTS, SOCKET_IFNAME and IB_HCA in $CONF"; exit 2; }
 case $CACHE in pool|slots) ;; *) echo "CACHE must be pool or slots"; exit 2 ;; esac
@@ -93,20 +117,22 @@ loopback() { case $1 in 127.*|localhost|::1) return 0 ;; *) return 1 ;; esac; }
 url() { case $HOST in 0.0.0.0|127.*|localhost) echo "http://127.0.0.1:$PORT" ;; ::|::1) echo "http://[::1]:$PORT" ;; *:*) echo "http://[$HOST]:$PORT" ;; *) echo "http://$HOST:$PORT" ;; esac; }
 # the first key of API_KEY_FILE, without its label (lines are KEY or LABEL: KEY; # starts a comment)
 api_key() { grep -v -m1 -E '^[[:space:]]*(#|$)' "$API_KEY_FILE" | sed 's/^[^:]*://; s/^[[:space:]]*//; s/[[:space:]]*$//'; }
-# this directory's ranks only: processes whose executable is $BIN
+# this directory's ranks only: processes whose executable is $BIN; with RUNTIME=docker the servers in this lane's
+# containers (host process ids: a TERM or a KILL from here reaches them, the container's init forwards nothing else)
 PIDS="for p in \$(pgrep -x tensorfold-nati); do e=\$(readlink /proc/\$p/exe); [ \"\${e% (deleted)}\" = $BIN ] && echo \$p; done"
+[ "$RUNTIME" = docker ] && PIDS="for c in \$(docker ps -q -f name='^/$CN[0-9]+\$'); do docker top \$c -eo pid,comm | awk '\$2 ~ /^tensorfold/ {print \$1}'; done"
 alive() { local r; r=$(on "$1" "[ -n \"\$($PIDS)\" ] && echo 1 || echo 0" 2>/dev/null); case $r in 0|1) echo "$r" ;; *) echo U ;; esac; }
 # the GID index of the last RoCE v2 entry with an IPv4 address on the node's RDMA device
 GID_PROBE="d=/sys/class/infiniband/$IB_HCA/ports/1; g=; for i in \$(seq 0 15); do t=\$(cat \$d/gid_attrs/types/\$i 2>/dev/null); a=\$(cat \$d/gids/\$i 2>/dev/null); case \"\$t:\$a\" in 'RoCE v2:0000:0000:0000:0000:0000:ffff:'*) g=\$i ;; esac; done; echo \$g"
 
 rank_env() {
   local r=$1 gid=$2
-  local e="TF_NCCL_LIB=$NCCL_LIB NCCL_SOCKET_IFNAME=$SOCKET_IFNAME NCCL_IB_HCA=$IB_HCA NCCL_IB_GID_INDEX=$gid"
+  local e="TF_NCCL_LIB=$RUN_NCCL NCCL_SOCKET_IFNAME=$SOCKET_IFNAME NCCL_IB_HCA=$IB_HCA NCCL_IB_GID_INDEX=$gid"
   e="$e NCCL_PROTO=Simple NCCL_MAX_NCHANNELS=2 NCCL_DEBUG=WARN TF_GLM53_RANK=$r TF_GLM53_WORLD=$WORLD"
-  e="$e TF_GLM53_MASTER=${NODES[0]}:$MASTER_PORT TF_GLM53_STORED_WORLD=8 TF_GLM53_KV=$KV TF_GLM53_DCP=${DCP:-2}"
+  e="$e TF_GLM53_MASTER=${NODES[0]}:$MASTER_PORT TF_GLM53_STORED_WORLD=8 TF_GLM53_KV=$KV TF_GLM53_DCP=$DCP"
   e="$e TF_GLM53_PROMPT_SP=1 TF_GLM53_SP_DCP=1 TF_GLM53_SP_PARTS=$SP_PARTS TF_GLM53_COMM_PRIORITY=-1"
   e="$e TF_GLM53_PROMPT_ROWS=$ROWS TF_GLM53_DCP_PROMPT_ROWS=$ROWS TF_GLM53_PREFILL_REDUCE=ring TF_EXL3_PROMPT_EXPERTS=1"
-  e="$e TF_GLM53_ROCE=1 TF_GLM53_DECODE_BF16=1 B12X_ROCE_SPIN_LIMIT=300000000 TF_ROCE_PROXY_LIB=$PKG/lib/libroce_proxy.so"
+  e="$e TF_GLM53_ROCE=1 TF_GLM53_DECODE_BF16=1 B12X_ROCE_SPIN_LIMIT=300000000 TF_ROCE_PROXY_LIB=$RUN_PKG/lib/libroce_proxy.so"
   e="$e TF_GLM53_PREFIX=$CACHE TF_GLM53_PREFIX_STORE=$STORE TF_GLM53_TOPK_WORDS=1 TF_GLM53_TOPK_ANY=1 TF_GLM53_FUSE=1"
   e="$e TF_GLM53_PEER_Q=1 TF_GLM53_INDEX_FP8=0"
   case $DRAFTER_KIND in
@@ -116,6 +142,30 @@ rank_env() {
   [ -n "$EXTRA_ENV" ] && e="$e $EXTRA_ENV"
   [ -n "$LAUNCH_ENV" ] && e="$e $LAUNCH_ENV"
   echo "$e"
+}
+
+# RUNTIME=docker: the directories a rank reads besides the image, mounted at the same paths: the weights, DFlash2's
+# model and every expert bank of banks.json read-only (those a node has), the logs and launch/ (the expert plan, the
+# load progress) writable, the key file read-only for rank 0
+mount_dirs() {
+  echo "$WEIGHTS"
+  [ "$DRAFTER_KIND" = dflash2 ] && echo "$DRAFTER"
+  [ -f "$PKG/expert-plan/banks.json" ] && python3 -c 'import json, os, sys
+for b in json.load(open(sys.argv[1]))["banks"]: print(os.path.expanduser(b["dir"]))' "$PKG/expert-plan/banks.json" 2>/dev/null
+}
+
+# rank R's container: the GPU, the RDMA devices and the host network, the locked-memory and open-file limits NCCL and
+# the RDMA proxy need, oom_score_adj 1000 (out of memory the kernel takes the rank, not the node), the host user, an
+# init that passes TERM on; its output to LOGS/rankR.log through the image's entry (serve LOG ARGS)
+docker_rank() {
+  local r=$1 gid=$2 a=$3 m=$4 env="" kv d ro=""
+  for kv in $(rank_env "$r" "$gid") $m; do env="$env -e $kv"; done
+  for d in $(mount_dirs); do ro="$ro $d"; done
+  local key=""; [ "$r" -eq 0 ] && [ -n "$API_KEY_FILE" ] && key="-v $API_KEY_FILE:$API_KEY_FILE:ro"
+  echo "docker rm -f $CN$r >/dev/null 2>&1; M=; for d in $ro; do [ -d \$d ] && M=\"\$M -v \$d:\$d:ro\"; done;" \
+    "docker run -d --rm --init --name $CN$r --user \$(id -u):\$(id -g) --gpus all --network host --ipc host" \
+    "--device /dev/infiniband --cap-add IPC_LOCK --ulimit memlock=-1 --ulimit nofile=1048576:1048576 --oom-score-adj 1000" \
+    "-w /opt/glm53 \$M -v $LOGS:$LOGS -v $PKG/launch:$PKG/launch $key$env $IMAGE serve $LOGS/rank$r.log $WEIGHTS $a >/dev/null"
 }
 
 # this directory's identity on a node: every file of SHA256SUMS checked but expert-plan/banks.json, which is settings
@@ -143,6 +193,8 @@ cmd_check() {
   # with MTP or no drafts, 111 with DFlash2), 4 to spare; each 100,000 positions of STORE fewer need 2.7 less
   need=${NEED_GB:-112}; [ "$DRAFTER_KIND" = dflash2 ] && need=$((need + 3))
   need=$(( need - (819200 - STORE) * 27 / 1000000 ))
+  # 2 and 3 nodes: NEED_GB as CONF gives it, for its CONTEXT and STORE
+  case $WORLD in 2|3) need=${NEED_GB:-$need} ;; esac
   # a start from the control panel: its plan's need (the experts, the KV it sized, the reserve) instead of the estimate
   [ -n "${LAUNCH_NEED_GB:-}" ] && need=$LAUNCH_NEED_GB
   local wsum; wsum=$(cd "$WEIGHTS" 2>/dev/null && { find . -maxdepth 1 -type f -printf '%f %s\n' | LC_ALL=C sort | sha256sum; sha256sum config.json; } | sha256sum | cut -c1-64) || { echo "  no weights at $WEIGHTS"; rm -rf "$tmp"; echo "check: NG"; return 1; }
@@ -154,13 +206,25 @@ cmd_check() {
   if [ "$CACHE" = pool ] && [ "$STORE" -lt 512 ]; then echo "  STORE $STORE: the pool cache (CACHE=pool) needs at least 512 positions beyond CONTEXT"; ng=1; fi
   echo "  drafter: $(drafter_line)"
   [ -n "$DRAFTER" ] && [ "$DRAFTER_KIND" != dflash2 ] && echo "  (DRAFTER is set but not used: DRAFTER_KIND=$DRAFTER_KIND)"
+  # RUNTIME=docker: the libraries are the image's. Each node needs IMAGE with the first node's layers, a GPU reachable
+  # from a container (--gpus all: the NVIDIA container toolkit), and inside it this directory's release (its SHA256SUMS)
+  local probe wimg="" wrel=""
+  if [ "$RUNTIME" = docker ]; then
+    wimg=$(docker image inspect -f '{{json .RootFS.Layers}}' "$IMAGE" 2>/dev/null | sha256sum | cut -c1-16) && docker image inspect "$IMAGE" >/dev/null 2>&1 || wimg=missing
+    wrel=$(sha256sum "$PKG/SHA256SUMS" | cut -c1-64)
+    echo "  image: $IMAGE (layers ${wimg})"
+    probe="echo -n ' image='\$(L=\$(docker image inspect -f '{{json .RootFS.Layers}}' $IMAGE 2>/dev/null) && echo \"\$L\" | sha256sum | cut -c1-16 || echo missing)
+        echo -n ' inimage='\$(docker run --rm --gpus all --entrypoint sh $IMAGE -c 'nvidia-smi -L >/dev/null 2>&1 && sha256sum /opt/glm53/SHA256SUMS | cut -c1-64' 2>/dev/null || echo bad)"
+  else
+    probe="echo -n ' nccl='\$([ -r $NCCL_LIB ] && basename \$(readlink -f $NCCL_LIB) || echo missing)
+        echo -n ' cublas='\$(ldconfig -p | grep -c 'libcublasLt.so.13 ')
+        echo -n ' ibverbs='\$(ldconfig -p | grep -c 'libibverbs.so.1 ')"
+  fi
   for r in $(seq 0 $LAST); do
     n=${NODES[$r]}
     ( o=$(on "$n" "cd $PKG 2>/dev/null && echo -n files=\$($PKGSUM 2>/dev/null) || echo -n files=bad
         echo -n ' weights='\$(cd $WEIGHTS 2>/dev/null && { find . -maxdepth 1 -type f -printf '%f %s\\n' | LC_ALL=C sort | sha256sum; sha256sum config.json; } | sha256sum | cut -c1-64)
-        echo -n ' nccl='\$([ -r $NCCL_LIB ] && basename \$(readlink -f $NCCL_LIB) || echo missing)
-        echo -n ' cublas='\$(ldconfig -p | grep -c 'libcublasLt.so.13 ')
-        echo -n ' ibverbs='\$(ldconfig -p | grep -c 'libibverbs.so.1 ')
+        $probe
         echo -n ' hca='\$([ -d /sys/class/infiniband/$IB_HCA ] && echo 1 || echo 0)
         echo -n ' gid='\$($GID_PROBE)
         echo -n ' gpu='\$(nvidia-smi -L >/dev/null 2>&1 && echo ok || echo unreadable)
@@ -170,16 +234,23 @@ cmd_check() {
       bad=""
       [[ $o == *"files=$sums"* ]] || bad="$bad files"
       [[ $o == *"weights=$wsum"* ]] || bad="$bad weights"
-      [[ $o == *"nccl=missing"* || -z $o ]] && bad="$bad NCCL($NCCL_LIB)"
-      [[ $o == *"cublas=0"* || -z $o ]] && bad="$bad cuBLAS-13"
-      [[ $o == *"ibverbs=0"* ]] && bad="$bad libibverbs"
+      if [ "$RUNTIME" = docker ]; then
+        if [[ $o == *"image=missing"* || -z $o ]]; then bad="$bad image-missing(tf-glm53 pull)"
+        elif [[ $o != *"image=$wimg"* ]]; then bad="$bad image-differs-from-the-first-node(tf-glm53 pull)"; fi
+        [[ $o == *"inimage=bad"* ]] && bad="$bad docker-GPU(--gpus all fails: the NVIDIA container toolkit)"
+        [[ $o == *"inimage=bad"* || $o == *"inimage=$wrel"* ]] || bad="$bad image-not-this-release"
+      else
+        [[ $o == *"nccl=missing"* || -z $o ]] && bad="$bad NCCL($NCCL_LIB)"
+        [[ $o == *"cublas=0"* || -z $o ]] && bad="$bad cuBLAS-13"
+        [[ $o == *"ibverbs=0"* ]] && bad="$bad libibverbs"
+      fi
       [[ $o == *"hca=0"* ]] && bad="$bad $IB_HCA"
       [[ $o =~ gid=[0-9] ]] || bad="$bad RoCE-v2-GID"
       [[ $o == *"gpu=unreadable"* ]] && bad="$bad GPU-unreadable(nvidia-smi fails)"
       [[ $o == *"running=0"* ]] || bad="$bad GPU-busy"
       fg=$(echo "$o" | grep -o 'free_gb=[0-9]*' | cut -d= -f2); [ "${fg:-0}" -ge "$need" ] || bad="$bad memory(${fg:-?}<$need GiB)"
       g=$(echo "$o" | grep -o 'gid=[0-9]*' | cut -d= -f2)
-      nc=$(echo "$o" | grep -o 'nccl=[^ ]*' | cut -d= -f2)
+      nc=$(echo "$o" | grep -o 'nccl=[^ ]*' | cut -d= -f2); [ "$RUNTIME" = docker ] && nc="image ${wimg}"
       if [ -n "$bad" ]; then echo "  rank $r $n: NG:$bad"; : > "$tmp/ng"; else echo "  rank $r $n: ok (GID $g, $fg GiB available, $nc)"; fi ) > "$tmp/$r" &
   done; wait
   cat $(for r in $(seq 0 $LAST); do echo "$tmp/$r"; done); [ -f "$tmp/ng" ] && ng=1; rm -rf "$tmp"
@@ -312,6 +383,8 @@ fail_up() {                                         # a start that failed: stop 
 }
 
 cmd_up() {
+  # three nodes: this engine joins 8 / world shares of an expert; TP=3's units (3 / 3 / 2) need another engine
+  [ "$WORLD" -eq 3 ] && { echo "3 nodes (TP=3): this engine does not split GLM-5.3 over three ranks yet: not started"; return 1; }
   cmd_check || { echo "not started"; return 1; }
   local r n gid args
   args="--host $HOST --port $PORT --name $NAME --context $CONTEXT"
@@ -325,8 +398,14 @@ cmd_up() {
     # rank 0 alone opens METRICS_LISTEN (the others' counters stay at 0)
     m=""; [ "$r" -eq 0 ] && [ -n "$METRICS_LISTEN" ] && m="TENSORFOLD_METRICS_LISTEN='$METRICS_LISTEN' "
     # the last start's log is kept as rankR.log.prev; only the server goes to the background, its output to the log:
-    # ssh returns at once
-    on "$n" "mkdir -p $LOGS; cd $PKG || exit 1; [ -f $LOGS/rank$r.log ] && mv -f $LOGS/rank$r.log $LOGS/rank$r.log.prev; export $(rank_env "$r" "$gid"); ${m}nohup ./bin/tensorfold-native serve $WEIGHTS $a > $LOGS/rank$r.log 2>&1 < /dev/null &"
+    # ssh returns at once. oom_score_adj 1000: the kernel's OOM killer takes the rank first (a shell of sshd inherits
+    # -1000, never taken: out of memory the node then livelocks and needs a cold power cycle)
+    if [ "$RUNTIME" = docker ]; then
+      on "$n" "mkdir -p $LOGS $PKG/launch; [ -f $LOGS/rank$r.log ] && mv -f $LOGS/rank$r.log $LOGS/rank$r.log.prev; $(docker_rank "$r" "$gid" "$a" "${m:+TENSORFOLD_METRICS_LISTEN=$METRICS_LISTEN}")" \
+        || { fail_up "rank $r's container did not start on $n"; return 1; }
+      continue
+    fi
+    on "$n" "mkdir -p $LOGS; cd $PKG || exit 1; [ -f $LOGS/rank$r.log ] && mv -f $LOGS/rank$r.log $LOGS/rank$r.log.prev; echo 1000 > /proc/self/oom_score_adj || exit 1; export $(rank_env "$r" "$gid"); ${m}nohup ./bin/tensorfold-native serve $WEIGHTS $a > $LOGS/rank$r.log 2>&1 < /dev/null &"
   done
   [ -f "$LOGS/watch.log" ] && mv -f "$LOGS/watch.log" "$LOGS/watch.log.prev"
   drafter_line > "$LOGS/drafter"
@@ -406,6 +485,16 @@ cmd_launcher() {                                   # start (default), stop or st
   esac
 }
 
+cmd_pull() {                                       # RUNTIME=docker: IMAGE on every node, then each node's layers
+  [ "$RUNTIME" = docker ] || { echo "pull: RUNTIME=docker only (RUNTIME is $RUNTIME)"; return 2; }
+  local n
+  for n in "${NODES[@]}"; do
+    ( o=$(on "$n" "docker pull -q $IMAGE >/dev/null 2>&1 && docker image inspect -f '{{json .RootFS.Layers}}' $IMAGE | sha256sum | cut -c1-16" 2>&1)
+      echo "  $n: ${o:-FAIL (docker pull $IMAGE)}" ) &
+  done; wait
+  echo "pull: done (tf-glm53 check compares every node's image with the first node's)"
+}
+
 cmd_smoke() {
   local ok=0 c doc q1 q2 cached
   c=$(ask '[{"role": "user", "content": "What is 17 + 25? Answer with the number only."}]' 2>/dev/null)
@@ -434,5 +523,6 @@ case "${1:-}" in
   watch)  cmd_watch ;;
   logs)   on "${NODES[${2:-0}]}" "tail -f $LOGS/rank${2:-0}.log" ;;
   launcher) cmd_launcher "${2:-start}" ;;
+  pull)   cmd_pull ;;
   *)      usage; exit 1 ;;
 esac

@@ -6,6 +6,8 @@
 
 これは [TensorFold](https://github.com/ashhart/TensorFold) 1.0.2 から Fiore-lab が作った非公式の派生物であり、TensorFold プロジェクトのリリースではありません。TensorFold のコードを含み、フルサイズの GLM-5.3 用のエンジン（`zig/src/families/glm_moe_dsa/`、`zig/kernels/cuda/glm53/`）を追加し、TensorFold のドキュメントは除いています。それらのドキュメントは別のモデル、重み、マシンについて書かれたものだからです。TensorFold 自体については、そのリポジトリを参照してください。
 
+**AI アシスタントを使ってこのシステムを理解したり動かしたりする場合**は、[glm53/release/AI-GUIDE.ja.md](glm53/release/AI-GUIDE.ja.md)（リリースアーカイブでは `AI-GUIDE.ja.md`。英語版は `AI-GUIDE.md`）を渡してください。AI アシスタント向けに書いた 1 ページの説明で、システムの全体像、目的、準備と使い方、できることとできないこと（実測の数値つき）、詳細の置き場所をまとめています。
+
 ## できること
 
 - テンソル並列 8 または 4。KV キャッシュはランクのペアに分割します（decode コンテキスト並列 2）。エンジンとモデルは 1M（1,048,576 トークン）まで扱えます。コンテキストの上限は DGX Spark のメモリで決まり、**8 台（FP8 KV キャッシュ）で 1M、4 台（4 ビット KV キャッシュ）で約 800K（819,200）**です。設定例は 819,200 と 737,280 になっています。同じメモリのまま、8 台は `CONTEXT=1048576` `STORE=589824`、4 台は `CONTEXT=819200` `STORE=18080` にできます（KV プールは `CONTEXT` + `STORE` トークンを持ちます）。
@@ -14,16 +16,16 @@
 - ラウンドごとにドラフトをモデルが検証します。ドラフトを作るのは、既定では GLM-5.3 自身の MTP 層、またはオプションの DFlash2 drafter です。どの場合も、応答はモデル自身が選んだものです。
 - `/metrics`（Prometheus のテキスト）と `/health` は実行中のリクエストの分も数えるので、モニタはリクエストの実行中にも prefill と decode の速さ、キャッシュのヒット、ドラフトの受理を読めます。`METRICS_LISTEN` を設定すると、別のホストのモニタ向けに、この 2 つを専用のアドレスで読み取り専用で開きます。
 
-## Expert Atlas（r3-102 の新機能、4 台）
+## Expert Atlas（r3-102 の新機能）
 
 GLM-5.3 はトークンごとに、1 層 256 個の routed expert から 8 個を選びます。expert によって選ばれる頻度は大きく違います。Expert Atlas は 19,200 個の routed expert（層 3〜77）を、それぞれ自分の幅（2・3・4・5 ビット）で読み込み、限られたメモリの中で、よく使われる expert ほど多くのビットを持たせます。
 
 - **バンク**: 各幅の routed expert で、Hugging Face にあります。`fiore-lab/GLM-5.3-EXL3-Experts-2bit`、`-3bit`、`-4bit`、`-5bit`。パネルが選ばせるのは、全ノードにそろっている幅です。
 - **コントロールパネル**: ランチャー（`./tf-glm53 launcher`）が出すページです。起動の前には幅を計画し、各ノードのメモリ、計画が収まるか、KV キャッシュに残る量を表示します。エンジンの起動と停止もここから行います。稼働中は、各トークンが選ぶ expert、選ばれた expert の平均の幅、速さを表示します。
-- **使用回数**: エンジンは、プロンプトの各行と decode の各トークンが選ぶ expert を数えます。停止時に、その稼働の回数を学習データに加えられます。計画はこの回数で expert を並べます（最初の稼働を保存するまでは、Fiore-lab が測ってページに同梱した回数で並べます）。
-- **エキスパート最適化**: 幅ごとの expert の個数はそのままで、使われ方で expert を並べ替えます。同じメモリで、モデルが実際に選ぶ expert の平均の幅が上がります。稼働中のエンジンでも（4 台で 75 層全部の変更に 83〜90 秒、リクエストの合間に行います）、停止中のエンジンでも（次の起動のため）使えます。
+- **利用記録**: エンジンは、プロンプトの各行と decode の各トークンが選ぶ expert を数えます。保存した割り当ては保存元の稼働の利用記録を持ち、記録は割り当てと一緒に動きます。開いてもう一度稼働させると、その稼働の分が記録に加わります。計画はこの記録で expert を並べます（記録の無い計画は、Fiore-lab が測ってページに同梱した回数で並べます）。自動では何も保存しません。停止時に、割り当てとその記録に名前を付けて保存します。
+- **エキスパート最適化**: 幅ごとの expert の個数はそのままで、稼働の利用記録で読み込み済みの expert を並べ替えます。同じメモリで、モデルが実際に選ぶ expert の平均の幅が上がります。稼働中のエンジンで使えます（4 台で 75 層全部の変更に 83〜90 秒、リクエストの合間に行います）。結果は必要なときに名前を付けて保存し、後の起動で開きます。
 
-このリリースのコントロールパネルは 4 台で動きます。8 台はこれまでどおり、routed expert をすべて 4 ビットで動かします。詳しくは `packaging/RUNTIME.ja.md`（「コントロールパネル」）と `glm53/release/T4.ja.md` にあります。
+コントロールパネルは 4 台または 8 台で動き、台数は起動画面で選びます。`./tf-glm53 up` はこれまでどおりチェックポイントの幅で起動します。詳しくは `packaging/RUNTIME.ja.md`（「コントロールパネル」）と `glm53/release/T4.ja.md` にあります。
 
 ## 必要なもの
 
@@ -31,11 +33,18 @@ GLM-5.3 はトークンごとに、1 層 256 個の routed expert から 8 個�
 - DGX OS（Ubuntu 24.04）、NVIDIA ドライバ 580 以降、cuBLAS 13。
 - 全ノードに NCCL 2.30.7。NVIDIA の `nvidia-nccl-cu13` wheel を pip で展開したものです（`packaging/RUNTIME.md`）。
 - ノード数に合った Fiore-lab の EXL3 チェックポイント（Hugging Face）。全ノードの同じパスに置きます。8 台では `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`（390 GB）、4 台では `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`（344.6 GB）です。4 台用のチェックポイントは、層 3〜77 の routed expert のうち使用頻度の低い半分を 3 ビット、残りを 4 ビットで持ち、それ以外は 8 台用のチェックポイントと同じです。
-- コントロールパネル（4 台）には、3 ビットと 4 ビットの expert のバンク（277.9 GB と 368.5 GB。8 台用のチェックポイントを 4 ビットのバンクとして使えます。4 ビットだけでは文脈が短くなります）と、ランチャー用に各ノードの `python3`。
+- コントロールパネルには、使う幅の expert のバンク。4 台では 3 ビットと 4 ビットのバンク（277.9 GB と 368.5 GB。8 台用のチェックポイントを 4 ビットのバンクとして使えます。4 ビットだけでは文脈が短くなります）と、ランチャー用に各ノードの `python3`。
 
 ## 実行
 
-リリースアーカイブ `tensorfold-r3-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。4 台でも 8 台でも、同じアーカイブと起動スクリプトを使います。`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーし、ノード、ネットワーク名、NCCL、重み、drafter を記入してから、`./tf-glm53 deploy` と `./tf-glm53 up` を実行します。アドレスと API キーファイルを指定しない限り、サーバーは `127.0.0.1` 上で OpenAI chat API を提供します。
+リリースは、コンテナイメージと、同じファイルを持つアーカイブの 2 つの形で配布します。おすすめはイメージです。イメージを使う場合、各ノードに要るのは Docker と NVIDIA Container Toolkit（DGX OS には両方あります）だけで、サーバーのライブラリは要りません。
+
+```sh
+docker pull ghcr.io/fiore-labo/fiore-glm5.3:r3-102            # 各ノードで
+mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/fiore-glm5.3:r3-102 install /out
+```
+
+そのあと `glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定し、以下と同じように進めます（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。4 台でも 8 台でも、同じアーカイブと起動スクリプトを使います。`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーし、ノード、ネットワーク名、NCCL、重み、drafter を記入してから、`./tf-glm53 deploy` と `./tf-glm53 up` を実行します。アドレスと API キーファイルを指定しない限り、サーバーは `127.0.0.1` 上で OpenAI chat API を提供します。
 
 ## Drafter
 
@@ -84,7 +93,6 @@ zig build dist -Dversion=r3-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platf
 
 - GB10 システム 4 台または 8 台のみに対応します。他の GPU や他のランク数には対応していません。
 - 同時に実行するリクエストは 1 件です。他のリクエストは 32 件まで到着順に待ち（チャットのタイトル作成は最後）、それを超えるとサーバーは断ります（503、ストリーミングではエラーイベント）。サブエージェントを並列に動かすエージェントでは、サブエージェントを別のモデルに向けるほうが適しています。
-- このリリースのコントロールパネルは 4 台で動きます。
 - その他の制限は `packaging/RUNTIME.md` に記載しています。
 
 ## ライセンスとクレジット

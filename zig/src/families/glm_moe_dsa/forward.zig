@@ -587,6 +587,11 @@ pub const Buffers = struct {
         const D = cfg.hidden;
         const lw = cfg.kv_lora;
         const width = @max(cfg.inter, cfg.moe_inter * @max(cfg.shared_experts, 1)) / world;
+        // the widest K of this rank's linears, the rotated input xh [R, K]: o_proj's heads x v_head passes the hidden
+        // size at TP=2 (32 x 256 = 8,192 > 6,144)
+        // このランクの linear の最も広い K (回転した入力 xh [R, K] の幅): TP=2 では o_proj の heads x v_head が hidden を
+        // 超える (32 x 256 = 8,192 > 6,144)
+        const kmax = @max(@max(D, cfg.q_lora), @max(@as(usize, heads) * cfg.v_head, width));
         const a = struct {
             fn z(dd: *const cuda.Driver, n: usize) !Buf {
                 var b = try Buf.alloc(dd, @max(n, 16));
@@ -641,7 +646,7 @@ pub const Buffers = struct {
             // router の K スライスの部分和 [8, m, ne]: 全行に 1024 列まで (indexer、expert)、head の行 (16 まで) には
             // 語彙の取り分
             .rpart = try a(d, 8 * @max(R * 1024, wr * vocab_share) * 4),
-            .xh = try a(d, R * D * 2),
+            .xh = try a(d, R * kmax * 2),
             .wq = try a(d, 6144 * 3072 * 2),
             .mlog = try a(d, R * cfg.experts * 4),
             .pick = try a(d, R * cfg.top_k * 4),
@@ -665,7 +670,7 @@ pub const Buffers = struct {
             .keys = keys,
             .had = try Buf.fromHost(d, had),
             .inv = try Buf.fromHost(d, inv),
-            .scratch = try linear.Scratch.init(d, MAX_LIN_ROWS, @intCast(D), lin_z_floats),
+            .scratch = try linear.Scratch.init(d, MAX_LIN_ROWS, @intCast(kmax), lin_z_floats),
         };
         if (dcp > 1) {
             const G: usize = dcp;
@@ -930,6 +935,9 @@ pub const Ctx = struct {
             try c.ops.gemm(c.b.xh.ptr, slot.buf.ptr, c.b.had.ptr, l.svh.ptr, out, out_bf16, m, l.n, l.k, l.n);
             return uc.done(slot, c.stream, c.sid);
         }
+        // without the unpack cache: b.wq holds a TP=4 dense MLP's W_q (6,144 x 3,072), not every linear's
+        // unpack cache がないとき: b.wq は TP=4 の dense MLP の W_q (6,144 x 3,072) の大きさで、どの linear も入るわけではない
+        if (@as(usize, l.k) * l.n * 2 > c.b.wq.len) return error.UnpackedWeightTooWide;
         const st = l.strides();
         try c.x3.unpackW(c.stream, l.words.ptr, c.b.wq.ptr, l.k, l.n, l.k2, l.cb, st.k, st.nb);
         try c.ops.gemm(c.b.xh.ptr, c.b.wq.ptr, c.b.had.ptr, l.svh.ptr, out, out_bf16, m, l.n, l.k, l.n);

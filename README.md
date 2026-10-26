@@ -11,6 +11,11 @@ of the TensorFold project. It carries TensorFold's code, adds the engine for ful
 (`zig/src/families/glm_moe_dsa/`, `zig/kernels/cuda/glm53/`) and leaves out TensorFold's documents, which describe
 other models, weights and machines. For TensorFold itself, see its repository.
 
+**Using an AI assistant to understand or run this system?** Give it [glm53/release/AI-GUIDE.md](glm53/release/AI-GUIDE.md)
+(`AI-GUIDE.md` in the release archive; Japanese: `AI-GUIDE.ja.md`): one page written for AI assistants that describes
+the whole system, its purpose, how to set it up and use it, what it can and cannot do with the measured numbers, and
+where the details are.
+
 ## What it does
 
 - Tensor parallelism 8 or 4 with the KV cache split across rank pairs (decode context parallelism 2). The engine and
@@ -28,7 +33,7 @@ other models, weights and machines. For TensorFold itself, see its repository.
   speed, cache hits and draft acceptance while a request runs. `METRICS_LISTEN` serves the two read-only on an address
   of their own, for a monitor on another host.
 
-## Expert Atlas (new in r3-102, four nodes)
+## Expert Atlas (new in r3-102)
 
 GLM-5.3 picks 8 of 256 routed experts a layer for each token, and some experts are picked far more often than others.
 Expert Atlas loads each of the 19,200 routed experts (layers 3 to 77) at its own width, 2, 3, 4 or 5 bits, so the
@@ -39,15 +44,18 @@ experts in most use get the most bits for the memory there is:
 - **The control panel**: a page served by the launcher (`./tf-glm53 launcher`). Before a start it plans the widths
   and shows each node's memory, whether the plan fits and the KV cache left; it starts and stops the engine. While
   the engine runs it shows the experts each token picks, the mean width of the picked experts and the speeds.
-- **Usage**: the engine counts the experts every prompt row and decoded token picks; at a stop the run's counts can
-  be added to the learning data. Plans rank the experts by these counts (before the first saved run, by counts
-  Fiore-lab measured and ships with the page).
-- **Expert optimisation**: re-sorts the experts by use with each width's number of experts kept: the same memory, a
-  higher mean width for the experts the model actually picks. It runs on a live engine (a full change took 83 to
-  90 s on four nodes, between requests) or on a stopped one for the next start.
+- **Usage records**: the engine counts the experts every prompt row and decoded token picks. A saved allocation keeps
+  the usage record of the runs it was saved from, so its data travels with it: opened and run again, its record grows
+  by that run. Plans rank the experts by the record (a plan without one, by counts Fiore-lab measured and ships with
+  the page). Nothing is saved by itself: the stop saves the allocation and its record under a name.
+- **Expert optimisation**: re-sorts the loaded experts by the run's record with each width's number of experts kept:
+  the same memory, a higher mean width for the experts the model actually picks. It runs on a live engine (a full
+  change took 83 to 90 s on four nodes, between requests); the result is saved under a name when wanted and opened
+  for later starts.
 
-In this release the control panel runs on four nodes; eight nodes run as before, every routed expert at 4 bits.
-`packaging/RUNTIME.md` ("The control panel") and `glm53/release/T4.md` give the details.
+The control panel runs on four or eight nodes, the count chosen on its launch screen; `./tf-glm53 up` still starts
+them with the checkpoint's widths. `packaging/RUNTIME.md` ("The control panel") and `glm53/release/T4.md` give the
+details.
 
 ## What you need
 
@@ -59,12 +67,23 @@ In this release the control panel runs on four nodes; eight nodes run as before,
   `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks` (390 GB) for eight nodes, `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks` (344.6 GB)
   for four. The four-node checkpoint holds the routed experts of layers 3 to 77 at 3 bits for the least used half and
   at 4 bits for the rest; everything else is as in the eight-node checkpoint.
-- For the control panel (four nodes): the 3- and 4-bit expert banks (277.9 and 368.5 GB; the eight-node checkpoint can
-  serve as the 4-bit bank; with 4 bits alone the context is shorter), and `python3` on the nodes for the launcher.
+- For the control panel: the expert banks of the widths it uses, on four nodes the 3- and 4-bit banks (277.9 and
+  368.5 GB; the eight-node checkpoint can serve as the 4-bit bank; with 4 bits alone the context is shorter), and
+  `python3` on the nodes for the launcher.
 
 ## Run
 
-Download the release archive `tensorfold-r3-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
+The release comes as a container image and as an archive with the same files; the image is the way we recommend. With
+the image, every node needs Docker and the NVIDIA container toolkit (DGX OS has both) and nothing else of the
+server's libraries:
+
+```sh
+docker pull ghcr.io/fiore-labo/fiore-glm5.3:r3-102            # on every node
+mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/fiore-glm5.3:r3-102 install /out
+```
+
+then set `RUNTIME=docker` and `IMAGE` in `glm53.conf` and go on as below ([packaging/RUNTIME.md](packaging/RUNTIME.md),
+"Running in containers"). Without Docker: download the release archive `tensorfold-r3-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
 ([packaging/RUNTIME.md](packaging/RUNTIME.md) here). The same archive and launcher serve four or eight nodes: copy
 `glm53.conf.example` (eight nodes) or `glm53.t4.conf.example` (four nodes, see
 [glm53/release/T4.md](glm53/release/T4.md)) to `glm53.conf`, fill in the nodes, network names, NCCL, weights and
@@ -140,7 +159,6 @@ The archive lands in `zig-out/dist/`.
 - One request runs at a time; up to 32 others wait in arrival order, chat-title requests last, and past 32 the server
   refuses them (a 503, or an error event in a stream). Agents that run sub-agents in parallel are better served by
   pointing the sub-agents at another model.
-- The control panel runs on four nodes in this release.
 - `packaging/RUNTIME.md` lists the rest.
 
 ## License and credits

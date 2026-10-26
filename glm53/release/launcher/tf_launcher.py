@@ -4,6 +4,12 @@
 The control panel's launcher: always on, on the lane's first node, beside tf-glm53.
   - GET /panel: the lane's page (TF_PANEL_HTML in the lane's EXTRA_ENV, else PKG/panel.html), read on each request
   - GET /v1/launch/status | nodes | usage, POST /v1/launch/plan | start | stop | resort
+  - the saved allocations (ATLAS_DIR/allocs/user/<name>.json, glm53-expert-alloc v1): GET /v1/launch/allocs (the list,
+    newest first, each with its counts, mean bits and whether its banks are this lane's) and /v1/launch/alloc?name=
+    (one, with its bits), POST /v1/launch/allocs/save | rename | delete (moved to allocs/trash/); a start takes
+    "alloc": a saved one's bits, banks and usage (status.alloc names it), or "usage_from": that one's usage with the bits
+    sent (status.usage_from); a save with_usage keeps that usage + this run's picks, a re-sort with include_alloc ranks
+    by them. Nothing is saved by itself unless asked: a re-sort with save false saves nothing
   - the banks: every width's manifest and layer files checked on every node (at start, then at most every 60 s, and
     again before a start): a width some node lacks is not offered (status.banks), makes a plan "no" (missing_bits)
     and refuses a start at once; a failed start shows the ranks' own error lines
@@ -28,7 +34,7 @@ LAUNCH_SNAPSHOTS=1 the nodes' state written down, with LAUNCH_DROP_CACHES=1 the 
 as an expert plan (tools/quant/expert_plan.py mix with expert-plan/banks.json), then `tf-glm53 up` with LAUNCH_ENV="TF_GLM53_EXPERT_PLAN=... TF_GLM53_LOAD_PROGRESS=...";
 the engine's progress file (glm53-load-progress v1) feeds /v1/launch/status. The ranges (the counts by bits) stay as
 the start set them; POST /v1/launch/resort re-sorts the experts between them while the engine runs (the generic kernel,
-the swap banks) and saves the allocation, by the decode picks, the prompt picks or both (basis). A stop: the
+the swap banks) and saves the allocation, by the decode picks, the prompt picks or both (basis; both weighs decode 0.7, prompt 0.3). A stop: the
 usage kept, `tf-glm53 down`, then the run's decode and prompt picks saved into the learning data, dropped, or kept
 pending (save_usage true / false / absent; /v1/launch/usage/save
 and /discard decide the pending). Kept in PKG/launch/: the learning data (usage-total.json), the pending runs, the last
@@ -43,13 +49,21 @@ import argparse, base64, hashlib, json, os, re, select, shlex, shutil, signal, s
 import http.client
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 GiB = 1 << 30
 # GLM-5.3: hidden D, routed expert intermediate I, experts a layer, the first MoE layer, MoE layers
 D, I, E, FIRST, L = 6144, 2048, 256, 3, 75
+# the stored shares of each routed expert (the checkpoints keep them cut for TP=8: TF_GLM53_STORED_WORLD)
+S = 8
 # its layer (picks / the layer's picks), averaged; a source with no rows drops out
 BASES = ("decode", "prompt", "both")
+# "both": an expert's decode share weighed 0.7 and its prompt share 0.3 (the long-prompt KLD test, ATLAS-TESTS.md:
+# the text written gains with the decode weight up to about 0.7, the documents read hardly depend on it)
+DECODE_WEIGHT = 0.7
+# a saved allocation's name (ATLAS_DIR/allocs/user/<name>.json) and its note's longest
+ALLOC_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}")
+NOTE_MAX = 500
 # the panel's settings: the largest document a POST may carry
 SETTINGS_MAX = 64 << 10
 BANK_TTL = 60
@@ -78,7 +92,11 @@ for b in a["banks"]:
     out[str(b["bits"])] = "ok" if miss == bad == 0 else "%d of %d layer files missing, %d of another size in %s" % (miss, len(layers), bad, b["dir"])
 print(json.dumps(out))
 '''
-TESTED_WORLDS = (4,)  # the node counts the panel has run on
+TESTED_WORLDS = (2, 4, 8)  # the node counts the panel has run on, offered by GET /v1/launch/config (worlds)
+# the node counts this engine runs: each expert's 8 stored shares joined 8 / world a rank (2, 4, 8 nodes). Three nodes
+# (TP=3: the shares themselves as 3 / 3 / 2 units, heads 22 / 21 / 21) are planned here but need an engine that splits
+# the shares so: a start on them is refused until it has one
+ENGINE_WORLDS = (2, 4, 8)
 # the longest context a start may ask (the engine and the model take 1,048,576 positions); a context is a multiple of
 # CONTEXT_STEP positions, at least CONTEXT_MIN
 CONTEXT_LIMIT, CONTEXT_STEP, CONTEXT_MIN = 1048576, 16384, 65536
@@ -90,12 +108,29 @@ ESTIMATE_SLACK = 2 * GiB  # kept beside the reserve when the store takes the res
 POOL_MIN_STORE = 512  # the least store with CACHE=pool: the engine needs the context + 8 rows + a block (at most 264)
 # the drafters a start may take (tf-glm53 -d): the checkpoint's MTP layer, DFlash2 (DRAFTER of CONF, on every node), none
 DRAFTERS = ("mtp", "dflash2", "none")
-# the sizes a rank holds besides its routed experts, by drafter, the largest of four nodes measured (737,280 + 100,000
-# positions, fp4, DCP 2): used until this lane has a measured start with that drafter (estimate: true). MTP holds its
-# layer in the other weights; DFlash2 its model and state in the work, on every rank alike
-DEFAULTS = {"mtp": {"other_weights": int(8.11 * GiB), "kv": int(14.55 * GiB), "work": int(12.8 * GiB)},
-            "dflash2": {"other_weights": int(6.515 * GiB), "kv": int(14.323 * GiB), "work": int(17.42 * GiB)},
-            "none": {"other_weights": int(6.515 * GiB), "kv": int(14.323 * GiB), "work": int(12.8 * GiB)}}
+# the sizes a rank holds besides its routed experts, by node count and drafter, the largest node measured: used until
+# this lane has a measured start with that drafter and node count (estimate: true). MTP holds its layer in the other
+# weights; DFlash2 its model and state in the work, on every rank alike. Node counts not listed take four nodes'.
+#   4 nodes: 737,280 + 100,000 positions, fp4, DCP 2
+#   8 nodes (the release test): MTP 819,200 + 819,200 positions, DFlash2 1,048,576 + 704,512, fp8, DCP 2; no drafter
+#     as DFlash2's other weights and MTP's work
+#   2 nodes: 65,536 + 512 positions, fp8, DCP 2, ROWS 4,096 in 2 SP parts, 2-bit experts; DFlash2 not run there: its
+#     work is three nodes' DFlash2 share x 1.5, an estimate
+#   3 nodes: 131,072 + 32,768 positions, fp8, DCP 3, CACHE=slots, PEER_Q, 3-bit experts, measured with an engine that
+#     splits the shares in three
+G = lambda x: int(x * GiB)
+DEFAULTS = {4: {"mtp": {"other_weights": G(8.11), "kv": G(14.55), "work": G(12.8)},
+                "dflash2": {"other_weights": G(6.515), "kv": G(14.323), "work": G(17.42)},
+                "none": {"other_weights": G(6.515), "kv": G(14.323), "work": G(12.8)}},
+            8: {"mtp": {"other_weights": G(5.625), "kv": G(41.962), "work": G(8.413)},
+                "dflash2": {"other_weights": G(4.704), "kv": G(44.246), "work": G(13.619)},
+                "none": {"other_weights": G(4.704), "kv": G(44.246), "work": G(8.413)}},
+            2: {"mtp": {"other_weights": G(11.52), "kv": G(1.70), "work": G(6.74)},
+                "dflash2": {"other_weights": G(8.92), "kv": G(1.67), "work": G(11.3)},
+                "none": {"other_weights": G(8.92), "kv": G(1.67), "work": G(6.47)}},
+            3: {"mtp": {"other_weights": G(10.57), "kv": G(2.24), "work": G(6.9)},
+                "dflash2": {"other_weights": G(8.69), "kv": G(2.24), "work": G(10.1)},
+                "none": {"other_weights": G(8.69), "kv": G(2.24), "work": G(6.9)}}}
 PHASES = ["checking", "weights", "kv", "prewarm", "ready"]
 # the KV cache's bytes a row on one rank (forward.zig State.bytes): every cache layer's latent row (fp4 432 B, fp8 656 B)
 # and the full-indexer layers' index row (144 B); GLM-5.3 with DFlash2: 78 cache layers, 21 of them with an indexer.
@@ -112,11 +147,40 @@ def log(msg):
     print(time.strftime("%F %T ") + msg, file=sys.stderr, flush=True)
 
 
+def defaults(world, drafter):
+    """DEFAULTS for `world` nodes and `drafter` (four nodes' for a node count not measured)."""
+    return DEFAULTS.get(world, DEFAULTS[4])[drafter]
+
+
 def experts_bytes(bits, world):
-    """The routed experts' bytes on one rank, as the engine's planBytes counts them."""
-    ir = I // world
-    per = {b: 3 * ((D * ir * b // 8 + 255) & ~255) + 6 * (D + ir) + 36 for b in set(bits)}
-    return sum(per[b] for b in bits)
+    """The routed experts' bytes on one rank, as the engine counts them (planBytes). A world dividing the 8 stored
+    shares joins 8 / world of them an expert: one matrix I / world wide. Three nodes hold the shares themselves, 2 or 3
+    of an expert (unit_shares), each a matrix I / 8 wide, with the expert's scales once and every expert's 3 unit
+    slots' scales and pointers whether held or not (the three-way engine's unit load): the most any rank holds."""
+    if S % world == 0:
+        ir = I // world
+        per = {b: 3 * ((D * ir * b // 8 + 255) & ~255) + 6 * (D + ir) + 36 for b in set(bits)}
+        return sum(per[b] for b in bits)
+    u, upe = I // S, -(-S // world)
+    unit = {b: 3 * ((D * u * b // 8 + 255) & ~255) for b in set(bits)}
+    held = [sum(unit_shares(i % E, FIRST + i // E, r, world) * unit[b] for i, b in enumerate(bits)) for r in range(world)]
+    return max(held) + len(bits) * (6 * D + upe * (6 * u + 40))
+
+
+def unit_shares(e, layer, rank, world):
+    """The stored shares of expert `e` of `layer` that rank `rank` holds over `world` (split.zig unitShares on
+    the three-way engine): S // world each, the S % world extra ones on the ranks from (e + layer + 1) % world on."""
+    base, rem = S // world, S % world
+    return base + ((rank + world - (e + layer + 1) % world) % world < rem)
+
+
+def split_problem(world, dcp, cache):
+    """Why CONF's node count, DCP and CACHE cannot run together (tf-glm53 and the engine refuse the same), or ""."""
+    if world % dcp:
+        return f"DCP={dcp} does not divide {world} nodes"
+    if cache == "pool" and dcp > 2:
+        return f"CACHE=pool takes DCP 1 or 2, not {dcp} (CACHE=slots, or DCP=1)"
+    return ""
 
 
 def set_nodes(text, nodes):
@@ -130,7 +194,7 @@ def set_nodes(text, nodes):
 def read_conf(conf):
     script = r'''. "$1" >/dev/null || exit 1
 printf 'NODE=%s\n' "${NODES[@]}"
-for v in NAME HOST PORT API_KEY_FILE EXTRA_ENV LAUNCHER_PORT LAUNCHER_HOST KV DCP CONTEXT STORE CACHE RESERVE_GB DRAFTER_KIND DRAFTER ATLAS_DIR ATLAS_GENERIC LAUNCH_DROP_CACHES LAUNCH_SNAPSHOTS; do printf '%s=%s\n' "$v" "${!v:-}"; done'''
+for v in NAME HOST PORT API_KEY_FILE EXTRA_ENV LAUNCHER_PORT LAUNCHER_HOST KV DCP CONTEXT STORE CACHE RESERVE_GB DRAFTER_KIND DRAFTER ATLAS_DIR ATLAS_GENERIC LAUNCH_DROP_CACHES LAUNCH_SNAPSHOTS RUNTIME IMAGE; do printf '%s=%s\n' "$v" "${!v:-}"; done'''
     out = subprocess.run(["bash", "-c", script, "_", conf], capture_output=True, text=True, check=True).stdout
     c = {"NODES": []}
     for line in out.splitlines():
@@ -168,6 +232,37 @@ def run_state(snap):
     return "saved" if snap.get("folded") else "running"
 
 
+def no_take():
+    """What a start took from saved allocations, when it took nothing: alloc (the allocation it started), its banks by
+    width, usage_from (the allocation whose usage it took over) and that usage (base)."""
+    return {"alloc": "", "bank_ids": {}, "usage_from": "", "base": None}
+
+
+def add_u64(x, y):
+    """Two u64 LE base64 arrays of [layers x experts] added (an empty one counts as zeros)."""
+    a = struct.unpack(f"<{L * E}Q", base64.b64decode(x)) if x else (0,) * (L * E)
+    b = struct.unpack(f"<{L * E}Q", base64.b64decode(y)) if y else (0,) * (L * E)
+    return base64.b64encode(struct.pack(f"<{L * E}Q", *(p + q for p, q in zip(a, b)))).decode()
+
+
+def usage_norm(u, saved_unix=0):
+    """A saved allocation's usage as it is kept now: rows {decode, prompt}, total {decode, prompt?} (u64 LE base64),
+    runs, since_unix (the first run's start), saved_unix. A usage saved before runs and since_unix counts as one run
+    from its started_unix. None when there is none or its totals do not hold."""
+    if not isinstance(u, dict) or not isinstance(u.get("total"), dict) or not u["total"].get("decode"):
+        return None
+    try:
+        total = {k: u["total"][k] for k in ("decode", "prompt") if u["total"].get(k)}
+        if any(len(base64.b64decode(v, validate=True)) != 8 * L * E for v in total.values()):
+            return None
+        rows = u.get("rows") or {}
+        return {"rows": {"decode": int(rows.get("decode", 0)), "prompt": int(rows.get("prompt", 0))}, "total": total,
+                "runs": int(u.get("runs", 1)), "since_unix": int(u.get("since_unix", u.get("started_unix", 0))),
+                "saved_unix": int(u.get("saved_unix", saved_unix))}
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 class Launcher:
     def __init__(self, a):
         self.conf = os.path.abspath(a.conf)
@@ -179,6 +274,10 @@ class Launcher:
         self.world = len(self.nodes)
         port = int(c.get("PORT") or 8000)
         host = c.get("HOST") or "127.0.0.1"
+        # how tf-glm53 runs the ranks: from the lane directory, or each in a container (RUNTIME=docker: the lane's
+        # containers are glm53-p<PORT>-r<rank>, their servers' host process ids the engine's)
+        self.runtime = c.get("RUNTIME") or "host"
+        self.cname = f"glm53-p{port}-r"
         self.engine = ("127.0.0.1" if host in ("0.0.0.0",) or host.startswith("127.") or host == "localhost" else host, port)
         # the lane's API keys, read again whenever the file changes (keys_now)
         self.key_file = c.get("API_KEY_FILE", "")
@@ -186,7 +285,7 @@ class Launcher:
         self.keys = set()
         self.keys_now()
         self.kv_format = c.get("KV") or "fp8"
-        self.dcp = int(c.get("DCP") or 2)
+        self.dcp = int(c.get("DCP") or (3 if self.world == 3 else 2))  # tf-glm53's default
         # the positions CONF asks for: a request's context and the conversation store beside it; a start in a format
         # that cannot hold them all gets a shorter context (kv_choice)
         self.context = int(c.get("CONTEXT") or 819200)
@@ -218,7 +317,8 @@ class Launcher:
         self.banks = os.path.join(self.pkg_local, "expert-plan", "banks.json")
         self.lock = threading.Lock()
         self.op_lock = threading.Lock()  # one start being admitted at a time
-        self.st = {"state": "stopped", "phase": "", "t0": 0.0, "bits": None, "set": "", "error": "", "seen": {}}
+        # what the start took from saved allocations (no_take: alloc, bank_ids, usage_from, base)
+        self.st = dict({"state": "stopped", "phase": "", "t0": 0.0, "bits": None, "set": "", "error": "", "seen": {}}, **no_take())
         self.job = None  # the start or stop thread
         self.proc = None  # tf-glm53 up / down
         self.cancel = False
@@ -232,6 +332,7 @@ class Launcher:
         self.completions = None  # the engine's completion_tokens_total at the last /health
         # Expert Atlas's own directory, apart from the lane's: saved allocations in allocs/{builtin,user}
         self.atlas = c.get("ATLAS_DIR") or os.path.join(self.pkg_local, "atlas")
+        self.alloc_lock = threading.Lock()  # one save, rename or delete of an allocation at a time
         # opt-in steps of a start or a stop: the page cache dropped (sudo), the nodes' state written down (snapshot)
         self.drop_caches = (c.get("LAUNCH_DROP_CACHES") or "0") == "1"
         self.snapshots = (c.get("LAUNCH_SNAPSHOTS") or "0") == "1"
@@ -248,13 +349,19 @@ class Launcher:
 
     def probe(self, rank):
         b = os.path.join(self.pkg, "bin", "tensorfold-native")
-        cmd = ("awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{print \"mem\", t*1024, a*1024}' /proc/meminfo; "
-               f"for p in $(pgrep -x tensorfold-nati); do e=$(readlink /proc/$p/exe); [ \"${{e% (deleted)}}\" = {b} ] && echo engine $p; done; "
+        mine_cmd = (f"for p in $(pgrep -x tensorfold-nati); do e=$(readlink /proc/$p/exe); [ \"${{e% (deleted)}}\" = {b} ] && echo engine $p; done; "
+                    if self.runtime != "docker" else
+                    f"for c in $(docker ps -q -f name='^/{self.cname}[0-9]+$'); do docker top $c -eo pid,comm | awk '$2 ~ /^tensorfold/ {{print \"engine\", $1}}'; done; ")
+        cmd = ("awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{print \"mem\", t*1024, a*1024}' /proc/meminfo; " + mine_cmd +
                "if g=$(nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader 2>&1); then echo \"$g\" | sed 's/^/gpu /'; "
                "else echo \"gpuerr $(echo \"$g\" | head -1)\"; fi; "
+               # the GPU's temperature, and the hottest thermal zone (on GB10 the SoC's ACPI zones) in millidegrees
+               "echo gputemp $(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null | head -1); "
+               "echo cputemp $(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | sort -n | tail -1); "
                "echo host $(hostname)")
         rc, out = self.ssh(self.nodes[rank], cmd)
-        n = {"name": self.names[rank], "rank": rank, "mem_total": 0, "mem_available": 0, "engine": False, "other": "", "gpu_error": "", "reachable": rc == 0}
+        n = {"name": self.names[rank], "rank": rank, "mem_total": 0, "mem_available": 0, "engine": False, "other": "", "gpu_error": "", "reachable": rc == 0,
+             "gpu_temp_c": None, "cpu_temp_c": None}
         mine, gpu = set(), []
         for line in out.splitlines():
             f = line.split(None, 1)
@@ -271,6 +378,15 @@ class Launcher:
                 n["gpu_error"] = f[1].strip() if len(f) == 2 else "nvidia-smi failed"
             elif f[0] == "host" and len(f) == 2:
                 n["name"] = self.names[rank] = f[1].strip()
+            elif f[0] in ("gputemp", "cputemp") and len(f) == 2:   # unreadable: left null
+                try:
+                    v = float(f[1].strip())
+                    if f[0] == "gputemp":
+                        n["gpu_temp_c"] = v
+                    else:
+                        n["cpu_temp_c"] = round(v / 1000, 1)
+                except ValueError:
+                    pass
         n["engine"] = bool(mine)
         n["pids"] = sorted(mine)
         n["other"] = ", ".join(sorted({os.path.basename(g[1]) if len(g) > 1 else g[0] for g in gpu if g[0] not in mine}))
@@ -450,7 +566,8 @@ class Launcher:
 
     def usage(self):
         """GET /v1/launch/usage: the learning data (the saved runs' decode picks, and the prompt picks of the runs that
-        carried them: prompt_runs, prompt_since_unix), the pending runs, the last run's bits."""
+        carried them: prompt_runs, prompt_since_unix), the pending runs, the last run's bits, and the last run itself
+        (last: its id, what became of it, when it started and was last read; null before any run)."""
         tot = self.read_json("usage-total.json") or {}
         snap = self.read_json("last-usage.json") or {}
         pend = self.read_json("pending.json")
@@ -460,7 +577,9 @@ class Launcher:
                 "bits": snap.get("bits") or tot.get("bits", ""), "saved_unix": tot.get("saved_unix", 0), "runs": tot.get("runs", 0),
                 "since_unix": tot.get("since_unix", 0), "prompt_runs": tot.get("prompt_runs", 0), "prompt_since_unix": tot.get("prompt_since_unix", 0),
                 "pending": {"rows": pend["rows"], "runs": pend["runs"], "since_unix": pend["since_unix"], "until_unix": pend.get("until_unix", pend["saved_unix"]),
-                            "prompt_rows": pend.get("prompt_rows", 0), "prompt_runs": pend.get("prompt_runs", 0)} if pend else None}
+                            "prompt_rows": pend.get("prompt_rows", 0), "prompt_runs": pend.get("prompt_runs", 0)} if pend else None,
+                "last": {"run": snap.get("run", ""), "state": run_state(snap), "started_unix": int(snap.get("started_unix", snap.get("saved_unix", 0))),
+                         "saved_unix": int(snap.get("saved_unix", 0))} if snap.get("total") else None}
 
     def learning(self, current=None, source="decode", saved=True):
         """The picks a expert of `source` ("decode" or "prompt"): the learning data's (the saved runs) unless `saved` is
@@ -559,16 +678,16 @@ class Launcher:
                 fresh = time.time() - self.node_t < 8
                 if not busy:
                     if up and s["state"] != "running":
-                        s.update(state="running", phase="", error="", t0=s["t0"] or time.time())
+                        s.update(state="running", phase="", error="", t0=s["t0"] or time.time(), **no_take())
                         log("the engine is up (not started by the launcher)")
                     elif down >= 3 and s["state"] == "running":
                         s.update(state="stopping" if procs else "failed", phase="", t0=time.time(),
                                  error="" if procs else "the engine stopped (not by the launcher)")
                         log(f"the engine does not answer: {s['error'] or 'its processes are still there'}")
                     elif not up and s["state"] in ("starting", "stopping") and fresh and not procs:
-                        s.update(state="stopped", phase="", bits=None, set="")
+                        s.update(state="stopped", phase="", bits=None, set="", **no_take())
                     elif not up and s["state"] in ("stopped", "failed") and fresh and procs:
-                        s.update(state="starting", phase="", t0=time.time(), error="")
+                        s.update(state="starting", phase="", t0=time.time(), error="", **no_take())
             with self.lock:
                 every = bool(self.node_info) and all(n["reachable"] for n in self.node_info)
             if not up and not busy and not procs and fresh and every:
@@ -616,7 +735,9 @@ class Launcher:
                 "done": base64.b64encode(done).decode(), "experts_done": "", "experts_loaded": sum(done) * E,
                 "layers_done": sum(done), "read_bytes": rb, "total_bytes": tb, "elapsed_ms": el,
                 "eta_ms": self.eta(phase, sum(done), seen) if s["state"] == "starting" else 0,
-                "bits": base64.b64encode(bits).decode() if bits else "", "set": s["set"], "error": s["error"],
+                "bits": base64.b64encode(bits).decode() if bits else "", "set": s["set"],
+                "alloc": s.get("alloc", "") if s["state"] != "stopped" else "",
+                "usage_from": s.get("usage_from", "") if s["state"] != "stopped" else "", "error": s["error"],
                 # the KV the start took: this launcher's start, else the last measured one (a launcher restarted while
                 # the engine runs), else CONF's
                 "kv": s.get("kv") or (self.read_json("last-start.json") or {}).get("kv") or {"format": self.kv_format, "context": self.context, "store": self.store, "dcp": self.dcp},
@@ -714,7 +835,7 @@ class Launcher:
         store asked (CONF's when None, "max": the rest); `reserve_gib`: what a node keeps for the OS (CONF's when None)."""
         fmt = kv or self.kv_format
         drafter = drafter or self.drafter_conf
-        default = DEFAULTS[drafter]
+        default = defaults(self.world, drafter)
         reserve = int(reserve_gib * GiB) if reserve_gib is not None else self.reserve
         nodes = nodes or self.node_info or self.probe_all()
         last = self.last_start(drafter)
@@ -827,19 +948,68 @@ class Launcher:
                 raise Fail(f"reserve_gib: {RESERVE_MIN_GIB} to {RESERVE_MAX_GIB} GiB")
         return b, name, {"kv": kv, "drafter": drafter, "context": context, "store": store, "reserve_gib": reserve}
 
-    def begin_start(self, bits, name, kv=None, drafter=None, context=None, store=None, reserve_gib=None):
+    def start_take(self, raw):
+        """POST /v1/launch/start: what the start takes from saved allocations. "alloc": its bits put in the body's place
+        (the bits sent beside it, for a launcher without allocations, are not used), its banks and its usage;
+        "usage_from" (without alloc): the bits sent and that allocation's usage (a plan whose shares were changed from an
+        opened allocation). The usage is a copy: a rename or a delete later leaves it. (None, body, no_take()) without
+        either; (error, body, None) when there is no such allocation (404) or a bank of the alloc is not this lane's (409)."""
+        try:
+            j = json.loads(raw or b"{}")
+        except ValueError:
+            return None, raw, no_take()
+        if not isinstance(j, dict) or (j.get("alloc") is None and j.get("usage_from") is None):
+            return None, raw, no_take()
+        take = no_take()
+        name = str(j["alloc"] if j.get("alloc") is not None else j["usage_from"])
+        a = self.alloc_read(name)
+        if a is None:
+            return (404, {"error": "NoSuchAlloc"}), raw, None
+        if j.get("alloc") is not None:
+            problem = self.alloc_problem(a)
+            if problem:
+                return (409, {"error": problem}), raw, None
+            j.pop("set", None)
+            j["bits"] = base64.b64encode(a["bits"]).decode()
+            take.update(alloc=name, bank_ids={w: a["banks"][w]["id"] for w in a["banks"]})
+        j.pop("alloc", None)
+        j.pop("usage_from", None)
+        take.update(usage_from=name, base=usage_norm(a.get("usage"), a.get("saved_unix", 0)))
+        return None, json.dumps(j).encode(), take
+
+    def keep_take(self, take):
+        """What a start that runs now took (launch/usage-base.json, with the run's id), so a launcher restarted while
+        it runs still knows it (restore_take)."""
+        self.write_json("usage-base.json", dict(take, run=self.run_id(), bank_ids={str(w): i for w, i in take["bank_ids"].items()},
+                                                saved_unix=int(time.time())))
+
+    def restore_take(self):
+        """A launcher started while the engine runs: what that start took, when usage-base.json is this run's."""
+        t = self.read_json("usage-base.json")
+        if not t or not t.get("run") or t["run"] != self.run_id():
+            return
+        with self.lock:
+            self.st.update(alloc=t.get("alloc", ""), usage_from=t.get("usage_from", ""), base=t.get("base"),
+                           bank_ids={int(w): i for w, i in (t.get("bank_ids") or {}).items()})
+        if t.get("alloc") or t.get("usage_from"):
+            log(f"the running start's allocation: {t.get('alloc') or '-'}, usage from {t.get('usage_from') or '-'}")
+
+    def begin_start(self, bits, name, kv=None, drafter=None, context=None, store=None, reserve_gib=None, take=None):
         # two starts at once: the second one 409, not a second worker
         if not self.op_lock.acquire(blocking=False):
             return 409, {"error": "a start is being admitted"}
         try:
-            return self.begin_start_locked(bits, name, kv, drafter, context, store, reserve_gib)
+            return self.begin_start_locked(bits, name, kv, drafter, context, store, reserve_gib, take or no_take())
         finally:
             self.op_lock.release()
 
-    def begin_start_locked(self, bits, name, kv=None, drafter=None, context=None, store=None, reserve_gib=None):
+    def begin_start_locked(self, bits, name, kv=None, drafter=None, context=None, store=None, reserve_gib=None, take=None):
         with self.lock:
             if self.st["state"] not in ("stopped", "failed") or (self.job and self.job.is_alive()):
                 return 409, {"error": f"not stopped ({self.st['state']})"}
+        if self.world not in ENGINE_WORLDS:
+            return 412, {"error": f"this engine does not run on {self.world} nodes yet (TP={self.world} needs the three-way engine): "
+                                  "plans only, a start is refused"}
         kv = kv or self.kv_format
         drafter = drafter or self.drafter_conf
         # the banks (and DFlash2's model) checked again now: a width without data refused here, not after the ranks start
@@ -853,11 +1023,12 @@ class Launcher:
         p = self.plan(bits, nodes=self.probe_all(), kv=kv, drafter=drafter, context=context, store=store, reserve_gib=reserve_gib)
         if p["verdict"] == "no":
             return 412, {"error": "the plan does not fit", "plan": p}
+        take = take or no_take()
         with self.lock:
             self.cancel = False
             self.st.update(state="starting", phase="checking", t0=time.time(), bits=bits, set=name, error="",
-                           seen={"checking": time.time()})
-            self.job = threading.Thread(target=self.run_start, args=(bits, name, kv, drafter, context, store, reserve_gib), daemon=True)
+                           seen={"checking": time.time()}, **take)
+            self.job = threading.Thread(target=self.run_start, args=(bits, name, kv, drafter, context, store, reserve_gib, take), daemon=True)
             self.job.start()
         return 200, {"state": "starting"}
 
@@ -866,7 +1037,7 @@ class Launcher:
             self.st["phase"] = phase
             self.st["seen"].setdefault(phase, time.time())
 
-    def run_start(self, bits, name, kv, drafter=None, context=None, store=None, reserve_gib=None):
+    def run_start(self, bits, name, kv, drafter=None, context=None, store=None, reserve_gib=None, take=None):
         ts = time.strftime("%Y%m%d-%H%M%S")
         try:
             self.preflight(ts)
@@ -889,11 +1060,16 @@ class Launcher:
                 self.st["kv"] = {"format": kv, "context": p["kv"]["context"], "store": p["kv"]["store"], "dcp": self.dcp,
                                  "reserve_gib": p["reserve"] / GiB}
                 self.st["drafter"] = drafter
-            plan_path = self.write_plan(bits, name, ts)
+            # a saved allocation: the plan maps each width to the bank it was saved with (its id in banks.json, the
+            # same manifest: start_take), and the swap banks of those widths are those banks' directories (a swap
+            # needs the plan's own bank of a width); the other widths keep the lane's first bank of each
+            take = take or no_take()
+            ids = take["bank_ids"]
+            plan_path = self.write_plan(bits, take["alloc"] or name, ts, ids, f"alloc {take['alloc']}" if take["alloc"] else "tf_launcher")
             # the ranges (the counts by bits) stay as the plan sets them; a re-sort while running moves experts between
             # them through the swap banks, one a width, the plan's own; the generic kernel lets every layer
             # take any width; 5 bits need the prompt kernel's 5-bit path
-            dirs = ",".join(f"{b['bits']}:{b['dir']}" for b in self.bank_list())
+            dirs = self.bank_dirs(ids)
             # the live counts the panel and a re-sort read (TF_GLM53_EXPERT_LIVE) on every start made here
             env = (f"TF_GLM53_EXPERT_PLAN={plan_path} TF_GLM53_LOAD_PROGRESS={self.progress} TF_GLM53_EXPERT_BANKS={dirs} TF_GLM53_EXPERT_LIVE=1"
                    f" TF_GLM53_MEM_RESERVE_GIB={max(1, int(p['reserve'] // GiB))}")
@@ -923,6 +1099,7 @@ class Launcher:
             if cancelled:
                 self.run_tf("down", "", ts)
                 raise Fail("cancelled")
+            self.keep_take(take)
             log("running")
         except Fail as e:
             log(f"start failed: {e}")
@@ -946,11 +1123,13 @@ class Launcher:
             saved = 0
         with self.lock:
             nodes, names = list(self.nodes), list(self.names)
-        return {"nodes": nodes, "names": [n if n != a else "" for n, a in zip(names, nodes)], "world": self.world, "saved_unix": saved}
+        return {"nodes": nodes, "names": [n if n != a else "" for n, a in zip(names, nodes)], "world": self.world,
+                "worlds": list(TESTED_WORLDS), "saved_unix": saved}
 
     def workers_of(self, body, required):
-        """The workers a check or a save names: world - 1 distinct addresses, the head not among them (CONF's when the
-        body names none and none is required)."""
+        """The workers a check or a save names: w - 1 distinct addresses for a node count w the panel offers (worlds; a
+        save of another count changes the world), the head not among them (CONF's when the body names none and none is
+        required)."""
         try:
             j = json.loads(body or b"{}")
         except ValueError:
@@ -961,8 +1140,8 @@ class Launcher:
         if not isinstance(w, list) or not all(isinstance(x, str) for x in w):
             raise Fail("workers: a list of addresses")
         w = [x.strip() for x in w]
-        if len(w) != self.world - 1:
-            raise Fail(f"workers: {self.world - 1} addresses (the head stays)")
+        if len(w) + 1 not in TESTED_WORLDS:
+            raise Fail("workers: " + " or ".join(str(n - 1) for n in TESTED_WORLDS) + " addresses (the head stays)")
         bad = [x for x in w if not ADDR.fullmatch(x)]
         if bad:
             raise Fail("workers: not an address: " + ", ".join(bad))
@@ -1189,6 +1368,22 @@ class Launcher:
                 out[w] = f"bank {s['id']}: " + "; ".join(f"{n}: {v}" for n, v in s["nodes"].items() if v != "ok")
         return out
 
+    def bank_by_id(self):
+        """Every bank of expert-plan/banks.json by its id (~ in dir and manifest expanded)."""
+        out = {}
+        for b in json.load(open(self.banks))["banks"]:
+            for k in ("dir", "manifest"):
+                if b.get(k):
+                    b[k] = os.path.expanduser(b[k])
+            out.setdefault(b["id"], b)
+        return out
+
+    def bank_dirs(self, ids=None):
+        """TF_GLM53_EXPERT_BANKS: a directory a width, the lane's first bank of it or the bank `ids` names for it."""
+        by_id = self.bank_by_id()
+        ids = ids or {}
+        return ",".join(f"{b['bits']}:{by_id[ids[b['bits']]]['dir'] if b['bits'] in ids else b['dir']}" for b in self.bank_list())
+
     def bank_list(self):
         """One bank a width from expert-plan/banks.json (the first listed)."""
         seen, out = set(), []
@@ -1201,8 +1396,11 @@ class Launcher:
                 out.append(b)
         return out
 
-    def write_plan(self, bits, name, ts):
+    def write_plan(self, bits, name, ts, ids=None, note="tf_launcher"):
+        """The bits as an expert plan (expert_plan.py mix): each width from the lane's first bank of it, or the bank
+        `ids` names for it (a saved allocation's), copied to every node at the same path."""
         banks = {b["bits"]: b["id"] for b in self.bank_list()}
+        banks.update(ids or {})
         used = sorted(set(bits))
         miss = [b for b in used if b not in banks]
         if miss:
@@ -1212,7 +1410,7 @@ class Launcher:
         open(raw, "wb").write(bits)
         tool = os.path.join(self.pkg_local, "tools", "quant", "expert_plan.py")
         cmd = [sys.executable, tool, "--banks", self.banks, "mix", "--bits", raw, "--map", ",".join(f"{b}:{banks[b]}" for b in used),
-               "--out", out, "--name", name or f"launch {ts}", "--note", "tf_launcher"]
+               "--out", out, "--name", name or f"launch {ts}", "--note", note]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
             raise Fail("the plan could not be written: " + (r.stderr or r.stdout).strip()[-300:])
@@ -1361,6 +1559,7 @@ class Launcher:
                 self.wait_memory_back()
             with self.lock:
                 self.st.update(state="stopped" if rc == 0 else "failed", phase="", bits=None, set="",
+                               **(no_take() if rc == 0 else {}),
                                error="" if rc == 0 else tail)
         except Fail as e:
             with self.lock:
@@ -1391,14 +1590,156 @@ class Launcher:
             time.sleep(1)
         log(f"memory after the stop not back within {limit} s: " + ", ".join(f"{k} {v / GiB:.1f} GiB" for k, v in now.items()))
 
-    def alloc_save(self, name, bits, source="", note="", basis=None):
-        """An allocation as glm53-expert-alloc v1 in ATLAS_DIR/allocs/user/<name>.json: the bits, a bank (id, manifest
-        sha256) a width used, the shape; never over a name (409), written beside and linked into place."""
-        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}", name or ""):
-            raise Fail("name: letters, digits, _ . - (64 at most)")
-        if len(bits) != L * E or any(v < 2 or v > 5 for v in bits):
-            raise Fail("bits: length or value")
+    # ---- saved allocations: ATLAS_DIR/allocs/user/<name>.json (glm53-expert-alloc v1) ----
+
+    def alloc_path(self, name):
+        return os.path.join(self.atlas, "allocs", "user", name + ".json")
+
+    def alloc_names(self):
+        """The names of the files in allocs/user (those that do not parse too)."""
+        try:
+            return [f[:-5] for f in os.listdir(os.path.join(self.atlas, "allocs", "user")) if f.endswith(".json")]
+        except FileNotFoundError:
+            return []
+
+    def alloc_read(self, name):
+        """A saved allocation checked: glm53-expert-alloc v1 of this model's shape, bits 2 to 5, a bank (id, manifest
+        sha256) for every width it uses; bits as bytes and banks by width. None when there is none or it does not hold
+        (logged)."""
+        if not ALLOC_NAME.fullmatch(name or "") or name not in self.alloc_names():  # the name exactly, on any file system
+            return None
+        try:
+            a = json.load(open(self.alloc_path(name)))
+            if a.get("format") != "glm53-expert-alloc" or a.get("version") != 1 or (a.get("first_layer"), a.get("layers"), a.get("experts")) != (FIRST, L, E):
+                raise ValueError(f"not glm53-expert-alloc v1 of {L} x {E} from layer {FIRST}")
+            b = base64.b64decode(a["bits"], validate=True)
+            if len(b) != L * E or any(v < 2 or v > 5 for v in b):
+                raise ValueError("bits: length or value")
+            banks = {int(w): v for w, v in a["banks"].items()}
+            if set(b) - set(banks) or any(not isinstance(banks[w].get("id"), str) or not isinstance(banks[w].get("manifest_sha256"), str) for w in set(b)):
+                raise ValueError("a width without its bank")
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            log(f"allocation {name}: left out ({e})")
+            return None
+        a["bits"], a["banks"] = b, {w: banks[w] for w in set(b)}
+        return a
+
+    def alloc_problem(self, a, lane=None):
+        """Why an allocation cannot start on this lane: a bank of a width it uses that banks.json lacks (or has for
+        another width): "BankMissing <id>"; one banks.json has with another manifest: "BankDiffers <id>"; "" when it can."""
+        lane = lane if lane is not None else self.bank_by_id()
+        for w in sorted(a["banks"]):
+            mine = a["banks"][w]
+            have = lane.get(mine["id"])
+            if not have or have.get("bits") != w:
+                return "BankMissing " + mine["id"]
+            if have.get("manifest_sha256") != mine["manifest_sha256"]:
+                return "BankDiffers " + mine["id"]
+        return ""
+
+    def alloc_view(self, name, a, lane, full=False):
+        """GET /v1/launch/allocs' item (full: /v1/launch/alloc's, with the bits, the shape, each bank's manifest and this
+        lane's directory of it, and the usage with its totals). counts, mean_bits, valid and problem computed here."""
+        b, used = a["bits"], sorted(a["banks"])
+        problem = self.alloc_problem(a, lane)
+        u = usage_norm(a.get("usage"), a.get("saved_unix", 0))
+        out = {"name": name, "saved_unix": int(a.get("saved_unix") or 0), "source": str(a.get("source", "")), "basis": str(a.get("basis", "")),
+               "note": str(a.get("note", "")), "counts": {str(w): b.count(w) for w in used}, "mean_bits": round(sum(b) / len(b), 4),
+               "banks": [{"bits": w, "id": a["banks"][w]["id"]} for w in used], "valid": not problem, "problem": problem,
+               "usage": {k: v for k, v in u.items() if k != "total"} if u else None}  # list: without the totals
+        if full:
+            def lane_dir(w):
+                have = lane.get(a["banks"][w]["id"])
+                return have["dir"] if have and have.get("bits") == w else ""
+            out.update(first_layer=FIRST, layers=L, experts=E, bits=base64.b64encode(b).decode(), usage=u,
+                       banks=[{"bits": w, "id": a["banks"][w]["id"], "manifest_sha256": a["banks"][w]["manifest_sha256"], "dir": lane_dir(w)} for w in used])
+        return out
+
+    def allocs_list(self):
+        """GET /v1/launch/allocs: the saved allocations, newest first, without their bits (a file that does not hold is
+        left out)."""
+        lane = self.bank_by_id()
+        items = [self.alloc_view(n, a, lane) for n in self.alloc_names() for a in [self.alloc_read(n)] if a is not None]
+        items.sort(key=lambda x: (-x["saved_unix"], x["name"]))
+        return {"world": self.world, "allocs": items}
+
+    def alloc_one(self, name):
+        """GET /v1/launch/alloc?name=NAME: one saved allocation with its bits (the name exactly)."""
+        a = self.alloc_read(name)
+        if a is None:
+            return 404, {"error": "NoSuchAlloc"}
+        return 200, self.alloc_view(name, a, self.bank_by_id(), full=True)
+
+    def alloc_in_use(self, name):
+        """The engine was started with this allocation and is not stopped (nor failed)."""
+        with self.lock:
+            return self.st.get("alloc") == name and self.st["state"] in ("starting", "running", "stopping")
+
+    def alloc_write(self, path, obj, replace=False):
+        """`obj` written beside `path` and linked into place (never over another file: FileExistsError), or moved over
+        it (replace)."""
+        tmp = path + f".tmp{os.getpid()}.{threading.get_ident()}.{time.time_ns()}"  # unique
+        with open(tmp, "w") as f:
+            json.dump(obj, f, indent=1)
+        try:
+            if replace:
+                os.replace(tmp, path)
+            else:
+                os.link(tmp, path)  # fails when the name exists: never over a saved one
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+
+    def alloc_save(self, name, bits, source="", note="", basis=None, engine=False, with_usage=False, replace=False):
+        """POST /v1/launch/allocs/save: an allocation as glm53-expert-alloc v1 in ATLAS_DIR/allocs/user/<name>.json:
+        the bits, a bank (id, manifest sha256) a width used (the lane's first of each width), the shape; never over a
+        name, in any case (409 Exists), unless replace: the old version (that name in any case) moved to allocs/trash/;
+        when its bits are the bits saved, the new file keeps its source and basis, and without a note its note (kept).
+        engine: the running engine's bits (those sent are not used); with_usage: the usage kept with them = the usage
+        the start took over (its allocation's) + this run's picks since its start (the launcher's snapshot,
+        last-usage.json), so two saves in one run count the run once; both 409 NotRunning while the engine does not
+        run."""
+        if not ALLOC_NAME.fullmatch(name or ""):
+            raise Fail("BadRequest: name: letters, digits, _ . - (64 at most)")
+        if len(str(note or "")) > NOTE_MAX:
+            raise Fail(f"BadRequest: note: {NOTE_MAX} characters at most")
+        if basis is not None and basis not in BASES:
+            raise Fail("BadRequest: basis: decode, prompt or both")
+        usage = None
+        if engine or with_usage:
+            with self.lock:
+                running = self.st["state"] == "running" and self.engine_up
+            if not running:
+                return 409, {"error": "NotRunning"}
+            self.keep_usage()  # this run's picks and bits, read now
+            snap = self.read_json("last-usage.json")
+            if not snap or run_state(snap) != "running" or snap.get("run") != self.run_id():
+                return 502, {"error": "the running engine's usage could not be read"}
+            if engine:
+                if not snap.get("bits"):
+                    return 502, {"error": "the running engine's bits could not be read"}
+                bits = base64.b64decode(snap["bits"])
+            if with_usage:
+                with self.lock:
+                    base = self.st.get("base")
+                usage = {"rows": {"decode": snap["rows"]["decode"] + (base["rows"]["decode"] if base else 0),
+                                  "prompt": snap["rows"].get("prompt", 0) + (base["rows"]["prompt"] if base else 0)},
+                         "total": {"decode": add_u64(base["total"]["decode"] if base else "", snap["total"]["decode"])},
+                         "runs": (base["runs"] if base else 0) + 1,
+                         "since_unix": (base["since_unix"] if base and base["since_unix"] else 0) or int(snap.get("started_unix", 0)),
+                         "saved_unix": int(time.time())}
+                if snap["total"].get("prompt") or (base and base["total"].get("prompt")):
+                    usage["total"]["prompt"] = add_u64(base["total"].get("prompt", "") if base else "", snap["total"].get("prompt", ""))
+        if bits is None or len(bits) != L * E or any(v < 2 or v > 5 for v in bits):
+            raise Fail("BadRequest: bits: length or value")
         banks = {b["bits"]: b for b in self.bank_list()}
+        if engine:  # the banks the running start was given (a saved allocation's), the lane's first for the others
+            with self.lock:
+                ids = dict(self.st.get("bank_ids") or {}) if self.st.get("alloc") else {}
+            by_id = self.bank_by_id()
+            banks.update({w: by_id[i] for w, i in ids.items() if i in by_id})
         miss = sorted({v for v in bits} - set(banks))
         if miss:
             raise Fail("no bank for " + ", ".join(f"{b} bit" for b in miss))
@@ -1409,32 +1750,119 @@ class Launcher:
         if source:
             obj["source"] = str(source)[:32]
         if note:
-            obj["note"] = str(note)[:2000]
+            obj["note"] = str(note)
         if basis is not None:
-            if basis not in BASES:
-                raise Fail("basis: decode, prompt or both")
             obj["basis"] = basis
-        d = os.path.join(self.atlas, "allocs", "user")
-        os.makedirs(d, exist_ok=True)
-        path = os.path.join(d, name + ".json")
-        tmp = path + f".tmp{os.getpid()}.{threading.get_ident()}.{time.time_ns()}"  # unique
-        with open(tmp, "w") as f:
-            json.dump(obj, f, indent=1)
+        if usage:
+            obj["usage"] = usage
+        os.makedirs(os.path.dirname(self.alloc_path(name)), exist_ok=True)
+        with self.alloc_lock:
+            old = next((n for n in self.alloc_names() if n.lower() == name.lower()), None)
+            if old is not None and not replace:
+                return 409, {"error": "Exists"}
+            # over an allocation of the same bits: how they were made stays (source, basis); no note keeps its note
+            kept = []
+            prev = self.alloc_read(old) if old is not None else None
+            if prev is not None:
+                if prev["bits"] == bytes(bits):
+                    for k in ("source", "basis"):
+                        obj.pop(k, None)
+                        if prev.get(k):
+                            obj[k] = prev[k]
+                        kept.append(k)
+                if not note and prev.get("note"):
+                    obj["note"] = prev["note"]
+                    kept.append("note")
+            path = self.alloc_path(name)
+            tmp = path + f".tmp{os.getpid()}.{threading.get_ident()}.{time.time_ns()}"  # unique
+            with open(tmp, "w") as f:
+                json.dump(obj, f, indent=1)
+            try:
+                trash = self.alloc_trash(old) if old is not None else ""  # written first: the old one moves only then
+                os.link(tmp, path)
+            except FileExistsError:
+                return 409, {"error": "Exists"}
+            finally:
+                os.unlink(tmp)
+        log(f"allocation {name} saved ({source or '-'}{', engine' if engine else ''}"
+            f"{', with usage of ' + str(usage['runs']) + ' runs' if usage else ''}{', replacing ' + old + ' (' + trash + ')' if old else ''}"
+            f"{', kept ' + '/'.join(kept) if kept else ''}): "
+            f"{dict(sorted((str(w), bits.count(w)) for w in set(bits)))}")
+        return 200, dict({"saved": name, "replaced": old is not None}, **({"kept": kept} if kept else {}))
+
+    def alloc_trash(self, name):
+        """The file of allocation `name` moved to ATLAS_DIR/allocs/trash/<name>-<unix>.json (-<unix>.1 and on within one
+        second); its path under ATLAS_DIR. Called under alloc_lock."""
+        trash = os.path.join(self.atlas, "allocs", "trash")
+        os.makedirs(trash, exist_ok=True)
+        t, k = int(time.time()), 0
+        while os.path.exists(os.path.join(trash, f"{name}-{t}{'.' + str(k) if k else ''}.json")):
+            k += 1
+        dest = f"{name}-{t}{'.' + str(k) if k else ''}.json"
+        os.rename(self.alloc_path(name), os.path.join(trash, dest))
+        return "allocs/trash/" + dest
+
+    def alloc_rename(self, raw):
+        """POST /v1/launch/allocs/rename {name, to}: the file and the name in it; a name differing only in case from its
+        own is allowed, another allocation's (in any case) is not (409 Exists); not the running start's (409 InUse)."""
         try:
-            os.link(tmp, path)  # fails when the name exists: never over a saved one
-        except FileExistsError:
-            return 409, {"error": "Exists"}
-        finally:
-            os.unlink(tmp)
-        log(f"allocation {name} saved ({source or '-'}): {dict(sorted((str(w), bits.count(w)) for w in set(bits)))}")
-        return 200, {"saved": name}
+            j = json.loads(raw or b"{}")
+            name, to = j["name"], j["to"]
+        except (ValueError, KeyError, TypeError):
+            return 400, {"error": "BadRequest"}
+        if not isinstance(name, str) or not isinstance(to, str) or not ALLOC_NAME.fullmatch(to):
+            return 400, {"error": "BadRequest"}
+        with self.alloc_lock:
+            if not ALLOC_NAME.fullmatch(name) or name not in self.alloc_names():
+                return 404, {"error": "NoSuchAlloc"}
+            if to == name:
+                return 200, {"renamed": to}
+            if any(n.lower() == to.lower() and n != name for n in self.alloc_names()):
+                return 409, {"error": "Exists"}
+            if self.alloc_in_use(name):
+                return 409, {"error": "InUse"}
+            src, dst = self.alloc_path(name), self.alloc_path(to)
+            try:
+                obj = json.load(open(src))
+                obj["name"] = to
+            except (OSError, ValueError, TypeError) as e:
+                return 500, {"error": f"Failed: {e}"}
+            if to.lower() == name.lower():  # the case only: in place, then the file renamed (one file on any file system)
+                self.alloc_write(src, obj, replace=True)
+                os.rename(src, dst)
+            else:
+                try:
+                    self.alloc_write(dst, obj)
+                except FileExistsError:
+                    return 409, {"error": "Exists"}
+                os.unlink(src)
+        log(f"allocation {name} renamed {to}")
+        return 200, {"renamed": to}
+
+    def alloc_delete(self, raw):
+        """POST /v1/launch/allocs/delete {name}: the file moved to ATLAS_DIR/allocs/trash/<name>-<unix>.json (put back by
+        hand), not removed; not the running start's (409 InUse)."""
+        try:
+            name = json.loads(raw or b"{}")["name"]
+        except (ValueError, KeyError, TypeError):
+            return 400, {"error": "BadRequest"}
+        if not isinstance(name, str):
+            return 400, {"error": "BadRequest"}
+        with self.alloc_lock:
+            if not ALLOC_NAME.fullmatch(name) or name not in self.alloc_names():
+                return 404, {"error": "NoSuchAlloc"}
+            if self.alloc_in_use(name):
+                return 409, {"error": "InUse"}
+            dest = self.alloc_trash(name)
+        log(f"allocation {name} deleted: {dest}")
+        return 200, {"deleted": name, "trash": dest}
 
     def resort(self, body):
         """POST /v1/launch/resort: the experts re-sorted by this run's picks (the saved runs too only with
         include_saved true) with the counts by bits kept: each expert's share of its layer's
         picks, every expert ranked by it (as the launch screen ranks them), the widest bits to the first.
         While the engine runs: its own picks and bits; apply asks the engine for the swap and saves the allocation as
-        sort-<time>. While it does not: the last run's picks and
+        sort-<time> (save false: nothing saved, the panel names one itself). While it does not: the last run's picks and
         bits (launch/last-usage.json, whatever became of it: saved, pending or discarded, said in basis.run); apply saves
         the allocation (applied false, saved, for the next start). An engine that cannot swap (TF_GLM53_MULTI): the
         allocation saved and 409 asking for a stop and a start with it."""
@@ -1444,6 +1872,15 @@ class Launcher:
             raise Fail("bad JSON")
         include = bool(j.get("include_current", True))
         with_saved = bool(j.get("include_saved", False))
+        # save false: nothing saved (the panel names an allocation itself, POST /v1/launch/allocs/save)
+        keep = j.get("save", True)
+        if not isinstance(keep, bool):
+            raise Fail("save: true or false")
+        # include_alloc: the usage the start took over (the allocation it was started from or took the usage of)
+        # added to this run's picks, while the engine runs
+        with_alloc = j.get("include_alloc", False)
+        if not isinstance(with_alloc, bool):
+            raise Fail("include_alloc: true or false")
         run = None
         if self.engine_up:
             s, raw = self.engine_get("/v1/experts/usage?window=10", 10)
@@ -1458,29 +1895,36 @@ class Launcher:
             if with_saved and run["state"] == "saved":
                 include = False
         cur = bytearray(base64.b64decode(u["bits"]))
-        basis = j.get("basis", "both")  # both: prefill and decode weighed equally (the mean of their shares)
+        base, ufrom = None, ""
+        if with_alloc and run is None:
+            with self.lock:
+                base, ufrom = self.st.get("base"), self.st.get("usage_from", "")
+        basis = j.get("basis", "both")  # both: decode weighed DECODE_WEIGHT, prefill the rest
         if basis not in BASES:
             raise Fail("basis: decode, prompt or both")
-        # each source's share of its layer (an expert's picks / the layer's picks); "both" averages the sources that
-        # have rows
+        # each source's share of its layer (an expert's picks / the layer's picks); "both" weighs the sources that have
+        # rows, decode by DECODE_WEIGHT and prompt by the rest (one source alone counts in full)
         share = [0.0] * (L * E)
-        used = 0
+        weight = 0.0
         got = {}
         for src in ("decode", "prompt") if basis == "both" else (basis,):
             counts, rows, runs = self.learning(u if include else None, src, with_saved)
+            if base and base["total"].get(src):
+                counts = [x + y for x, y in zip(counts, struct.unpack(f"<{L * E}Q", base64.b64decode(base["total"][src])))]
+                rows += base["rows"].get(src, 0)
             got[src] = (rows, runs)
             if rows == 0:
                 continue
-            used += 1
+            w = (DECODE_WEIGHT if src == "decode" else 1 - DECODE_WEIGHT) if basis == "both" else 1.0
+            weight += w
             for li in range(L):
                 tot = sum(counts[li * E:(li + 1) * E])
                 if tot:
                     for e in range(E):
-                        share[li * E + e] += counts[li * E + e] / tot
-        if used == 0:
+                        share[li * E + e] += w * counts[li * E + e] / tot
+        if weight == 0:
             return 412, {"error": f"no usage to sort by ({basis}{', the saved runs' if with_saved else ', this run'})"}
-        if used > 1:
-            share = [x / used for x in share]
+        share = [x / weight for x in share]
         rows, runs = got.get("decode", (0, 0)) if basis != "prompt" else (0, 0)
         prows, pruns = got.get("prompt", (0, 0))
         frozen = set()
@@ -1502,7 +1946,9 @@ class Launcher:
                                          "prompt_runs": pruns, "include_current": include, "include_saved": with_saved,
                                          "current_rows": u["rows"]["decode"] if include and basis != "prompt" else 0,
                                          "current_prompt_rows": u["rows"].get("prompt", 0) if include and basis != "decode" else 0,
-                                         "engine": "running" if run is None else "stopped", "run": run},
+                                         "engine": "running" if run is None else "stopped", "run": run,
+                                         "alloc": {"name": ufrom, "rows": base["rows"]["decode"], "prompt_rows": base["rows"]["prompt"],
+                                                   "runs": base["runs"]} if base else None},
                # measured (TP4): 64 experts over 2 layers in 983 ms, 118 over 63 in 8.2 s, 9,756 over 75 in 83-90 s
                "est_ms": int(layers * 115 + (up + down) * 8) if up + down else 0}
         # the widths it moves experts to (stopped: every width, the next start loads them all): a bank some node lacks
@@ -1513,13 +1959,16 @@ class Launcher:
             return 200, out
         if miss:
             return 412, dict(out, error="no data for " + ", ".join(f"{w} bit ({why})" for w, why in miss.items()))
-        what = f"re-sort by {basis} ({'saved runs + ' if with_saved else ''}{'this run' if run is None else 'the last run ' + str(run['run']) + ' (' + run['state'] + ')'}): {rows} decode rows, {prows} prompt rows"
+        what = f"re-sort by {basis} ({'saved runs + ' if with_saved else ''}{'the usage of ' + ufrom + ' + ' if base else ''}{'this run' if run is None else 'the last run ' + str(run['run']) + ' (' + run['state'] + ')'}): {rows} decode rows, {prows} prompt rows"
         if run is not None:
-            code, res = self.alloc_save(time.strftime("sort-%Y%m%d-%H%M%S"), bytes(target), "sort", what, basis)
-            if code != 200:
-                return code, dict(out, error=res.get("error", "the allocation was not saved"))
-            log(f"re-sort while stopped ({basis}, the last run {run['run']}, {run['state']}): {up + down} experts ({up} up, {down} down) in {layers} layers; saved {res.get('saved', '')}")
-            return 200, dict(out, applied=False, saved=res.get("saved", ""))
+            saved = ""
+            if keep:
+                code, res = self.alloc_save(time.strftime("sort-%Y%m%d-%H%M%S"), bytes(target), "sort", what[:NOTE_MAX], basis)
+                if code != 200:
+                    return code, dict(out, error=res.get("error", "the allocation was not saved"))
+                saved = res.get("saved", "")
+            log(f"re-sort while stopped ({basis}, the last run {run['run']}, {run['state']}): {up + down} experts ({up} up, {down} down) in {layers} layers; saved {saved or '-'}")
+            return 200, dict(out, applied=False, saved=saved)
         if up + down == 0:
             return 200, dict(out, applied=False)
         c = http.client.HTTPConnection(*self.engine, timeout=30)
@@ -1530,21 +1979,26 @@ class Launcher:
         finally:
             c.close()
         if st == 409 and b"UnsupportedWithMulti" in sw:
-            # TF_GLM53_MULTI swaps nothing while it runs: the allocation kept for a start after a stop
-            code, res = self.alloc_save(time.strftime("sort-%Y%m%d-%H%M%S"), bytes(target), "sort", what, basis)
-            return 409, dict(out, applied=False, saved=res.get("saved", "") if code == 200 else "",
-                             error="this engine runs TF_GLM53_MULTI and changes no bits while it runs: stop it and start with the saved allocation")
+            # TF_GLM53_MULTI swaps nothing while it runs: the allocation kept for a start after a stop (save false:
+            # not kept, the panel saves the estimate under a name of its own)
+            saved = ""
+            if keep:
+                code, res = self.alloc_save(time.strftime("sort-%Y%m%d-%H%M%S"), bytes(target), "sort", what[:NOTE_MAX], basis)
+                saved = res.get("saved", "") if code == 200 else ""
+            return 409, dict(out, applied=False, saved=saved, multi=True,
+                             error="this engine runs TF_GLM53_MULTI and changes no bits while it runs" +
+                                   (": stop it and start with the saved allocation" if keep else ""))
         if st == 409:
             return 409, {"error": "busy"}
         if st != 200:
             return st, {"error": f"the engine's swap: {sw.decode(errors='replace')[:200]}"}
-        name = time.strftime("sort-%Y%m%d-%H%M%S")
         saved = ""
-        try:
-            code, res = self.alloc_save(name, bytes(target), "sort", what, basis)
-            saved = res.get("saved", "")
-        except (Fail, OSError) as e:
-            log(f"re-sort allocation not saved: {e}")
+        if keep:
+            try:
+                code, res = self.alloc_save(time.strftime("sort-%Y%m%d-%H%M%S"), bytes(target), "sort", what[:NOTE_MAX], basis)
+                saved = res.get("saved", "")
+            except (Fail, OSError) as e:
+                log(f"re-sort allocation not saved: {e}")
         log(f"re-sort ({basis}, {'saved runs + this run' if with_saved and include else 'saved runs' if with_saved else 'this run'}): {up + down} experts ({up} up, {down} down) in {layers} layers by {rows} decode rows, {prows} prompt rows; saved {saved or '-'}")
         return 200, dict(out, applied=True, saved=saved, swap=json.loads(sw))
 
@@ -1619,7 +2073,7 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET" and path == "/v1/launch/nodes":
                 with Lr.lock:
                     info, t = list(Lr.node_info), Lr.node_t
-                nodes = [{k: n[k] for k in ("name", "rank", "mem_total", "mem_available", "engine", "other", "gpu_error")} for n in info]
+                nodes = [{k: n.get(k) for k in ("name", "rank", "mem_total", "mem_available", "engine", "other", "gpu_error", "gpu_temp_c", "cpu_temp_c")} for n in info]
                 return self.send_json(200, {"age_ms": int((time.time() - t) * 1000) if t else 0, "nodes": nodes})
             if method == "GET" and path == "/v1/launch/usage":
                 return self.send_json(200, Lr.usage())
@@ -1635,8 +2089,11 @@ class Handler(BaseHTTPRequestHandler):
                 bits, _, o = Lr.bits_of(self.body())
                 return self.send_json(200, Lr.plan(bits, **o))
             if method == "POST" and path == "/v1/launch/start":
-                bits, name, o = Lr.bits_of(self.body())
-                return self.send_json(*Lr.begin_start(bits, name, **o))
+                err, raw, take = Lr.start_take(self.body())
+                if err:
+                    return self.send_json(*err)
+                bits, name, o = Lr.bits_of(raw)
+                return self.send_json(*Lr.begin_start(bits, name, take=take, **o))
             if method == "POST" and path == "/v1/launch/stop":
                 return self.send_json(*Lr.begin_stop(self.body()))
             if method == "POST" and path in ("/v1/launch/usage/save", "/v1/launch/usage/discard"):
@@ -1645,10 +2102,25 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST" and path == "/v1/launch/allocs/save":
                 try:
                     j = json.loads(self.body() or b"{}")
-                    bits = base64.b64decode(j["bits"], validate=True)
-                except (ValueError, KeyError, TypeError):
-                    raise Fail("bad JSON or bits")
-                return self.send_json(*Lr.alloc_save(str(j.get("name", "")), bits, j.get("source", ""), j.get("note", ""), j.get("basis")))
+                    engine, with_usage = j.get("engine", False), j.get("with_usage", False)
+                    if not isinstance(engine, bool) or not isinstance(with_usage, bool):
+                        raise TypeError("engine, with_usage: true or false")
+                    bits = None if engine else base64.b64decode(j["bits"], validate=True)  # engine: the engine's bits
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    raise Fail("BadRequest: JSON, bits, engine or with_usage")
+                replace = j.get("replace", False)
+                if not isinstance(replace, bool):
+                    raise Fail("BadRequest: replace: true or false")
+                return self.send_json(*Lr.alloc_save(str(j.get("name", "")), bits, j.get("source", ""), j.get("note", ""), j.get("basis"),
+                                                     engine=engine, with_usage=with_usage, replace=replace))
+            if method == "GET" and path == "/v1/launch/allocs":
+                return self.send_json(200, Lr.allocs_list())
+            if method == "GET" and path == "/v1/launch/alloc":
+                return self.send_json(*Lr.alloc_one((parse_qs(urlparse(self.path).query).get("name") or [""])[0]))
+            if method == "POST" and path == "/v1/launch/allocs/rename":
+                return self.send_json(*Lr.alloc_rename(self.body()))
+            if method == "POST" and path == "/v1/launch/allocs/delete":
+                return self.send_json(*Lr.alloc_delete(self.body()))
             if method == "POST" and path == "/v1/launch/resort":
                 return self.send_json(*Lr.resort(self.body()))
             if path.startswith("/v1/launch/"):
@@ -1738,11 +2210,15 @@ def main():
     if lr.world not in TESTED_WORLDS and os.environ.get("ATLAS_ANY_WORLD") != "1":
         sys.exit(f"the control panel runs on {' or '.join(map(str, TESTED_WORLDS))} nodes in this release, not {lr.world}: "
                  "start the engine with tf-glm53 up instead")
+    why = split_problem(lr.world, lr.dcp, lr.cache)
+    if why:
+        sys.exit(f"{lr.conf}: {why}")
     Handler.L = lr
     lr.probe_all()
     lr.engine_up = lr.health()
     if lr.engine_up:
         lr.st.update(state="running", t0=time.time())
+        lr.restore_take()  # what the running start took from saved allocations
     elif any(n["engine"] for n in lr.node_info):
         lr.st.update(state="starting", t0=time.time())
     threading.Thread(target=lr.watch, daemon=True).start()

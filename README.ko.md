@@ -6,6 +6,8 @@ GB10을 1개씩 탑재한 NVIDIA DGX Spark 4대 또는 8대에서 텐서 병렬 
 
 이것은 [TensorFold](https://github.com/ashhart/TensorFold) 1.0.2를 바탕으로 Fiore-lab이 만든 비공식 파생물이며, TensorFold 프로젝트의 릴리스가 아닙니다. TensorFold의 코드를 포함하고, 풀사이즈 GLM-5.3용 엔진(`zig/src/families/glm_moe_dsa/`, `zig/kernels/cuda/glm53/`)을 추가했으며, TensorFold의 문서는 제외했습니다. 그 문서들은 다른 모델, 가중치, 머신에 대해 설명하기 때문입니다. TensorFold 자체에 대해서는 해당 저장소를 참고하세요.
 
+**AI 어시스턴트를 사용해 이 시스템을 이해하거나 실행하려면** [glm53/release/AI-GUIDE.md](glm53/release/AI-GUIDE.md)(릴리스 아카이브에서는 `AI-GUIDE.md`)를 건네주세요. AI 어시스턴트를 위해 쓴 한 페이지 설명으로, 시스템의 전체 구조, 목적, 준비와 사용 방법, 할 수 있는 것과 할 수 없는 것(실측 수치 포함), 자세한 내용이 있는 곳을 담고 있습니다(영어).
+
 ## 주요 기능
 
 - 텐서 병렬 8 또는 4. KV 캐시는 랭크 쌍에 나누어 둡니다(decode 컨텍스트 병렬 2). 엔진과 모델은 최대 1M 토큰(1,048,576)까지 처리할 수 있으며, 컨텍스트 길이는 DGX Spark의 메모리로 정해집니다. **8대에서 1M**(FP8 KV 캐시), **4대에서 약 800K(819,200)**(4비트 KV 캐시)입니다. 설정 예시는 819,200과 737,280으로 되어 있습니다. 같은 메모리로 8대는 `CONTEXT=1048576` `STORE=589824`, 4대는 `CONTEXT=819200` `STORE=18080`으로 설정할 수 있습니다(KV 풀은 `CONTEXT` + `STORE`개의 위치를 보유합니다).
@@ -14,16 +16,16 @@ GB10을 1개씩 탑재한 NVIDIA DGX Spark 4대 또는 8대에서 텐서 병렬 
 - 매 라운드 드래프트를 모델이 검증합니다. 드래프트는 기본적으로 GLM-5.3 자체의 MTP 레이어가 만들며, 선택 사항인 DFlash2 drafter를 쓸 수도 있습니다. 어느 경우든 응답은 모델 자신이 선택한 것입니다.
 - `/metrics`(Prometheus 텍스트)와 `/health`는 실행 중인 요청도 집계하므로, 모니터는 요청이 실행되는 동안에도 prefill과 decode 속도, 캐시 적중, 드래프트 채택을 읽을 수 있습니다. `METRICS_LISTEN`을 설정하면 다른 호스트의 모니터를 위해 이 두 가지를 별도의 주소에서 읽기 전용으로 제공합니다.
 
-## Expert Atlas(r3-102의 새 기능, 4대)
+## Expert Atlas(r3-102의 새 기능)
 
 GLM-5.3은 토큰마다 레이어당 256개의 routed expert 가운데 8개를 고르며, expert마다 선택되는 빈도가 크게 다릅니다. Expert Atlas는 19,200개의 routed expert(레이어 3부터 77까지)를 각각 자기 폭(2, 3, 4 또는 5비트)으로 불러와, 한정된 메모리 안에서 많이 쓰이는 expert일수록 더 많은 비트를 갖게 합니다.
 
 - **뱅크**: 폭별 routed expert로, Hugging Face에 있습니다: `fiore-lab/GLM-5.3-EXL3-Experts-2bit`, `-3bit`, `-4bit`, `-5bit`. 패널은 모든 노드에 갖춰진 폭만 고르게 합니다.
 - **컨트롤 패널**: 런처(`./tf-glm53 launcher`)가 제공하는 페이지입니다. 시작 전에는 폭을 계획하고 노드별 메모리, 계획이 들어가는지, KV 캐시에 남는 양을 보여 주며, 엔진의 시작과 정지도 여기서 합니다. 엔진이 도는 동안에는 각 토큰이 고른 expert, 선택된 expert의 평균 폭, 속도를 보여 줍니다.
-- **사용 횟수**: 엔진은 프롬프트의 각 행과 디코딩된 각 토큰이 고른 expert를 셉니다. 정지할 때 그 실행의 횟수를 학습 데이터에 더할 수 있습니다. 계획은 이 횟수로 expert를 정렬합니다(첫 실행을 저장하기 전에는 Fiore-lab이 측정해 페이지에 함께 넣은 횟수로 정렬합니다).
-- **전문가 최적화**: 폭별 expert 수는 그대로 두고 사용 빈도로 expert를 다시 정렬합니다. 같은 메모리에서, 모델이 실제로 고르는 expert의 평균 폭이 올라갑니다. 실행 중인 엔진에서도(4대에서 75개 레이어 전체 변경에 83–90초, 요청 사이에 수행), 정지한 엔진에서도(다음 시작을 위해) 쓸 수 있습니다.
+- **사용 기록**: 엔진은 프롬프트의 각 행과 디코딩된 각 토큰이 고른 expert를 셉니다. 저장한 할당은 저장에 쓰인 실행들의 사용 기록을 함께 가지며, 기록은 할당과 함께 움직입니다. 열어서 다시 실행하면 그 실행분이 기록에 더해집니다. 계획은 이 기록으로 expert를 정렬합니다(기록이 없는 계획은 Fiore-lab이 측정해 페이지에 함께 넣은 횟수로 정렬합니다). 자동으로는 아무것도 저장하지 않습니다. 정지할 때 할당과 그 기록에 이름을 붙여 저장합니다.
+- **전문가 최적화**: 폭별 expert 수는 그대로 두고 실행의 사용 기록으로 로드된 expert를 다시 정렬합니다. 같은 메모리에서, 모델이 실제로 고르는 expert의 평균 폭이 올라갑니다. 실행 중인 엔진에서 씁니다(4대에서 75개 레이어 전체 변경에 83–90초, 요청 사이에 수행). 결과는 필요할 때 이름을 붙여 저장하고, 이후 시작에서 엽니다.
 
-이번 릴리스의 컨트롤 패널은 4대에서 동작합니다. 8대는 지금까지처럼 routed expert를 모두 4비트로 실행합니다. 자세한 내용은 `packaging/RUNTIME.md`("The control panel", 영어)와 `glm53/release/T4.md`(영어)에 있습니다.
+컨트롤 패널은 4대 또는 8대에서 동작하며, 대수는 시작 화면에서 고릅니다. `./tf-glm53 up`은 지금까지처럼 체크포인트의 폭으로 시작합니다. 자세한 내용은 `packaging/RUNTIME.md`("The control panel", 영어)와 `glm53/release/T4.md`(영어)에 있습니다.
 
 ## 요구 사항
 
@@ -31,11 +33,18 @@ GLM-5.3은 토큰마다 레이어당 256개의 routed expert 가운데 8개를 �
 - DGX OS(Ubuntu 24.04), NVIDIA 드라이버 580 이상, cuBLAS 13.
 - 모든 노드에 NCCL 2.30.7. NVIDIA의 `nvidia-nccl-cu13` wheel을 pip으로 풀어 놓은 것입니다(`packaging/RUNTIME.md`).
 - 노드 수에 맞는 Fiore-lab의 EXL3 체크포인트(Hugging Face). 모든 노드의 같은 경로에 둡니다. 8대는 `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`(390 GB), 4대는 `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`(344.6 GB)입니다. 4대용 체크포인트는 레이어 3부터 77까지의 routed expert 가운데 사용 빈도가 낮은 절반을 3비트, 나머지를 4비트로 담고 있으며, 그 밖에는 8대용 체크포인트와 같습니다.
-- 컨트롤 패널(4대)에는 3비트와 4비트 expert 뱅크(277.9 GB와 368.5 GB. 8대용 체크포인트를 4비트 뱅크로 쓸 수 있습니다. 4비트만으로는 문맥이 짧아집니다)와, 런처를 위한 각 노드의 `python3`이 필요합니다.
+- 컨트롤 패널에는 사용하는 폭의 expert 뱅크가 필요합니다. 4대에서는 3비트와 4비트 뱅크(277.9 GB와 368.5 GB. 8대용 체크포인트를 4비트 뱅크로 쓸 수 있습니다. 4비트만으로는 문맥이 짧아집니다)와, 런처를 위한 각 노드의 `python3`이 필요합니다.
 
 ## 실행
 
-릴리스 아카이브 `tensorfold-r3-102-linux-aarch64.tar.gz`를 내려받아 함께 들어 있는 `RUNTIME.md`(이 저장소에서는 [packaging/RUNTIME.md](packaging/RUNTIME.md), 영어)를 따르세요. 4대든 8대든 같은 아카이브와 실행 스크립트를 사용합니다. `glm53.conf.example`(8대) 또는 `glm53.t4.conf.example`(4대, [glm53/release/T4.md](glm53/release/T4.md) 참고, 영어)를 `glm53.conf`로 복사하고 노드, 네트워크 이름, NCCL, 가중치, drafter를 채운 다음 `./tf-glm53 deploy`와 `./tf-glm53 up`을 실행합니다. 주소와 API 키 파일을 지정하지 않으면 서버는 `127.0.0.1`에서 OpenAI chat API를 제공합니다.
+릴리스는 컨테이너 이미지와, 같은 파일을 담은 아카이브의 두 가지 형태로 배포합니다. 권장하는 방법은 이미지입니다. 이미지를 쓰면 각 노드에는 Docker와 NVIDIA Container Toolkit(DGX OS에는 둘 다 있습니다)만 있으면 되고, 서버의 라이브러리는 필요하지 않습니다.
+
+```sh
+docker pull ghcr.io/fiore-labo/fiore-glm5.3:r3-102            # 각 노드에서
+mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/fiore-glm5.3:r3-102 install /out
+```
+
+그런 다음 `glm53.conf`에 `RUNTIME=docker`와 `IMAGE`를 설정하고 아래와 같이 진행합니다([packaging/RUNTIME.md](packaging/RUNTIME.md) "Running in containers", 영어). Docker를 쓰지 않는 경우: 릴리스 아카이브 `tensorfold-r3-102-linux-aarch64.tar.gz`를 내려받아 함께 들어 있는 `RUNTIME.md`(이 저장소에서는 [packaging/RUNTIME.md](packaging/RUNTIME.md), 영어)를 따르세요. 4대든 8대든 같은 아카이브와 실행 스크립트를 사용합니다. `glm53.conf.example`(8대) 또는 `glm53.t4.conf.example`(4대, [glm53/release/T4.md](glm53/release/T4.md) 참고, 영어)를 `glm53.conf`로 복사하고 노드, 네트워크 이름, NCCL, 가중치, drafter를 채운 다음 `./tf-glm53 deploy`와 `./tf-glm53 up`을 실행합니다. 주소와 API 키 파일을 지정하지 않으면 서버는 `127.0.0.1`에서 OpenAI chat API를 제공합니다.
 
 ## Drafter
 
@@ -84,7 +93,6 @@ zig build dist -Dversion=r3-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platf
 
 - GB10 시스템 4대 또는 8대만 지원합니다. 다른 GPU나 다른 랭크 수는 지원하지 않습니다.
 - 한 번에 요청 하나만 실행합니다. 다른 요청은 32개까지 도착한 순서대로 기다리고(채팅 제목을 만드는 요청은 맨 뒤), 32개를 넘으면 서버가 거절합니다(503, 스트리밍에서는 오류 이벤트). 서브에이전트를 병렬로 실행하는 에이전트라면 서브에이전트를 다른 모델에 연결하는 편이 좋습니다.
-- 이번 릴리스의 컨트롤 패널은 4대에서 동작합니다.
 - 그 밖의 제한 사항은 `packaging/RUNTIME.md`에 있습니다.
 
 ## 라이선스와 크레딧

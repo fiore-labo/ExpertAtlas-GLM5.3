@@ -347,18 +347,25 @@ pub fn main(init: std.process.Init) !u8 {
             const ntok = body.len / @as(usize, if (wide) 8 else 4);
             const toks = try gpa.alloc(i64, ntok);
             for (toks, 0..) |*t, i| t.* = if (wide) std.mem.readInt(i64, body[i * 8 ..][0..8], .little) else std.mem.readInt(i32, body[i * 4 ..][0..4], .little);
+            // rank 0's rows go to the file as they come (a window of 7,167 rows is 4.4 GB: TP=2 has no room to hold it)
+            // rank 0 の行は来たそばからファイルへ (7,167 行の窓は 4.4 GB: TP=2 にはそれを抱える余裕がない)
             const Sink2 = struct {
-                rows: std.ArrayList(u8) = .empty,
-                gpa: std.mem.Allocator,
-                keep: bool,
+                f: ?*std.c.FILE = null,
+                bytes: usize = 0,
                 first: usize = std.math.maxInt(usize),
                 fn row(c: *anyopaque, pos: usize, lg: []const f32) anyerror!void {
                     const self: *@This() = @ptrCast(@alignCast(c));
                     if (self.first == std.math.maxInt(usize)) self.first = pos;
-                    if (self.keep) try self.rows.appendSlice(self.gpa, std.mem.sliceAsBytes(lg));
+                    const f = self.f orelse return;
+                    const b = std.mem.sliceAsBytes(lg);
+                    if (std.c.fwrite(b.ptr, 1, b.len, f) != b.len) return error.ScoreWrite;
+                    self.bytes += b.len;
                 }
             };
-            var sk: Sink2 = .{ .gpa = gpa, .keep = rank == 0 };
+            var sk: Sink2 = .{};
+            var lname: [512]u8 = undefined;
+            const name = try std.fmt.bufPrintSentinel(&lname, "{s}-{d}.f32", .{ args[9], fi }, 0);
+            if (rank == 0) sk.f = std.c.fopen(name, "wb") orelse return error.ScoreOpen;
             if (sel_dump) |pfx| {
                 var nb: [512]u8 = undefined;
                 const spath = try std.fmt.bufPrintSentinel(&nb, "{s}-r{d}-{d}.sel", .{ pfx, rank, fi }, 0);
@@ -370,12 +377,10 @@ pub fn main(init: std.process.Init) !u8 {
                 _ = std.c.fclose(f);
                 ss.f = null;
             }
-            if (rank == 0) {
-                const name = try std.fmt.allocPrint(gpa, "{s}-{d}.f32", .{ args[9], fi });
-                try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = name, .data = sk.rows.items });
-                std.debug.print("[score] {s}: {d} tokens, positions {d}..{d} ({d} rows of {d}) in {d} ms -> {s}\n", .{ path, ntok, sk.first, ntok - 2, sk.rows.items.len / 4 / (eng.world * eng.vshare), eng.world * eng.vshare, ts.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds(), name });
+            if (sk.f) |f| {
+                if (std.c.fclose(f) != 0) return error.ScoreWrite;
+                std.debug.print("[score] {s}: {d} tokens, positions {d}..{d} ({d} rows of {d}) in {d} ms -> {s}\n", .{ path, ntok, sk.first, ntok - 2, sk.bytes / 4 / (eng.world * eng.vshare), eng.world * eng.vshare, ts.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds(), name });
             }
-            sk.rows.deinit(gpa);
             gpa.free(toks);
             gpa.free(raw);
         }
