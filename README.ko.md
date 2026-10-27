@@ -27,13 +27,21 @@ GLM-5.3은 토큰마다 레이어당 256개의 routed expert 가운데 8개를 �
 
 컨트롤 패널은 4대 또는 8대에서 동작하며, 대수는 시작 화면에서 고릅니다. `./tf-glm53 up`은 지금까지처럼 체크포인트의 폭으로 시작합니다. 자세한 내용은 `packaging/RUNTIME.md`("The control panel", 영어)와 `glm53/release/T4.md`(영어)에 있습니다.
 
+## 가중치 직접 만들기
+
+가중치는 코드처럼 읽을 수 없습니다. 특정 상황에서만 다르게 동작하도록 손댄 가중치도 겉보기에는 다른 가중치와 같고, 그런 가중치가
+실제로 나타나기 시작했습니다. Fiore-lab의 가중치에 의존할 필요는 없습니다. 이 레시피가 읽는 모든 가중치 파일(8대용·4대용 체크포인트와
+2·3·4·5비트 expert 뱅크)은 Z.AI의 공식 BF16 체크포인트([zai-org/GLM-5.3-BF16](https://huggingface.co/zai-org/GLM-5.3-BF16))에서
+[glm53/weights](glm53/weights/README.md)(영어)의 도구로 만들 수 있으며, 절차·하드웨어·실측 시간이 그곳에 있습니다. 직접 만든 파일은
+Fiore-lab의 것과 구조가 같고 같은 방식으로 로드됩니다.
+
 ## 요구 사항
 
 - 하나의 RoCE v2 네트워크로 연결된 DGX Spark(GB10) 4대 또는 8대. 첫 번째 노드에서 모든 노드에 비밀번호 없이 ssh로 접속할 수 있어야 합니다. 4대라면 노드당 100 Gb/s 포트 하나로 충분합니다.
 - DGX OS(Ubuntu 24.04), NVIDIA 드라이버 580 이상, cuBLAS 13.
 - 모든 노드에 NCCL 2.30.7. NVIDIA의 `nvidia-nccl-cu13` wheel을 pip으로 풀어 놓은 것입니다(`packaging/RUNTIME.md`).
 - 노드 수에 맞는 Fiore-lab의 EXL3 체크포인트(Hugging Face). 모든 노드의 같은 경로에 둡니다. 8대는 `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`(390 GB), 4대는 `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`(344.6 GB)입니다. 4대용 체크포인트는 레이어 3부터 77까지의 routed expert 가운데 사용 빈도가 낮은 절반을 3비트, 나머지를 4비트로 담고 있으며, 그 밖에는 8대용 체크포인트와 같습니다.
-- 모든 가중치 파일은 Fiore-lab의 파일 없이 Z.AI의 공식 BF16 체크포인트에서 직접 만들 수도 있습니다(`glm53/weights/README.md`, 영어).
+- 모든 가중치 파일은 Fiore-lab의 파일 없이 Z.AI의 공식 BF16 체크포인트에서 직접 만들 수도 있습니다([glm53/weights](glm53/weights/README.md), 영어).
 - 컨트롤 패널에는 사용하는 폭의 expert 뱅크가 필요합니다. 4대에서는 3비트와 4비트 뱅크(277.9 GB와 368.5 GB. 8대용 체크포인트를 4비트 뱅크로 쓸 수 있습니다. 4비트만으로는 문맥이 짧아집니다)와, 런처를 위한 각 노드의 `python3`이 필요합니다.
 
 ## 실행

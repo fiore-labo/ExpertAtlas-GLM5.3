@@ -27,13 +27,20 @@ GLM-5.3 为每个 token 在每层 256 个路由专家中选出 8 个，而不同
 
 控制面板可在四个或八个节点上运行，节点数在启动界面上选择；`./tf-glm53 up` 仍按检查点的位宽启动。详见 `packaging/RUNTIME.zh-CN.md`（“控制面板”）和 `glm53/release/T4.zh-CN.md`。
 
+## 自己制作权重
+
+权重不能像代码那样阅读：被改动过、在某些情况下表现不同的权重，看起来与其他权重没有区别，而这样的权重已经开始出现。你不必依赖
+Fiore-lab 的权重。本方案加载的每个权重文件（八节点和四节点检查点，以及 2、3、4、5 位的专家 bank）都可以用
+[glm53/weights](glm53/weights/README.zh-CN.md) 中的工具，从 Z.AI 官方的 BF16 检查点（[zai-org/GLM-5.3-BF16](https://huggingface.co/zai-org/GLM-5.3-BF16)）
+制作；步骤、硬件和实测时间都在那里。制作出的文件与 Fiore-lab 的布局相同，加载方式也相同。
+
 ## 所需环境
 
 - 四台或八台 DGX Spark 系统（GB10），位于同一 RoCE v2 网络上，且每台都能从第一台通过 ssh 免密码访问。四个节点时，每个节点一个 100 Gb/s 端口即可。
 - DGX OS（Ubuntu 24.04），NVIDIA 驱动 580 或更高版本，以及 cuBLAS 13。
 - 每个节点上都有 NCCL 2.30.7：即 NVIDIA 的 `nvidia-nccl-cu13` wheel，由 pip 解包（见 `packaging/RUNTIME.md`）。
 - 与节点数相符的 Fiore-lab EXL3 检查点（Hugging Face），在每个节点上放在相同路径下：八个节点用 `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`（390 GB），四个节点用 `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`（344.6 GB）。四节点检查点中，第 3 至 77 层的路由专家里使用最少的一半为 3 bit，其余为 4 bit；其他部分与八节点检查点相同。
-- 所有权重文件也都可以不使用 Fiore-lab 的任何文件，从 Z.AI 官方的 BF16 检查点自行制作（`glm53/weights/README.zh-CN.md`）。
+- 所有权重文件也都可以不使用 Fiore-lab 的任何文件，从 Z.AI 官方的 BF16 检查点自行制作（[glm53/weights](glm53/weights/README.zh-CN.md)）。
 - 控制面板需要所用位宽的专家 bank，四个节点时为 3 bit 和 4 bit 的 bank（277.9 GB 和 368.5 GB；八节点检查点可以作为 4 bit bank；只有 4 bit 时上下文会更短），以及供启动器使用的各节点上的 `python3`。
 
 ## 运行

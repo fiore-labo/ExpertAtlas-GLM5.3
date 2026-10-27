@@ -6,12 +6,15 @@
 # stay on the host and are mounted read-only. tf-glm53 with RUNTIME=docker starts one container a rank (RUNTIME.md).
 # Build in a freshly unpacked archive: the build refuses any file the archive's SHA256SUMS does not list (a glm53.conf,
 # logs, a key file), so nothing of an installation goes into the image.
-FROM ubuntu:24.04 AS nccl
+# Both stages start from one Ubuntu 24.04, pinned by its multi-arch index digest, so a rebuild starts from the same
+# base. Move it deliberately (for Ubuntu's security updates) to the digest `docker buildx imagetools inspect
+# ubuntu:24.04` gives, in both lines.
+FROM ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c AS nccl
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends python3-pip ca-certificates \
  && pip3 install --break-system-packages --no-deps --target /opt/nccl nvidia-nccl-cu13==2.30.7
 
-FROM ubuntu:24.04
+FROM ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget libibverbs1 ibverbs-providers \
  && wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/sbsa/cuda-keyring_1.1-1_all.deb \

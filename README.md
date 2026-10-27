@@ -57,6 +57,15 @@ The control panel runs on four or eight nodes, the count chosen on its launch sc
 them with the checkpoint's widths. `packaging/RUNTIME.md` ("The control panel") and `glm53/release/T4.md` give the
 details.
 
+## Making the weights yourself
+
+Weights cannot be read like code: weights altered to behave differently in some cases look like any others, and such
+weights have begun to appear. You do not have to rely on Fiore-lab's. Every weight file this recipe loads, the eight-
+and four-node checkpoints and the 2-, 3-, 4- and 5-bit expert banks, can be made from Z.AI's official BF16 checkpoint
+([zai-org/GLM-5.3-BF16](https://huggingface.co/zai-org/GLM-5.3-BF16)) with the tools in
+[glm53/weights](glm53/weights/README.md), which give the steps, the hardware and the measured times. The files you make
+have the same layout as Fiore-lab's and load the same way.
+
 ## What you need
 
 - Four or eight DGX Spark systems (GB10) on one RoCE v2 network, each reachable from the first over ssh without a
@@ -68,7 +77,7 @@ details.
   for four. The four-node checkpoint holds the routed experts of layers 3 to 77 at 3 bits for the least used half and
   at 4 bits for the rest; everything else is as in the eight-node checkpoint.
 - Every weight file can also be made yourself from Z.AI's official BF16 checkpoint, without any of Fiore-lab's files:
-  `glm53/weights/README.md`.
+  [glm53/weights](glm53/weights/README.md).
 - For the control panel: the expert banks of the widths it uses, on four nodes the 3- and 4-bit banks (277.9 and
   368.5 GB; the eight-node checkpoint can serve as the 4-bit bank; with 4 bits alone the context is shorter), and
   `python3` on the nodes for the launcher.
