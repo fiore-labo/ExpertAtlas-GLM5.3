@@ -7,9 +7,9 @@ directory: the eight-node and four-node checkpoints, and the 2, 3, 4 and 5-bit e
 need any file Fiore-lab published on Hugging Face.
 
 Why this matters: weights cannot be read like code. Weights altered to behave differently in some cases look like any
-other weights, and such weights have begun to appear. Fiore-lab makes its weights carefully, but you have no way to
-check that from the files. If you make them yourself, the only weights you rely on are Z.AI's own, and this page shows
-how.
+other weights. Fiore-lab makes its weights carefully, but you have no way to check that from the files, and you may not
+want to rely on weights whose making you cannot check. If you make them yourself, the only weights you rely on are
+Z.AI's own, and this page shows how.
 
 ## What you rely on, and what you do not need
 

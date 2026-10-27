@@ -59,8 +59,8 @@ details.
 
 ## Making the weights yourself
 
-Weights cannot be read like code: weights altered to behave differently in some cases look like any others, and such
-weights have begun to appear. You do not have to rely on Fiore-lab's. Every weight file this recipe loads, the eight-
+Weights cannot be read like code: weights altered to behave differently in some cases look like any others, so you
+may not want to rely on weights whose making you cannot check. You do not have to rely on Fiore-lab's. Every weight file this recipe loads, the eight-
 and four-node checkpoints and the 2-, 3-, 4- and 5-bit expert banks, can be made from Z.AI's official BF16 checkpoint
 ([zai-org/GLM-5.3-BF16](https://huggingface.co/zai-org/GLM-5.3-BF16)) with the tools in
 [glm53/weights](glm53/weights/README.md), which give the steps, the hardware and the measured times. The files you make
