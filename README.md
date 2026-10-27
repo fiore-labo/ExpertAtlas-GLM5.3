@@ -39,8 +39,8 @@ GLM-5.3 picks 8 of 256 routed experts a layer for each token, and some experts a
 Expert Atlas loads each of the 19,200 routed experts (layers 3 to 77) at its own width, 2, 3, 4 or 5 bits, so the
 experts in most use get the most bits for the memory there is:
 
-- **Banks**: the routed experts at each width, on Hugging Face: `fiore-lab/GLM-5.3-EXL3-Experts-2bit`, `-3bit`,
-  `-4bit` and `-5bit`. The panel offers the widths every node holds.
+- **Banks**: the routed experts at each width, on Hugging Face: [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit), [-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit),
+  [-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) and [-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit). The panel offers the widths every node holds.
 - **The control panel**: a page served by the launcher (`./tf-glm53 launcher`). Before a start it plans the widths
   and shows each node's memory, whether the plan fits and the KV cache left; it starts and stops the engine. While
   the engine runs it shows the experts each token picks, the mean width of the picked experts and the speeds.
@@ -56,6 +56,30 @@ experts in most use get the most bits for the memory there is:
 The control panel runs on four or eight nodes, the count chosen on its launch screen; `./tf-glm53 up` still starts
 them with the checkpoint's widths. `packaging/RUNTIME.md` ("The control panel") and `glm53/release/T4.md` give the
 details.
+
+## Weights on Hugging Face
+
+| What | Repository | Size | Used for |
+|---|---|---|---|
+| Eight-node checkpoint: every weight, the routed experts at 4 bits | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | eight nodes; the control panel on four or eight nodes (it serves as the 4-bit bank too) |
+| Four-node checkpoint: the least used half of the routed experts at 3 bits | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | four nodes without the control panel |
+| Expert bank, 2 bits | [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit) | 187.3 GB | the control panel |
+| Expert bank, 3 bits | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | the control panel (on four nodes, for the full context) |
+| Expert bank, 4 bits | [fiore-lab/GLM-5.3-EXL3-Experts-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) | 368.5 GB | the control panel, on a node without the eight-node checkpoint |
+| Expert bank, 5 bits | [fiore-lab/GLM-5.3-EXL3-Experts-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit) | 459.1 GB | the control panel |
+
+A bank holds the 19,200 routed experts at one width; the control panel loads each expert from the bank of the width
+its plan gives it. **Download only the banks of the widths you want to use**: the panel offers the widths every node
+holds. For the control panel on four nodes, the eight-node checkpoint and the 3-bit bank (668 GB together) are
+enough. Every node needs the same files at the same paths. Download once and copy to the other nodes, for example:
+
+```sh
+python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
+~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks --local-dir ~/models/GLM-5.3-EXL3-8x-DGX-Sparks
+```
+
+[packaging/RUNTIME.md](packaging/RUNTIME.md) has the copy to the other nodes and the checks (`./tf-glm53 verify`,
+`./tf-glm53 verify-banks`).
 
 ## Making the weights yourself
 
@@ -73,7 +97,7 @@ have the same layout as Fiore-lab's and load the same way.
 - DGX OS (Ubuntu 24.04) with the NVIDIA driver 580 or later and cuBLAS 13.
 - NCCL 2.30.7 on every node: NVIDIA's `nvidia-nccl-cu13` wheel, unpacked by pip (`packaging/RUNTIME.md`).
 - Fiore-lab's EXL3 checkpoint for the number of nodes, on Hugging Face, at the same path on every node:
-  `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks` (390 GB) for eight nodes, `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks` (344.6 GB)
+  [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) (390 GB) for eight nodes, [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) (344.6 GB)
   for four. The four-node checkpoint holds the routed experts of layers 3 to 77 at 3 bits for the least used half and
   at 4 bits for the rest; everything else is as in the eight-node checkpoint.
 - Every weight file can also be made yourself from Z.AI's official BF16 checkpoint, without any of Fiore-lab's files:

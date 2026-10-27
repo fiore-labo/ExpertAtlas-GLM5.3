@@ -20,12 +20,34 @@
 
 GLM-5.3 为每个 token 在每层 256 个路由专家中选出 8 个，而不同专家被选中的频率相差很大。Expert Atlas 让 19,200 个路由专家（第 3 至 77 层）各自以自己的位宽（2、3、4 或 5 bit）载入，在有限的内存中让使用最多的专家得到最多的位：
 
-- **bank**：每种位宽的路由专家，位于 Hugging Face：`fiore-lab/GLM-5.3-EXL3-Experts-2bit`、`-3bit`、`-4bit` 和 `-5bit`。面板提供每个节点都具备的位宽。
+- **bank**：每种位宽的路由专家，位于 Hugging Face：[fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit)、[-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit)、[-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) 和 [-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit)。面板提供每个节点都具备的位宽。
 - **控制面板**：由启动器（`./tf-glm53 launcher`）提供的页面。启动前它规划位宽，并显示每个节点的内存、计划能否容纳以及 KV 缓存还剩多少；也从这里启动和停止引擎。引擎运行时，它显示每个 token 选中的专家、被选中专家的平均位宽和速度。
 - **使用记录**：引擎统计每个提示行和每个解码 token 选中的专家。保存的配置带有保存它的那些运行的使用记录，记录随配置一起移动：打开后再次运行，这次运行的部分会加入记录。计划按该记录为专家排序（没有记录的计划按 Fiore-lab 测得并随页面提供的次数排序）。不会自动保存任何内容：停止时为配置及其记录命名并保存。
 - **专家优化**：保持每种位宽的专家数量不变，按本次运行的使用记录重新排列已载入的专家：相同内存下，模型实际选中的专家的平均位宽更高。在运行中的引擎上进行（在四个节点上，75 层的完整更改用了 83 至 90 秒，在请求之间进行）；需要时为结果命名并保存，供以后启动时打开。
 
 控制面板可在四个或八个节点上运行，节点数在启动界面上选择；`./tf-glm53 up` 仍按检查点的位宽启动。详见 `packaging/RUNTIME.zh-CN.md`（“控制面板”）和 `glm53/release/T4.zh-CN.md`。
+
+## Hugging Face 上的权重
+
+| 内容 | 仓库 | 大小 | 用途 |
+|---|---|---|---|
+| 八节点检查点：全部权重（路由专家为 4 位） | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | 八节点运行；四节点或八节点的控制面板（同时作为 4 位专家 bank） |
+| 四节点检查点：使用最少的一半路由专家为 3 位 | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | 不使用控制面板的四节点运行 |
+| 专家 bank，2 位 | [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit) | 187.3 GB | 控制面板 |
+| 专家 bank，3 位 | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | 控制面板（四节点时用于取满上下文） |
+| 专家 bank，4 位 | [fiore-lab/GLM-5.3-EXL3-Experts-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) | 368.5 GB | 控制面板（在没有八节点检查点的节点上） |
+| 专家 bank，5 位 | [fiore-lab/GLM-5.3-EXL3-Experts-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit) | 459.1 GB | 控制面板 |
+
+专家 bank 是把 19,200 个路由专家统一为一种位宽的权重；控制面板为每个专家从其计划位宽的 bank 中加载。**只需下载你想用的位宽的
+bank**（面板只提供每个节点都具备的位宽）。在四个节点上使用控制面板时，八节点检查点加 3 位专家 bank（共 668 GB）即可。每个节点
+都需要在相同路径下放置相同的文件。在一台机器上下载后复制到其他节点，例如：
+
+```sh
+python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
+~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks --local-dir ~/models/GLM-5.3-EXL3-8x-DGX-Sparks
+```
+
+复制到其他节点的方法以及校验（`./tf-glm53 verify`、`./tf-glm53 verify-banks`）见 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)。
 
 ## 自己制作权重
 
@@ -39,7 +61,7 @@ GLM-5.3 为每个 token 在每层 256 个路由专家中选出 8 个，而不同
 - 四台或八台 DGX Spark 系统（GB10），位于同一 RoCE v2 网络上，且每台都能从第一台通过 ssh 免密码访问。四个节点时，每个节点一个 100 Gb/s 端口即可。
 - DGX OS（Ubuntu 24.04），NVIDIA 驱动 580 或更高版本，以及 cuBLAS 13。
 - 每个节点上都有 NCCL 2.30.7：即 NVIDIA 的 `nvidia-nccl-cu13` wheel，由 pip 解包（见 `packaging/RUNTIME.md`）。
-- 与节点数相符的 Fiore-lab EXL3 检查点（Hugging Face），在每个节点上放在相同路径下：八个节点用 `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`（390 GB），四个节点用 `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`（344.6 GB）。四节点检查点中，第 3 至 77 层的路由专家里使用最少的一半为 3 bit，其余为 4 bit；其他部分与八节点检查点相同。
+- 与节点数相符的 Fiore-lab EXL3 检查点（Hugging Face），在每个节点上放在相同路径下：八个节点用 [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks)（390 GB），四个节点用 [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks)（344.6 GB）。四节点检查点中，第 3 至 77 层的路由专家里使用最少的一半为 3 bit，其余为 4 bit；其他部分与八节点检查点相同。
 - 所有权重文件也都可以不使用 Fiore-lab 的任何文件，从 Z.AI 官方的 BF16 检查点自行制作（[glm53/weights](glm53/weights/README.zh-CN.md)）。
 - 控制面板需要所用位宽的专家 bank，四个节点时为 3 bit 和 4 bit 的 bank（277.9 GB 和 368.5 GB；八节点检查点可以作为 4 bit bank；只有 4 bit 时上下文会更短），以及供启动器使用的各节点上的 `python3`。
 

@@ -21,12 +21,36 @@
 
 GLM-5.3 はトークンごとに、1 層 256 個の routed expert から 8 個を選びます。expert によって選ばれる頻度は大きく違います。Expert Atlas は 19,200 個の routed expert（層 3〜77）を、それぞれ自分の幅（2・3・4・5 ビット）で読み込み、限られたメモリの中で、よく使われる expert ほど多くのビットを持たせます。
 
-- **バンク**: 各幅の routed expert で、Hugging Face にあります。`fiore-lab/GLM-5.3-EXL3-Experts-2bit`、`-3bit`、`-4bit`、`-5bit`。パネルが選ばせるのは、全ノードにそろっている幅です。
+- **バンク**: 各幅の routed expert で、Hugging Face にあります。[fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit)、[-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit)、[-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit)、[-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit)。パネルが選ばせるのは、全ノードにそろっている幅です。
 - **コントロールパネル**: ランチャー（`./tf-glm53 launcher`）が出すページです。起動の前には幅を計画し、各ノードのメモリ、計画が収まるか、KV キャッシュに残る量を表示します。エンジンの起動と停止もここから行います。稼働中は、各トークンが選ぶ expert、選ばれた expert の平均の幅、速さを表示します。
 - **利用記録**: エンジンは、プロンプトの各行と decode の各トークンが選ぶ expert を数えます。保存した割り当ては保存元の稼働の利用記録を持ち、記録は割り当てと一緒に動きます。開いてもう一度稼働させると、その稼働の分が記録に加わります。計画はこの記録で expert を並べます（記録の無い計画は、Fiore-lab が測ってページに同梱した回数で並べます）。自動では何も保存しません。停止時に、割り当てとその記録に名前を付けて保存します。
 - **エキスパート最適化**: 幅ごとの expert の個数はそのままで、稼働の利用記録で読み込み済みの expert を並べ替えます。同じメモリで、モデルが実際に選ぶ expert の平均の幅が上がります。稼働中のエンジンで使えます（4 台で 75 層全部の変更に 83〜90 秒、リクエストの合間に行います）。結果は必要なときに名前を付けて保存し、後の起動で開きます。
 
 コントロールパネルは 4 台または 8 台で動き、台数は起動画面で選びます。`./tf-glm53 up` はこれまでどおりチェックポイントの幅で起動します。詳しくは `packaging/RUNTIME.ja.md`（「コントロールパネル」）と `glm53/release/T4.ja.md` にあります。
+
+## Hugging Face の重み
+
+| 何 | リポジトリ | 大きさ | 使う場面 |
+|---|---|---|---|
+| 8 台用チェックポイント：すべての重み（routed expert は 4 bit） | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | 8 台での起動。4 台・8 台のコントロールパネル（4 bit のバンクも兼ねる） |
+| 4 台用チェックポイント：使われ方の少ない半分の routed expert を 3 bit に | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | コントロールパネルを使わない 4 台での起動 |
+| エキスパートのバンク 2 bit | [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit) | 187.3 GB | コントロールパネル |
+| エキスパートのバンク 3 bit | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | コントロールパネル（4 台で文脈を最大まで取るときに必要） |
+| エキスパートのバンク 4 bit | [fiore-lab/GLM-5.3-EXL3-Experts-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) | 368.5 GB | コントロールパネル（8 台用チェックポイントがないノードで） |
+| エキスパートのバンク 5 bit | [fiore-lab/GLM-5.3-EXL3-Experts-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit) | 459.1 GB | コントロールパネル |
+
+バンクは、19,200 個の routed expert を 1 つの幅でそろえたものです。コントロールパネルは、エキスパートごとに、計画で決めた幅の
+バンクから読み込みます。**バンクは、使いたい幅の分だけダウンロードすれば足ります**（パネルが選ばせるのは、全ノードにそろって
+いる幅です）。4 台でコントロールパネルを使うなら、8 台用チェックポイントと 3 bit のバンク（合わせて 668 GB）で足ります。
+どのノードにも、同じファイルを同じパスに置きます。1 台でダウンロードして、ほかのノードに写します。例:
+
+```sh
+python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
+~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks --local-dir ~/models/GLM-5.3-EXL3-8x-DGX-Sparks
+```
+
+ほかのノードへの写し方と照合（`./tf-glm53 verify`、`./tf-glm53 verify-banks`）は [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)
+にあります。
 
 ## 重みを自分で作る
 
@@ -41,7 +65,7 @@ Fiore-lab のものと形が同じで、同じように読み込まれます。
 - 1 つの RoCE v2 ネットワークでつながった DGX Spark（GB10）4 台または 8 台。どのノードにも 1 台目からパスワードなしの ssh で接続できること。4 台なら、各ノードに 100 Gb/s のポートが 1 つあれば足ります。
 - DGX OS（Ubuntu 24.04）、NVIDIA ドライバ 580 以降、cuBLAS 13。
 - 全ノードに NCCL 2.30.7。NVIDIA の `nvidia-nccl-cu13` wheel を pip で展開したものです（`packaging/RUNTIME.md`）。
-- ノード数に合った Fiore-lab の EXL3 チェックポイント（Hugging Face）。全ノードの同じパスに置きます。8 台では `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`（390 GB）、4 台では `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`（344.6 GB）です。4 台用のチェックポイントは、層 3〜77 の routed expert のうち使用頻度の低い半分を 3 ビット、残りを 4 ビットで持ち、それ以外は 8 台用のチェックポイントと同じです。
+- ノード数に合った Fiore-lab の EXL3 チェックポイント（Hugging Face）。全ノードの同じパスに置きます。8 台では [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks)（390 GB）、4 台では [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks)（344.6 GB）です。4 台用のチェックポイントは、層 3〜77 の routed expert のうち使用頻度の低い半分を 3 ビット、残りを 4 ビットで持ち、それ以外は 8 台用のチェックポイントと同じです。
 - 重みのファイルはどれも、Fiore-lab のファイルを使わずに、Z.AI の公式 BF16 チェックポイントから自分で作ることもできます（[glm53/weights](glm53/weights/README.ja.md)）。
 - コントロールパネルには、使う幅の expert のバンク。4 台では 3 ビットと 4 ビットのバンク（277.9 GB と 368.5 GB。8 台用のチェックポイントを 4 ビットのバンクとして使えます。4 ビットだけでは文脈が短くなります）と、ランチャー用に各ノードの `python3`。
 
