@@ -38,7 +38,7 @@
 | `VERSION`、`SHA256SUMS`、`LICENSE`、`NOTICE`、`LICENSES/`、`THIRD_PARTY_NOTICES.md` | リリースの情報とライセンス |
 
 アーカイブに含まれないもの: モデルの重み、expert バンク、DFlash2 の drafter、NCCL。これらは別にダウンロードします（4 節）。
-重みとバンクは、Fiore-lab のファイルを使わずに、Z.AI の公式 BF16 チェックポイントから GPU のあるホストで作ることもできます。手順はソースリポジトリの `glm53/weights/README.ja.md`（<https://github.com/fiore-labo/fiore-glm5.3/blob/main/glm53/weights/README.ja.md>）にあり、アーカイブには入っていません。
+重みとバンクは、Fiore-lab のファイルを使わずに、Z.AI の公式 BF16 チェックポイントから GPU のあるホストで作ることもできます。手順はソースリポジトリの `glm53/weights/README.ja.md`（<https://github.com/fiore-labo/ExpertAtlas-GLM5.3/blob/main/glm53/weights/README.ja.md>）にあり、アーカイブには入っていません。
 
 ## 3. 仕組みの要点
 
@@ -75,7 +75,7 @@
 ### コントロールパネルの準備
 
 1. 計画で使う expert バンクを、全ノードの `expert-plan/banks.json` が示すディレクトリ（既定は `~/models/GLM-5.3-EXL3-Experts-<N>bit`）に置きます: 4 台では通常 `fiore-lab/GLM-5.3-EXL3-Experts-3bit` と `-4bit`（277.9 GB と 368.5 GB）。`-2bit`（187.3 GB）と `-5bit`（459.1 GB）は任意です。8 台用のチェックポイントは 4 ビットのバンクとして使えます（`RUNTIME.ja.md`「コントロールパネル（Expert Atlas）」）。`./tf-glm53 verify-banks 3 4` で確認します。
-2. 1 台目のノードで `./tf-glm53 launcher` を実行し、そこで `http://127.0.0.1:8010/panel` を開きます（`LAUNCHER_PORT` が無ければポートは `PORT` + 10）。または、ポートを転送します（`ssh -L 8010:127.0.0.1:8010 FIRST-NODE`）。ループバック以外で使うには `LAUNCHER_HOST` と `API_KEY_FILE` が必要で、ページはキーをアドレスから 1 回受け取ります（`/panel#key=KEY`）。ランチャーはエンジンが動いていてもいなくても動き続け、ページはランチャーを通してエンジンに届きます。
+2. 1 台目のノードで `./tf-glm53 launcher` を実行し、そこで `http://127.0.0.1:8010/panel` を開きます（`LAUNCHER_PORT` が無ければポートは `PORT` + 10）。他のマシンからは ssh トンネルで開きます（`ssh -L 8010:127.0.0.1:8010 FIRST-NODE`）。ランチャーはループバックでだけ待ち受け、ほかの `LAUNCHER_HOST` は拒否します。届いた人なら誰でもエンジンの起動・停止・入れ替えができてしまうためです。ランチャーはエンジンが動いていてもいなくても動き続け、ページはランチャーを通してエンジンに届きます。
 3. ページで: 計画、KV の形式、文脈、STORE、各ノードが OS に残す量、drafter を選び、メモリの判定を確かめ、「起動」を 2 回（起動 → 確定）押します。停止もページから行います。
 
 ## 5. 設定（`glm53.conf`）
@@ -87,8 +87,8 @@
 | `NCCL_LIB` | NCCL 2.30.7 の `libnccl.so.2`。全ノードで同じパス | 同じ |
 | `WEIGHTS` | チェックポイントのディレクトリ。全ノードで同じパス | 8x / 4x のチェックポイント |
 | `DRAFTER_KIND`、`MTP_K`、`DRAFTER` | drafter（`mtp`、`dflash2`、`none`）、MTP の 1 ラウンドのドラフト数（3）、DFlash2 のディレクトリ | `mtp`、3、空 |
-| `NAME`、`HOST`、`PORT`、`API_KEY_FILE` | API でのモデル名、待ち受けのアドレスとポート、キーのファイル | `glm-5.3`、`127.0.0.1`、8000、空 |
-| `METRICS_LISTEN` | `/metrics` と `/health` だけにキーなしで答える、読み取り専用の追加のアドレス | 無効 |
+| `NAME`、`HOST`、`PORT` | API でのモデル名、待ち受けのアドレスとポート | `glm-5.3`、`127.0.0.1`、8000 |
+| `METRICS_LISTEN` | `/metrics` と `/health` だけに答える、読み取り専用の追加のアドレス | 無効 |
 | `CONTEXT` | 1 件のリクエストが届く位置の数（プロンプトと応答の合計） | 819,200 / 737,280 |
 | `STORE` | 以前の会話のために `CONTEXT` とは別に残す位置の数（プールでは 512 以上） | 819,200 / 100,000 |
 | `CACHE` | `pool`（ブロックを共有）または `slots`（会話ごとの保存） | `pool` |
@@ -135,7 +135,7 @@
 - 応答の `message.reasoning_content` にモデルの推論、`message.content` に答えが入ります。`max_tokens` は両方を数えます。`chat_template_kwargs` は `{"enable_thinking": false}`（推論なし）と `reasoning_effort` を受け付けます。
 - 400 で断るもの: 1 以外の `n`、`logprobs`、`response_format` の `json_object`、`tool_choice` の `required`、画像（テキストのみ）、文脈を超える `max_tokens`。収まらないストリーミングのリクエストはエラーイベントで終わります。
 - 接続を切ったクライアントのリクエストは取り消されます。
-- キー: `API_KEY_FILE` を設定すると、クライアントは `Authorization: Bearer KEY` を送ります。キーなしでループバック以外の `HOST` にすると、API は届く人なら誰でも使えます。サーバーは平文の HTTP なので、前段に TLS を置くか閉じたネットワーク内に留めない限り、キーと文章は平文でネットワークを流れます。
+- キーはありません: ループバック以外の `HOST` にすると、API は届く人なら誰でも使えます。サーバーは平文の HTTP なので、閉じたネットワーク内に留めるか前段に TLS とアクセス制御を置かない限り、文章は平文でネットワークを流れます。
 - カウンタからの速さ: decode の tokens/s = Δ`completion_tokens_total` / Δ`decode_seconds_total`、prefill の tokens/s = Δ`prefill_tokens_total` / Δ`prefill_seconds_total`、ドラフトのラウンドあたりに進んだトークン = Δ`completion_tokens_total` / Δ`rounds_total`（1 ならドラフトは 1 つも残っていない）、キャッシュのヒット率 = Δ`cached_tokens_total` / Δ`prompt_tokens_total`。カウンタは実行中のリクエストの分も含み、後戻りしません。
 
 コントロールパネルのランチャーは `/v1/launch/` の下に独自の API（status、plan、start、stop、usage、resort、check、config、nodes、保存した割り当ての allocs、alloc、allocs/save、allocs/rename、allocs/delete）を持ちます。ページが使うもので、項目はリリースの間で変わることがあります。
@@ -209,4 +209,4 @@
 - chat template の user のターンの中では、モデルは利用者自身の文章をうまく予測しません。これはプロンプトに対する KL ダイバージェンスのように利用者の文章を予測するときの話で、応答の話ではありません。`ATLAS-TESTS.ja.md` の測定は、プロンプトのトークンを template の冒頭を除いて採点しています（「測り方」）。
 - プールの会話のキャッシュには 512 以上の `STORE` が必要です。
 - コンテナには GPU、`/dev/infiniband`、ホストネットワーク、`--ulimit memlock=-1 --ulimit nofile=1048576:1048576` が必要です。コンテナの中では、`tf-glm53 check` は他のコンテナの GPU プロセスを見られません。
-- API は既定でループバックで待ち受けます。他のマシンに提供するには `HOST` が必要で、そのとき `API_KEY_FILE` が無ければ API は誰でも使える状態になります。
+- API は既定でループバックで待ち受けます。他のマシンに提供するには `HOST` が必要で、そのとき API（キーはありません）は届く人なら誰でも使える状態になります。コントロールパネルはループバックのままです（他のマシンからは ssh トンネル）。

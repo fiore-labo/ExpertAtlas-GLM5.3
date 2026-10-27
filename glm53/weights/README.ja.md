@@ -103,7 +103,7 @@ Fiore-lab は DGX Spark でこの変換を動かしたことがありません�
 ### 1. 道具と公式チェックポイントを用意する
 
 ```sh
-git clone https://github.com/fiore-labo/fiore-glm5.3 && cd fiore-glm5.3/glm53/weights
+git clone https://github.com/fiore-labo/ExpertAtlas-GLM5.3 && cd ExpertAtlas-GLM5.3/glm53/weights
 pip install -U "huggingface_hub[hf_xet]"
 hf download zai-org/GLM-5.3-BF16 --revision 9d2398f478cab2de883137db3a36ad2c96205e24 --local-dir /data/GLM-5.3-BF16
 python3 check_official.py /data/GLM-5.3-BF16          # 最後が "OK: ... 0 problems" になること

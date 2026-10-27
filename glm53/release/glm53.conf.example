@@ -39,14 +39,13 @@ MTP_K=3
 DRAFTER=
 #DRAFTER=~/models/GLM-5.3-DFlash2
 
-# The server. With HOST other than loopback and no API_KEY_FILE the API is open to anyone who can reach it; set
-# API_KEY_FILE (a file holding the key) to require a key, and put TLS or a closed network in front.
+# The server. The API has no key: with HOST other than loopback it is open to anyone who can reach it, so keep it
+# on a closed network or put TLS and access control in front.
 NAME=glm-5.3
 HOST=127.0.0.1
 PORT=8000
-API_KEY_FILE=
 # A monitor on another host: rank 0 also answers GET /metrics (Prometheus text) and /health at this HOST:PORT,
-# read-only and without a key, while the API stays on HOST. Empty: off. Keep it on a closed network.
+# read-only, while the API stays on HOST. Empty: off. Keep it on a closed network.
 #METRICS_LISTEN=0.0.0.0:9894
 
 # Positions a request may reach (prompt + reply), and the positions kept beyond them for earlier conversations.

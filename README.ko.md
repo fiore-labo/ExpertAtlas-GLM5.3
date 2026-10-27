@@ -49,11 +49,11 @@ Fiore-lab의 것과 구조가 같고 같은 방식으로 로드됩니다.
 릴리스는 컨테이너 이미지와, 같은 파일을 담은 아카이브의 두 가지 형태로 배포합니다. 권장하는 방법은 이미지입니다. 이미지를 쓰면 각 노드에는 Docker와 NVIDIA Container Toolkit(DGX OS에는 둘 다 있습니다)만 있으면 되고, 서버의 라이브러리는 필요하지 않습니다.
 
 ```sh
-docker pull ghcr.io/fiore-labo/fiore-glm5.3:r3-102            # 각 노드에서
-mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/fiore-glm5.3:r3-102 install /out
+docker pull ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102            # 각 노드에서
+mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102 install /out
 ```
 
-그런 다음 `glm53.conf`에 `RUNTIME=docker`와 `IMAGE`를 설정하고 아래와 같이 진행합니다([packaging/RUNTIME.md](packaging/RUNTIME.md) "Running in containers", 영어). Docker를 쓰지 않는 경우: 릴리스 아카이브 `tensorfold-r3-102-linux-aarch64.tar.gz`를 내려받아 함께 들어 있는 `RUNTIME.md`(이 저장소에서는 [packaging/RUNTIME.md](packaging/RUNTIME.md), 영어)를 따르세요. 4대든 8대든 같은 아카이브와 실행 스크립트를 사용합니다. `glm53.conf.example`(8대) 또는 `glm53.t4.conf.example`(4대, [glm53/release/T4.md](glm53/release/T4.md) 참고, 영어)를 `glm53.conf`로 복사하고 노드, 네트워크 이름, NCCL, 가중치, drafter를 채운 다음 `./tf-glm53 deploy`와 `./tf-glm53 up`을 실행합니다. 주소와 API 키 파일을 지정하지 않으면 서버는 `127.0.0.1`에서 OpenAI chat API를 제공합니다.
+그런 다음 `glm53.conf`에 `RUNTIME=docker`와 `IMAGE`를 설정하고 아래와 같이 진행합니다([packaging/RUNTIME.md](packaging/RUNTIME.md) "Running in containers", 영어). Docker를 쓰지 않는 경우: 릴리스 아카이브 `tensorfold-r3-102-linux-aarch64.tar.gz`를 내려받아 함께 들어 있는 `RUNTIME.md`(이 저장소에서는 [packaging/RUNTIME.md](packaging/RUNTIME.md), 영어)를 따르세요. 4대든 8대든 같은 아카이브와 실행 스크립트를 사용합니다. `glm53.conf.example`(8대) 또는 `glm53.t4.conf.example`(4대, [glm53/release/T4.md](glm53/release/T4.md) 참고, 영어)를 `glm53.conf`로 복사하고 노드, 네트워크 이름, NCCL, 가중치, drafter를 채운 다음 `./tf-glm53 deploy`와 `./tf-glm53 up`을 실행합니다. 다른 주소를 지정하지 않으면 서버는 `127.0.0.1`에서 OpenAI chat API를 제공합니다. API에는 키가 없으므로 다른 주소에서는 접근할 수 있는 누구나 사용할 수 있습니다. 닫힌 네트워크 안에서만 쓰거나 앞에 TLS와 접근 제어를 두세요.
 
 ## Drafter
 

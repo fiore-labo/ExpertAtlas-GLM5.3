@@ -50,11 +50,11 @@ Fiore-lab のものと形が同じで、同じように読み込まれます。
 リリースは、コンテナイメージと、同じファイルを持つアーカイブの 2 つの形で配布します。おすすめはイメージです。イメージを使う場合、各ノードに要るのは Docker と NVIDIA Container Toolkit（DGX OS には両方あります）だけで、サーバーのライブラリは要りません。
 
 ```sh
-docker pull ghcr.io/fiore-labo/fiore-glm5.3:r3-102            # 各ノードで
-mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/fiore-glm5.3:r3-102 install /out
+docker pull ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102            # 各ノードで
+mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102 install /out
 ```
 
-そのあと `glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定し、以下と同じように進めます（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。4 台でも 8 台でも、同じアーカイブと起動スクリプトを使います。`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーし、ノード、ネットワーク名、NCCL、重み、drafter を記入してから、`./tf-glm53 deploy` と `./tf-glm53 up` を実行します。アドレスと API キーファイルを指定しない限り、サーバーは `127.0.0.1` 上で OpenAI chat API を提供します。
+そのあと `glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定し、以下と同じように進めます（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。4 台でも 8 台でも、同じアーカイブと起動スクリプトを使います。`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーし、ノード、ネットワーク名、NCCL、重み、drafter を記入してから、`./tf-glm53 deploy` と `./tf-glm53 up` を実行します。サーバーは、別のアドレスを指定しない限り `127.0.0.1` 上で OpenAI chat API を提供します。API にキーはないので、別のアドレスにすると届く人なら誰でも使えます。閉じたネットワーク内に留めるか、前段に TLS とアクセス制御を置いてください。
 
 ## Drafter
 

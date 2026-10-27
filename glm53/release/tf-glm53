@@ -51,8 +51,7 @@ esac
 NAME=${NAME:-glm-5.3}
 HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-8000}
-API_KEY_FILE=${API_KEY_FILE:-}
-METRICS_LISTEN=${METRICS_LISTEN:-} # HOST:PORT: rank 0 also answers GET /metrics and /health there, read-only, no key
+METRICS_LISTEN=${METRICS_LISTEN:-} # HOST:PORT: rank 0 also answers GET /metrics and /health there, read-only
 DRAFTER_KIND=${DRAFTER_KIND:-mtp}
 MTP_K=${MTP_K:-3}
 DRAFTER=${DRAFTER:-}
@@ -115,8 +114,6 @@ on() { ssh -n -o ConnectTimeout=8 -o BatchMode=yes "$1" "$2"; }
 loopback() { case $1 in 127.*|localhost|::1) return 0 ;; *) return 1 ;; esac; }
 # where this script reaches the server: loopback when it listens there or on every address, else HOST itself
 url() { case $HOST in 0.0.0.0|127.*|localhost) echo "http://127.0.0.1:$PORT" ;; ::|::1) echo "http://[::1]:$PORT" ;; *:*) echo "http://[$HOST]:$PORT" ;; *) echo "http://$HOST:$PORT" ;; esac; }
-# the first key of API_KEY_FILE, without its label (lines are KEY or LABEL: KEY; # starts a comment)
-api_key() { grep -v -m1 -E '^[[:space:]]*(#|$)' "$API_KEY_FILE" | sed 's/^[^:]*://; s/^[[:space:]]*//; s/[[:space:]]*$//'; }
 # this directory's ranks only: processes whose executable is $BIN; with RUNTIME=docker the servers in this lane's
 # containers (host process ids: a TERM or a KILL from here reaches them, the container's init forwards nothing else)
 PIDS="for p in \$(pgrep -x tensorfold-nati); do e=\$(readlink /proc/\$p/exe); [ \"\${e% (deleted)}\" = $BIN ] && echo \$p; done"
@@ -161,11 +158,10 @@ docker_rank() {
   local r=$1 gid=$2 a=$3 m=$4 env="" kv d ro=""
   for kv in $(rank_env "$r" "$gid") $m; do env="$env -e $kv"; done
   for d in $(mount_dirs); do ro="$ro $d"; done
-  local key=""; [ "$r" -eq 0 ] && [ -n "$API_KEY_FILE" ] && key="-v $API_KEY_FILE:$API_KEY_FILE:ro"
   echo "docker rm -f $CN$r >/dev/null 2>&1; M=; for d in $ro; do [ -d \$d ] && M=\"\$M -v \$d:\$d:ro\"; done;" \
     "docker run -d --rm --init --name $CN$r --user \$(id -u):\$(id -g) --gpus all --network host --ipc host" \
     "--device /dev/infiniband --cap-add IPC_LOCK --ulimit memlock=-1 --ulimit nofile=1048576:1048576 --oom-score-adj 1000" \
-    "-w /opt/glm53 \$M -v $LOGS:$LOGS -v $PKG/launch:$PKG/launch $key$env $IMAGE serve $LOGS/rank$r.log $WEIGHTS $a >/dev/null"
+    "-w /opt/glm53 \$M -v $LOGS:$LOGS -v $PKG/launch:$PKG/launch$env $IMAGE serve $LOGS/rank$r.log $WEIGHTS $a >/dev/null"
 }
 
 # this directory's identity on a node: every file of SHA256SUMS checked but expert-plan/banks.json, which is settings
@@ -173,12 +169,10 @@ docker_rank() {
 PKGSUM="grep -v ' \\./expert-plan/banks\\.json\$' SHA256SUMS | sha256sum -c --quiet && { sha256sum SHA256SUMS; cat expert-plan/banks.json 2>/dev/null; } | sha256sum | cut -c1-64"
 
 cmd_deploy() {
-  local n tmp want key=(); tmp=$(mktemp -d)
-  # the API key stays on this node
-  [ -n "$API_KEY_FILE" ] && case $(readlink -f "$API_KEY_FILE") in "$PKG"/*) key=(--exclude "/$(readlink -f "$API_KEY_FILE" | sed "s|^$PKG/||")") ;; esac
+  local n tmp want; tmp=$(mktemp -d)
   want=$(cd "$PKG" && eval "$PKGSUM") || { echo "SHA256SUMS does not match here"; return 1; }
   for n in "${NODES[@]:1}"; do
-    ( on "$n" "mkdir -p $PKG" && rsync -a --exclude logs --exclude glm53.conf "${key[@]}" "$PKG/" "$n:$PKG/" \
+    ( on "$n" "mkdir -p $PKG" && rsync -a --exclude logs --exclude glm53.conf "$PKG/" "$n:$PKG/" \
       && [ "$(on "$n" "cd $PKG && $PKGSUM")" = "$want" ] \
       && echo "  ok $n" || { echo "  FAIL $n"; : > "$tmp/fail"; } ) &
   done; wait
@@ -254,13 +248,8 @@ cmd_check() {
       if [ -n "$bad" ]; then echo "  rank $r $n: NG:$bad"; : > "$tmp/ng"; else echo "  rank $r $n: ok (GID $g, $fg GiB available, $nc)"; fi ) > "$tmp/$r" &
   done; wait
   cat $(for r in $(seq 0 $LAST); do echo "$tmp/$r"; done); [ -f "$tmp/ng" ] && ng=1; rm -rf "$tmp"
-  # a non-loopback HOST without a key is allowed: the API is then open to anyone who can reach it (a warning)
-  if ! loopback "$HOST" && [ -z "$API_KEY_FILE" ]; then echo "  warning: HOST $HOST is not loopback and API_KEY_FILE is unset: the API is open to anyone who can reach it (set API_KEY_FILE to require a key)"; fi
-  if [ -n "$API_KEY_FILE" ]; then                  # what the server requires of it, or it refuses to start
-    if [ -L "$API_KEY_FILE" ] || [ ! -f "$API_KEY_FILE" ]; then echo "  API_KEY_FILE $API_KEY_FILE: not a regular file"; ng=1
-    elif [ $(( 8#$(stat -c %a "$API_KEY_FILE") & 8#044 )) -ne 0 ]; then echo "  API_KEY_FILE $API_KEY_FILE: readable by other users (chmod 600 it)"; ng=1
-    elif [ -z "$(api_key)" ]; then echo "  API_KEY_FILE $API_KEY_FILE: no key in it"; ng=1; fi
-  fi
+  # a non-loopback HOST is allowed: the API has no key, so it is open to anyone who can reach it (a warning)
+  if ! loopback "$HOST"; then echo "  warning: HOST $HOST is not loopback: the API has no key and is open to anyone who can reach it (keep it on a closed network, or put TLS and access control in front)"; fi
   [ $ng -eq 0 ] && echo "check: ok" || echo "check: NG"
   return $ng
 }
@@ -388,7 +377,6 @@ cmd_up() {
   cmd_check || { echo "not started"; return 1; }
   local r n gid args
   args="--host $HOST --port $PORT --name $NAME --context $CONTEXT"
-  [ -n "$API_KEY_FILE" ] && args="$args --api-key-file $API_KEY_FILE"
   trap 'fail_up "interrupted"; exit 130' INT TERM
   for r in $(seq $LAST -1 0); do
     n=${NODES[$r]}
@@ -461,9 +449,8 @@ store_line() {
 }
 
 ask() {                                            # ask JSON_MESSAGES -> the reply's content (and the cached prompt tokens on stderr)
-  local auth=() out
-  [ -n "$API_KEY_FILE" ] && auth=(-H "Authorization: Bearer $(api_key)")
-  out=$(curl -s -m 600 "${auth[@]}" -H 'Content-Type: application/json' "$(url)/v1/chat/completions" \
+  local out
+  out=$(curl -s -m 600 -H 'Content-Type: application/json' "$(url)/v1/chat/completions" \
     -d "{\"model\": \"$NAME\", \"messages\": $1, \"max_tokens\": 1200, \"temperature\": 0.6}")
   echo "$out" | grep -o '"cached_tokens": *[0-9]*' | grep -o '[0-9]*$' >&2
   echo "$out" | grep -o '"content": *"[^"]*"' | tail -1 | sed 's/.*: *"//;s/"$//'

@@ -2,8 +2,10 @@ English | [日本語](PANEL-GUIDE.ja.md)
 
 # Expert Atlas: the control panel
 
-The launcher serves the panel at `http://<first node>:<launcher port>/panel`. The page needs no key. When the server has
-API keys, open `/panel#key=<key>` once; the page keeps the key for the tab and sends it to the APIs. The page has two
+The launcher serves the panel on the first node only, at `http://127.0.0.1:<launcher port>/panel`; from another machine,
+open it through an ssh tunnel (`ssh -L 8010:127.0.0.1:8010 <first node>`, then `http://127.0.0.1:8010/panel` there, with
+your launcher port in place of 8010). Anyone who can reach the panel can start, stop and change the engine, so it does
+not listen on the network. The page has two
 screens: the launch screen while the engine is stopped, and the live panel while it runs. It switches between them by
 itself. This release's panel runs on four or eight nodes (the count is picked in Nodes on the launch screen).
 

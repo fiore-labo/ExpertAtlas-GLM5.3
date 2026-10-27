@@ -48,11 +48,11 @@ GLM-5.3 为每个 token 在每层 256 个路由专家中选出 8 个，而不同
 发布以容器镜像和内容相同的归档两种形式提供；推荐使用镜像。使用镜像时，每个节点只需要 Docker 和 NVIDIA Container Toolkit（DGX OS 两者都有），不需要服务器的库：
 
 ```sh
-docker pull ghcr.io/fiore-labo/fiore-glm5.3:r3-102            # 在每个节点上
-mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/fiore-glm5.3:r3-102 install /out
+docker pull ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102            # 在每个节点上
+mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102 install /out
 ```
 
-然后在 `glm53.conf` 中设置 `RUNTIME=docker` 和 `IMAGE`，再按下文继续（[packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)“在容器中运行”）。不使用 Docker 时：下载发布归档 `tensorfold-r3-102-linux-aarch64.tar.gz`，并按照其中的 `RUNTIME.md`（本仓库中为 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)）操作。四个节点和八个节点使用同一个归档和同一个启动脚本：将 `glm53.conf.example`（八个节点）或 `glm53.t4.conf.example`（四个节点，见 [glm53/release/T4.zh-CN.md](glm53/release/T4.zh-CN.md)）复制为 `glm53.conf`，填写节点、网络名称、NCCL、权重和草稿模型，然后执行 `./tf-glm53 deploy` 和 `./tf-glm53 up`。除非为服务器指定地址和 API 密钥文件，否则它在 `127.0.0.1` 上提供 OpenAI chat API。
+然后在 `glm53.conf` 中设置 `RUNTIME=docker` 和 `IMAGE`，再按下文继续（[packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)“在容器中运行”）。不使用 Docker 时：下载发布归档 `tensorfold-r3-102-linux-aarch64.tar.gz`，并按照其中的 `RUNTIME.md`（本仓库中为 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)）操作。四个节点和八个节点使用同一个归档和同一个启动脚本：将 `glm53.conf.example`（八个节点）或 `glm53.t4.conf.example`（四个节点，见 [glm53/release/T4.zh-CN.md](glm53/release/T4.zh-CN.md)）复制为 `glm53.conf`，填写节点、网络名称、NCCL、权重和草稿模型，然后执行 `./tf-glm53 deploy` 和 `./tf-glm53 up`。除非为服务器指定其他地址，否则它在 `127.0.0.1` 上提供 OpenAI chat API。API 没有密钥：使用其他地址时，任何能访问到它的人都可以使用，请只在封闭网络中使用，或在其前面加一层 TLS 和访问控制。
 
 ## 草稿模型
 
