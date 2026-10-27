@@ -28,7 +28,8 @@ The control panel's launcher: always on, on the lane's first node, beside tf-glm
     in EXTRA_ENV, else PKG/launch/panel-settings.json), served here whether the engine runs or not; not read, replaced whole
   - every other path goes to the engine (HOST:PORT of glm53.conf), 503 while it is not running: the page has one
     address whether the engine runs or not
-  - access: a Bearer key of the lane's API_KEY_FILE, or loopback (403 otherwise); a start or a stop at a time (409)
+  - access: loopback only (403 otherwise; another machine reaches the panel through an ssh tunnel); a start or a
+    stop at a time (409)
 A start: the pre-flight (every node reachable, its GPU readable by nvidia-smi, no engine or other GPU process on any node, the plan fits; with
 LAUNCH_SNAPSHOTS=1 the nodes' state written down, with LAUNCH_DROP_CACHES=1 the page cache dropped), the bits written
 as an expert plan (tools/quant/expert_plan.py mix with expert-plan/banks.json), then `tf-glm53 up` with LAUNCH_ENV="TF_GLM53_EXPERT_PLAN=... TF_GLM53_LOAD_PROGRESS=...";
@@ -41,7 +42,7 @@ and /discard decide the pending). Kept in PKG/launch/: the learning data (usage-
 run, the last measured start (the plan's sizes and the ETA), the plans; allocations in ATLAS_DIR/allocs/user; the
 snapshots (LAUNCH_SNAPSHOTS=1) in PKG/snapshots/.
 Defaults: CONF = glm53.conf beside this script's directory (PKG = the lane directory), port LAUNCHER_PORT of CONF
-(else PORT + 10), host LAUNCHER_HOST (else 127.0.0.1). --pkg: the lane directory on the nodes when this runs elsewhere
+(else PORT + 10), host LAUNCHER_HOST (else 127.0.0.1; a loopback address, anything else is refused). --pkg: the lane directory on the nodes when this runs elsewhere
 (a test from another machine). --dry-run: a start or a stop runs its read-only checks, prints what it would run, and runs
 nothing that changes a node.
 """
@@ -194,7 +195,7 @@ def set_nodes(text, nodes):
 def read_conf(conf):
     script = r'''. "$1" >/dev/null || exit 1
 printf 'NODE=%s\n' "${NODES[@]}"
-for v in NAME HOST PORT API_KEY_FILE EXTRA_ENV LAUNCHER_PORT LAUNCHER_HOST KV DCP CONTEXT STORE CACHE RESERVE_GB DRAFTER_KIND DRAFTER ATLAS_DIR ATLAS_GENERIC LAUNCH_DROP_CACHES LAUNCH_SNAPSHOTS RUNTIME IMAGE; do printf '%s=%s\n' "$v" "${!v:-}"; done'''
+for v in NAME HOST PORT EXTRA_ENV LAUNCHER_PORT LAUNCHER_HOST KV DCP CONTEXT STORE CACHE RESERVE_GB DRAFTER_KIND DRAFTER ATLAS_DIR ATLAS_GENERIC LAUNCH_DROP_CACHES LAUNCH_SNAPSHOTS RUNTIME IMAGE; do printf '%s=%s\n' "$v" "${!v:-}"; done'''
     out = subprocess.run(["bash", "-c", script, "_", conf], capture_output=True, text=True, check=True).stdout
     c = {"NODES": []}
     for line in out.splitlines():
@@ -204,20 +205,6 @@ for v in NAME HOST PORT API_KEY_FILE EXTRA_ENV LAUNCHER_PORT LAUNCHER_HOST KV DC
         else:
             c[k] = v
     return c
-
-
-def api_keys(path):
-    if not path:
-        return set()
-    keys = set()
-    for line in open(path):
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        k = line.split(":", 1)[1].strip() if ":" in line else line
-        if k:  # an empty key ("label:") is no key
-            keys.add(k)
-    return keys
 
 
 class Fail(Exception):
@@ -279,11 +266,6 @@ class Launcher:
         self.runtime = c.get("RUNTIME") or "host"
         self.cname = f"glm53-p{port}-r"
         self.engine = ("127.0.0.1" if host in ("0.0.0.0",) or host.startswith("127.") or host == "localhost" else host, port)
-        # the lane's API keys, read again whenever the file changes (keys_now)
-        self.key_file = c.get("API_KEY_FILE", "")
-        self.key_stamp = None
-        self.keys = set()
-        self.keys_now()
         self.kv_format = c.get("KV") or "fp8"
         self.dcp = int(c.get("DCP") or (3 if self.world == 3 else 2))  # tf-glm53's default
         # the positions CONF asks for: a request's context and the conversation store beside it; a start in a format
@@ -403,36 +385,10 @@ class Launcher:
         with ThreadPoolExecutor(self.world) as ex:
             return list(ex.map(lambda n: self.ssh(n, cmd, timeout), self.nodes))
 
-    def keys_now(self):
-        """The lane's API keys as the file holds them now: read again when its identity, size or time changes, as the
-        engine reads its own (a key taken out loses the launcher's control, a new one gains it at once).
-        A file that cannot be read gives no key: only loopback is let in until it reads again."""
-        if not self.key_file:
-            return self.keys
-        try:
-            s = os.stat(self.key_file)
-            stamp = (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns)
-            if stamp != self.key_stamp:
-                keys = api_keys(self.key_file)
-                if self.key_stamp is not None:
-                    log(f"API key file read again: {len(keys)} keys")
-                self.keys, self.key_stamp = keys, stamp
-        except OSError as e:
-            if self.keys or self.key_stamp is not None:
-                log(f"API key file {self.key_file} cannot be read ({e}): no key accepted until it can")
-            self.keys, self.key_stamp = set(), None
-        return self.keys
-
-    def engine_headers(self):
-        """The launcher's own calls to the engine carry a key of the lane's file when it has keys (the engine asks for
-        one from loopback too)."""
-        keys = self.keys_now()
-        return {"Authorization": "Bearer " + next(iter(sorted(keys)))} if keys else {}
-
     def engine_get(self, path, timeout=3):
         c = http.client.HTTPConnection(*self.engine, timeout=timeout)
         try:
-            c.request("GET", path, headers=self.engine_headers())
+            c.request("GET", path)
             r = c.getresponse()
             return r.status, r.read()
         finally:
@@ -1973,7 +1929,7 @@ class Launcher:
             return 200, dict(out, applied=False)
         c = http.client.HTTPConnection(*self.engine, timeout=30)
         try:
-            c.request("POST", "/v1/experts/swap", body=json.dumps({"bits": out["target_bits"]}), headers={"Content-Type": "application/json", **self.engine_headers()})
+            c.request("POST", "/v1/experts/swap", body=json.dumps({"bits": out["target_bits"]}), headers={"Content-Type": "application/json"})
             r = c.getresponse()
             st, sw = r.status, r.read()
         finally:
@@ -2025,10 +1981,8 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def allowed(self):
-        if self.client_address[0] in ("127.0.0.1", "::1"):
-            return True
-        auth = self.headers.get("Authorization", "")
-        return auth.startswith("Bearer ") and auth[7:].strip() in self.L.keys_now()
+        # loopback only: the launcher starts, stops and swaps the engine and has no key (main refuses another address)
+        return self.client_address[0] in ("127.0.0.1", "::1")
 
     def send_json(self, status, obj):
         # errors as the engine gives them: {"error": {"message": ...}} (the page reads error.message)
@@ -2055,10 +2009,8 @@ class Handler(BaseHTTPRequestHandler):
     def route(self, method):
         path = urlparse(self.path).path
         Lr = self.L
-        # the page is static and holds no data: served without a key, so a browser can open /panel#key=... and the page
-        # sends the key with every API call; everything else needs the key or loopback
-        if not (method == "GET" and path == "/panel") and not self.allowed():
-            return self.send_json(403, {"error": "a key or loopback"})
+        if not self.allowed():
+            return self.send_json(403, {"error": "loopback only: reach the panel through an ssh tunnel"})
         try:
             if method == "GET" and path == "/panel":
                 body = open(Lr.page, "rb").read()
@@ -2164,7 +2116,7 @@ class Handler(BaseHTTPRequestHandler):
         # an hour at TP4) must not time out here
         c = http.client.HTTPConnection(*self.L.engine, timeout=4 * 3600)
         try:
-            hdr = {k: v for k, v in self.headers.items() if k.lower() in ("authorization", "content-type", "accept")}
+            hdr = {k: v for k, v in self.headers.items() if k.lower() in ("content-type", "accept")}
             c.request(method, self.path, body=body, headers=hdr)
             # while the engine composes a reply that is not streamed, a client that hangs up is passed on: the engine's
             # connection is closed, so the engine cancels the request as it does for its own clients (the
@@ -2205,6 +2157,14 @@ def main():
     p.add_argument("--dry-run", action="store_true")
     a = p.parse_args()
     lr = Launcher(a)
+    # loopback only: the launcher starts, stops and swaps the engine, with no key; another machine reaches the panel
+    # through an ssh tunnel to the first node
+    h = lr.listen[0]
+    if not (h.startswith("127.") or h in ("localhost", "::1")):
+        sys.exit(f"LAUNCHER_HOST {h}: refused. The launcher serves the panel at 127.0.0.1 only: anyone who can reach the "
+                 f"panel can start, stop and change the engine, so it does not listen on the network. Leave LAUNCHER_HOST "
+                 f"at 127.0.0.1 and, from another machine, open the panel through an ssh tunnel: "
+                 f"ssh -L {lr.listen[1]}:127.0.0.1:{lr.listen[1]} <first node>, then http://127.0.0.1:{lr.listen[1]}/panel there")
     # this release's panel is tested on four nodes (TP4); other node counts are refused until they are tested
     # (ATLAS_ANY_WORLD=1 in the environment runs it anyway, for such a test)
     if lr.world not in TESTED_WORLDS and os.environ.get("ATLAS_ANY_WORLD") != "1":

@@ -84,7 +84,7 @@ does it on every node at once). `WEIGHTS` in `glm53.conf` names the directory
 
 Every weight file, the checkpoints and the expert banks, can also be made from Z.AI's official BF16 checkpoint
 without any of Fiore-lab's files, on GPU hosts: `glm53/weights/README.md` in the source repository
-(<https://github.com/fiore-labo/fiore-glm5.3/tree/main/glm53/weights>; the archive does not carry that directory).
+(<https://github.com/fiore-labo/ExpertAtlas-GLM5.3/tree/main/glm53/weights>; the archive does not carry that directory).
 
 ## Start
 
@@ -136,8 +136,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/
 ```
 
 The reply's `message` holds the model's reasoning in `reasoning_content`, then the answer in `content`; `max_tokens`
-counts both. From another machine, with `HOST` set, send the request to `http://HOST:PORT`; when `API_KEY_FILE` is set,
-add `-H "Authorization: Bearer KEY"`.
+counts both. From another machine, with `HOST` set, send the request to `http://HOST:PORT`.
 
 ## Drafters
 
@@ -284,13 +283,13 @@ changes. A start checks each layer file's size and header against the manifest; 
 ./tf-glm53 launcher           # start it; also ./tf-glm53 launcher status, ./tf-glm53 launcher stop
 ```
 
-Open `http://LAUNCHER_HOST:LAUNCHER_PORT/panel`: `127.0.0.1:8010` in `glm53.t4.conf.example` (without `LAUNCHER_PORT`,
+Open `http://127.0.0.1:LAUNCHER_PORT/panel`: `127.0.0.1:8010` in `glm53.t4.conf.example` (without `LAUNCHER_PORT`,
 `PORT` + 10). From another machine, forward the port (`ssh -L 8010:127.0.0.1:8010 FIRST-NODE`, then
-`http://127.0.0.1:8010/panel`), or set `LAUNCHER_HOST` and `API_KEY_FILE`: away from loopback every call needs a key
-of that file, and the page takes one from its address once (`/panel#key=KEY`). The panel's other calls go to the
-engine through the launcher, so the page has one address whether the engine runs or not. Start and stop the engine
-from the panel while you use it. `PANEL-GUIDE.md` describes the screens; the page is in English or
-Japanese (by the browser's language, or Display > Language).
+`http://127.0.0.1:8010/panel`): the launcher listens on loopback only and refuses another `LAUNCHER_HOST`, since
+anyone who reached it could start, stop and swap the engine. The panel's other calls go to the engine through the
+launcher, so the page has one address whether the engine runs or not. Start and stop the engine from the panel while
+you use it. `PANEL-GUIDE.md` describes the screens; the page is in English or Japanese (by the browser's language, or
+Display > Language).
 
 - **A start** from the panel: the launcher checks every node (reachable, no engine or other GPU process, the plan
   fits its memory), writes the widths as an expert plan (`launch/plan-<time>.json`), copies it to every node and runs
@@ -362,7 +361,7 @@ run `docker` on every node (the `docker` group). `tf-glm53`, the control panel's
 first node's host, as with the archive; the weights and the expert banks stay on the hosts.
 
 ```sh
-I=ghcr.io/fiore-labo/fiore-glm5.3:r3-102
+I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102
 docker pull $I                                                # on every node
 mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out $I install /out
 cd glm53 && cp glm53.conf.example glm53.conf                  # or glm53.t4.conf.example; set RUNTIME=docker, IMAGE=$I
@@ -390,18 +389,15 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # or glm53.t4.conf
 
 ## Serving other machines
 
-The server listens on `127.0.0.1` by default and speaks the OpenAI chat API. To serve other machines, set `HOST`; set
-`API_KEY_FILE` as well to require a key. Without a key on a non-loopback address `tf-glm53` warns and starts, and the
-API is open to anyone who can reach it. The server speaks plain HTTP: put TLS in front or keep it on a closed network,
-or the key travels in the clear.
-
-The API key file is read on the first node only. It holds one key a line (`KEY` or `LABEL: KEY`, `#` starts a comment)
-and must be a regular file that other users cannot read (`chmod 600`), or the server refuses to start; `tf-glm53 check`
-tests both. `tf-glm53 deploy` does not copy it to the other nodes. Clients send `Authorization: Bearer KEY`.
+The server listens on `127.0.0.1` by default and speaks the OpenAI chat API. To serve other machines, set `HOST`. The
+API has no key: on a non-loopback address `tf-glm53` warns and starts, and the API is open to anyone who can reach it.
+The server speaks plain HTTP as well, so keep it on a closed network, or put TLS and access control (a reverse proxy)
+in front. The control panel's launcher stays on loopback either way; another machine reaches the panel through an ssh
+tunnel ("The control panel").
 
 A monitor on another host can read the server without reaching the API: set `METRICS_LISTEN=HOST:PORT` (for example
 `0.0.0.0:9894`). The first node then also answers `GET /metrics` (Prometheus text) and `GET /health` on that address,
-without a key, and nothing else (any other request gets 404), while the API stays on `HOST`. `tf-glm53 status` prints
+and nothing else (any other request gets 404), while the API stays on `HOST`. `tf-glm53 status` prints
 the address. Keep the port on a closed network: it shows no prompt or reply, but it shows the load and the token counts.
 The `tensorfold_health:*_total` counters include the running request and never fall back, so a speed is the difference
 of two reads: prefill tokens/s = Δ`prefill_tokens_total` / Δ`prefill_seconds_total`, decode = Δ`completion_tokens_total`
@@ -446,7 +442,6 @@ the first node cannot reach: `ssh -o BatchMode=yes ADDRESS true` must work from 
 | `RoCE-v2-GID` | no RoCE v2 entry with an IPv4 address on that port: give the port its address, or set `GID_INDEX` |
 | `GPU-busy` | another process holds the GPU (`nvidia-smi`) |
 | `memory(N<M GiB)` | free memory on that node, or lower `STORE` |
-| `API_KEY_FILE ...` | as the line says |
 
 When `up` fails it stops every rank and says why; each node keeps its rank's log (`logs/rankR.log`, `tf-glm53 logs R`):
 

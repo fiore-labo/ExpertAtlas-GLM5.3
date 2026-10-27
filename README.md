@@ -89,8 +89,8 @@ the image, every node needs Docker and the NVIDIA container toolkit (DGX OS has 
 server's libraries:
 
 ```sh
-docker pull ghcr.io/fiore-labo/fiore-glm5.3:r3-102            # on every node
-mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/fiore-glm5.3:r3-102 install /out
+docker pull ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102            # on every node
+mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102 install /out
 ```
 
 then set `RUNTIME=docker` and `IMAGE` in `glm53.conf` and go on as below ([packaging/RUNTIME.md](packaging/RUNTIME.md),
@@ -99,7 +99,8 @@ then set `RUNTIME=docker` and `IMAGE` in `glm53.conf` and go on as below ([packa
 `glm53.conf.example` (eight nodes) or `glm53.t4.conf.example` (four nodes, see
 [glm53/release/T4.md](glm53/release/T4.md)) to `glm53.conf`, fill in the nodes, network names, NCCL, weights and
 drafter, then `./tf-glm53 deploy` and `./tf-glm53 up`. The server speaks the OpenAI chat API on `127.0.0.1` unless you
-give it an address and an API key file.
+give it another address. The API has no key: on another address it is open to anyone who can reach it, so keep it on
+a closed network or put TLS and access control in front.
 
 ## Drafters
 

@@ -54,7 +54,7 @@ done; wait
 
 要校验副本，请在每个节点上运行 `cd ~/models/GLM-5.3-EXL3-8x-DGX-Sparks && sha256sum -c --quiet SHA256SUMS`：每个节点需几分钟，所有文件都一致时不输出任何内容（部署本目录之后，`./tf-glm53 verify` 可一次校验所有节点）。`glm53.conf` 中的 `WEIGHTS` 指定该目录（此处为 `~/models/GLM-5.3-EXL3-8x-DGX-Sparks`）。
 
-所有权重文件（检查点和专家 bank）也都可以不使用 Fiore-lab 的任何文件，在有 GPU 的主机上从 Z.AI 官方的 BF16 检查点自行制作。步骤见源代码仓库中的 `glm53/weights/README.zh-CN.md`（<https://github.com/fiore-labo/fiore-glm5.3/blob/main/glm53/weights/README.zh-CN.md>；归档中不包含该目录）。
+所有权重文件（检查点和专家 bank）也都可以不使用 Fiore-lab 的任何文件，在有 GPU 的主机上从 Z.AI 官方的 BF16 检查点自行制作。步骤见源代码仓库中的 `glm53/weights/README.zh-CN.md`（<https://github.com/fiore-labo/ExpertAtlas-GLM5.3/blob/main/glm53/weights/README.zh-CN.md>；归档中不包含该目录）。
 
 ## 启动
 
@@ -98,7 +98,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/
   "messages": [{"role": "user", "content": "Say hello in one short sentence."}]}'
 ```
 
-回复的 `message` 中，`reasoning_content` 是模型的推理过程，其后 `content` 是答案；`max_tokens` 同时计入两者。从其他机器访问时，在已设置 `HOST` 的前提下，将请求发送到 `http://HOST:PORT`；设置了 `API_KEY_FILE` 时，再加上 `-H "Authorization: Bearer KEY"`。
+回复的 `message` 中，`reasoning_content` 是模型的推理过程，其后 `content` 是答案；`max_tokens` 同时计入两者。从其他机器访问时，在已设置 `HOST` 的前提下，将请求发送到 `http://HOST:PORT`。
 
 ## 草稿模型
 
@@ -147,7 +147,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/
 
    如果设置了 `DRAFTER` 而 `DRAFTER_KIND` 仍为 `mtp`，`./tf-glm53 -d dflash2 up` 会只在这一次启动中使用 DFlash2。使用 DFlash2 时不使用 `MTP_K`。八个节点时，启动前每个节点需要 115 GiB 可用内存，而不是 112 GiB（见“每个节点的要求”）；`tf-glm53 check` 会检查这一点。使用池时，最近对话的草稿模型状态也会被保留（`DRAFT_SAVES`，见“请求之间保留的对话”）。
 6. 照常启动：如果正在运行，先执行 `./tf-glm53 down`，再执行 `./tf-glm53 up`。`tf-glm53 check` 和 `up` 会输出 `drafter: dflash2 (PATH)`；无论使用哪种草稿模型，引擎自身的启动行都显示 `drafts: on`。
-7. 要确认草稿是否起作用，请在一次请求的前后读取 `curl -s http://127.0.0.1:8000/health`（无需密钥）中的 `completion_tokens_total` 和 `rounds_total`。前者的增量除以后者的增量，就是该请求每轮确定的 token 数：为 1 表示没有采用任何草稿。对于与“速度”一节类似的编程提示词，DFlash2 为 4.3 到 5.0。
+7. 要确认草稿是否起作用，请在一次请求的前后读取 `curl -s http://127.0.0.1:8000/health` 中的 `completion_tokens_total` 和 `rounds_total`。前者的增量除以后者的增量，就是该请求每轮确定的 token 数：为 1 表示没有采用任何草稿。对于与“速度”一节类似的编程提示词，DFlash2 为 4.3 到 5.0。
 
 要改回 MTP 层，请设置 `DRAFTER_KIND=mtp`，然后执行 `./tf-glm53 down` 和 `./tf-glm53 up`。
 
@@ -193,7 +193,7 @@ done
 ./tf-glm53 launcher           # start it; also ./tf-glm53 launcher status, ./tf-glm53 launcher stop
 ```
 
-打开 `http://LAUNCHER_HOST:LAUNCHER_PORT/panel`：在 `glm53.t4.conf.example` 中为 `127.0.0.1:8010`（没有 `LAUNCHER_PORT` 时为 `PORT` + 10）。从其他机器访问时，转发端口（`ssh -L 8010:127.0.0.1:8010 FIRST-NODE`，然后打开 `http://127.0.0.1:8010/panel`），或设置 `LAUNCHER_HOST` 和 `API_KEY_FILE`：非回环地址的每个调用都需要该文件中的密钥，页面会从其地址中取一次密钥（`/panel#key=KEY`）。页面的其他调用经由启动器到达引擎，因此无论引擎是否运行，页面只有一个地址。使用面板期间，请从面板启动和停止引擎。页面说明见 `PANEL-GUIDE.md`；页面以英文或日文显示（按浏览器的语言，或 Display > Language）。
+打开 `http://127.0.0.1:LAUNCHER_PORT/panel`：在 `glm53.t4.conf.example` 中为 `127.0.0.1:8010`（没有 `LAUNCHER_PORT` 时为 `PORT` + 10）。从其他机器访问时，转发端口（`ssh -L 8010:127.0.0.1:8010 FIRST-NODE`，然后打开 `http://127.0.0.1:8010/panel`）。启动器只在回环地址上监听，其他 `LAUNCHER_HOST` 会被拒绝，因为任何能访问到它的人都可以启动、停止和替换引擎。页面的其他调用经由启动器到达引擎，因此无论引擎是否运行，页面只有一个地址。使用面板期间，请从面板启动和停止引擎。页面说明见 `PANEL-GUIDE.md`；页面以英文或日文显示（按浏览器的语言，或 Display > Language）。
 
 - **启动**（从面板）：启动器检查每个节点（可连通、没有引擎或其他 GPU 进程、计划能放进其内存），把位宽写成专家计划（`launch/plan-<时间>.json`），复制到每个节点，并用它执行 `tf-glm53 up`；页面会显示每一层的载入。此后所有路由专家都来自 bank，检查点提供其他权重。
 - **草稿模型**在启动界面上与 KV 格式并列，每次启动时选择：MTP（检查点自身的层）、DFlash2（只有当 `glm53.conf` 的 `DRAFTER` 在每个节点上都有其模型时才提供，见上文“使用 DFlash2 的步骤”）或不用；默认是 `DRAFTER_KIND`。各自占用的内存不同：DFlash2 比 MTP 每个节点少留约 4 GiB，因此会按所选的草稿模型重新规划。
@@ -219,7 +219,7 @@ done
 本发布也以容器镜像形式提供：`/opt/glm53` 中是归档的文件，另有服务器运行所需的内容（cuBLAS 13、libibverbs 及其 provider、NCCL 2.30.7）。在 `glm53.conf` 中设置 `RUNTIME=docker` 和 `IMAGE` 后，`tf-glm53` 会通过 ssh 在每个节点上把各 rank 作为 `IMAGE` 的容器启动。这时每个节点需要的是 Docker 和 NVIDIA Container Toolkit（DGX OS 两者都有），而不是 cuBLAS、libibverbs 和 NCCL；运行 `tf-glm53` 的用户必须能在每个节点上运行 `docker`（`docker` 组）。`tf-glm53`、控制面板的启动器和设置与使用归档时一样留在第一个节点的主机上；权重和专家 bank 也留在主机上。
 
 ```sh
-I=ghcr.io/fiore-labo/fiore-glm5.3:r3-102
+I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102
 docker pull $I                                                # 在每个节点上
 mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out $I install /out
 cd glm53 && cp glm53.conf.example glm53.conf                  # 或 glm53.t4.conf.example；设置 RUNTIME=docker 和 IMAGE=$I
@@ -235,11 +235,9 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # 或 glm53.t4.con
 
 ## 为其他机器提供服务
 
-服务器默认监听 `127.0.0.1`，提供 OpenAI chat API。要为其他机器提供服务，请设置 `HOST`；设置 `API_KEY_FILE` 后需要密钥。对于没有密钥的非回环地址，`tf-glm53` 会给出警告并启动，此时任何能访问到该地址的人都可以使用 API。服务器使用明文 HTTP：请在其前面加一层 TLS，或只在封闭网络中使用，否则密钥将以明文传输。
+服务器默认监听 `127.0.0.1`，提供 OpenAI chat API。要为其他机器提供服务，请设置 `HOST`。API 没有密钥：使用非回环地址时，`tf-glm53` 会给出警告并启动，此时任何能访问到该地址的人都可以使用 API。服务器使用明文 HTTP，因此请只在封闭网络中使用，或在其前面加一层 TLS 和访问控制（反向代理）。无论哪种情况，控制面板的启动器都只在回环地址上监听，其他机器通过 ssh 隧道打开面板（“控制面板”）。
 
-API 密钥文件只在第一个节点上读取。文件中每行一个密钥（`KEY` 或 `LABEL: KEY`，`#` 开始注释），且必须是其他用户无法读取的普通文件（`chmod 600`），否则服务器拒绝启动；`tf-glm53 check` 会检查这两点。`tf-glm53 deploy` 不会把它复制到其他节点。客户端发送 `Authorization: Bearer KEY`。
-
-其他主机上的监控程序无需访问 API 即可读取服务器状态：设置 `METRICS_LISTEN=HOST:PORT`（例如 `0.0.0.0:9894`）后，第一个节点也会在该地址上无需密钥地响应 `GET /metrics`（Prometheus 文本格式）和 `GET /health`，且只响应这两者（其他请求一律返回 404），API 仍留在 `HOST` 上。`tf-glm53 status` 会显示该地址。请只在封闭网络中开放此端口：它不显示提示词或回复，但会显示负载和 token 数。`tensorfold_health:*_total` 计数器包含正在运行的请求且不会回退，因此速度由两次读取的差值得出：prefill tokens/s = Δ`prefill_tokens_total` / Δ`prefill_seconds_total`，解码 = Δ`completion_tokens_total` / Δ`decode_seconds_total`，缓存命中率 = Δ`cached_tokens_total` / Δ`prompt_tokens_total`，草稿接受率 = Δ`accepted_total` / Δ`drafted_total`。`tensorfold:requests_prefilling` 和 `tensorfold:requests_decoding` 表示正在运行的请求所处阶段，`tensorfold:prefill_tokens_remaining` 表示其 prefill 剩余量，`tensorfold:pool_*` 表示对话缓存，`tensorfold:engine_info` 表示设置。
+其他主机上的监控程序无需访问 API 即可读取服务器状态：设置 `METRICS_LISTEN=HOST:PORT`（例如 `0.0.0.0:9894`）后，第一个节点也会在该地址上响应 `GET /metrics`（Prometheus 文本格式）和 `GET /health`，且只响应这两者（其他请求一律返回 404），API 仍留在 `HOST` 上。`tf-glm53 status` 会显示该地址。请只在封闭网络中开放此端口：它不显示提示词或回复，但会显示负载和 token 数。`tensorfold_health:*_total` 计数器包含正在运行的请求且不会回退，因此速度由两次读取的差值得出：prefill tokens/s = Δ`prefill_tokens_total` / Δ`prefill_seconds_total`，解码 = Δ`completion_tokens_total` / Δ`decode_seconds_total`，缓存命中率 = Δ`cached_tokens_total` / Δ`prompt_tokens_total`，草稿接受率 = Δ`accepted_total` / Δ`drafted_total`。`tensorfold:requests_prefilling` 和 `tensorfold:requests_decoding` 表示正在运行的请求所处阶段，`tensorfold:prefill_tokens_remaining` 表示其 prefill 剩余量，`tensorfold:pool_*` 表示对话缓存，`tensorfold:engine_info` 表示设置。
 
 ## 速度
 
@@ -269,7 +267,6 @@ API 密钥文件只在第一个节点上读取。文件中每行一个密钥（`
 | `RoCE-v2-GID` | 该端口上没有带 IPv4 地址的 RoCE v2 条目：为该端口配置地址，或设置 `GID_INDEX` |
 | `GPU-busy` | 另一个进程占用了 GPU（`nvidia-smi`） |
 | `memory(N<M GiB)` | 释放该节点上的内存，或调低 `STORE` |
-| `API_KEY_FILE ...` | 按该行的提示处理 |
 
 `up` 失败时会停止所有 rank 并说明原因；每个节点都保留其 rank 的日志（`logs/rankR.log`，`tf-glm53 logs R`）：
 

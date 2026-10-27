@@ -54,7 +54,7 @@ done; wait
 
 コピーを確認するには、全ノードで `cd ~/models/GLM-5.3-EXL3-8x-DGX-Sparks && sha256sum -c --quiet SHA256SUMS` を実行します。1 台あたり数分かかり、すべてのファイルが一致すれば何も出力しません（このディレクトリを配置した後なら、`./tf-glm53 verify` で全ノードを一度に確認できます）。`glm53.conf` の `WEIGHTS` にこのディレクトリ（ここでは `~/models/GLM-5.3-EXL3-8x-DGX-Sparks`）を指定します。
 
-重みのファイル（チェックポイントと expert バンク）はどれも、Fiore-lab のファイルを使わずに、Z.AI の公式 BF16 チェックポイントから GPU のあるホストで作ることもできます。手順はソースリポジトリの `glm53/weights/README.ja.md` にあります（<https://github.com/fiore-labo/fiore-glm5.3/blob/main/glm53/weights/README.ja.md>。アーカイブにはこのディレクトリは入っていません）。
+重みのファイル（チェックポイントと expert バンク）はどれも、Fiore-lab のファイルを使わずに、Z.AI の公式 BF16 チェックポイントから GPU のあるホストで作ることもできます。手順はソースリポジトリの `glm53/weights/README.ja.md` にあります（<https://github.com/fiore-labo/ExpertAtlas-GLM5.3/blob/main/glm53/weights/README.ja.md>。アーカイブにはこのディレクトリは入っていません）。
 
 ## 起動
 
@@ -98,7 +98,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/
   "messages": [{"role": "user", "content": "Say hello in one short sentence."}]}'
 ```
 
-応答の `message` には、モデルの思考過程が `reasoning_content` に、続いて回答が `content` に入ります。`max_tokens` は両方を合わせて数えます。別のマシンから送る場合は、`HOST` を設定したうえで、リクエストを `http://HOST:PORT` に送ります。`API_KEY_FILE` を設定したときは `-H "Authorization: Bearer KEY"` を付けます。
+応答の `message` には、モデルの思考過程が `reasoning_content` に、続いて回答が `content` に入ります。`max_tokens` は両方を合わせて数えます。別のマシンから送る場合は、`HOST` を設定したうえで、リクエストを `http://HOST:PORT` に送ります。
 
 ## Drafter
 
@@ -147,7 +147,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/
 
    `DRAFTER` を設定して `DRAFTER_KIND` を `mtp` のままにしておけば、`./tf-glm53 -d dflash2 up` でその起動だけ DFlash2 を使えます。DFlash2 では `MTP_K` は使いません。8 台では、起動前に各ノードで使えるメモリが 112 GiB ではなく 115 GiB 必要です（「各ノードに必要なもの」）。`tf-glm53 check` がこれを確認します。プールでは、最近の会話の drafter の状態も保持します（`DRAFT_SAVES`。「リクエスト間で保持する会話」）。
 6. いつもどおり起動します。動いていれば先に `./tf-glm53 down`、その後 `./tf-glm53 up` です。`tf-glm53 check` と `up` は `drafter: dflash2 (PATH)` と表示します。エンジン自身の起動時の行は、drafter に関係なく `drafts: on` と表示します。
-7. ドラフトが効いているかは、`curl -s http://127.0.0.1:8000/health`（キー不要）の `completion_tokens_total` と `rounds_total` をリクエストの前後で読んで確かめます。前者の増分を後者の増分で割ると、そのリクエストで 1 ラウンドあたりに確定したトークン数になります。1 ならドラフトは 1 つも採用されていません。「速度」と同じようなコーディング用のプロンプトでは、DFlash2 で 4.3〜5.0 でした。
+7. ドラフトが効いているかは、`curl -s http://127.0.0.1:8000/health` の `completion_tokens_total` と `rounds_total` をリクエストの前後で読んで確かめます。前者の増分を後者の増分で割ると、そのリクエストで 1 ラウンドあたりに確定したトークン数になります。1 ならドラフトは 1 つも採用されていません。「速度」と同じようなコーディング用のプロンプトでは、DFlash2 で 4.3〜5.0 でした。
 
 MTP 層に戻すには、`DRAFTER_KIND=mtp` にしてから `./tf-glm53 down` と `./tf-glm53 up` を実行します。
 
@@ -193,7 +193,7 @@ done
 ./tf-glm53 launcher           # start it; also ./tf-glm53 launcher status, ./tf-glm53 launcher stop
 ```
 
-`http://LAUNCHER_HOST:LAUNCHER_PORT/panel` を開きます。`glm53.t4.conf.example` では `127.0.0.1:8010` です（`LAUNCHER_PORT` が無ければ `PORT` + 10）。他のマシンからは、ポートを転送する（`ssh -L 8010:127.0.0.1:8010 FIRST-NODE` のあと `http://127.0.0.1:8010/panel`）か、`LAUNCHER_HOST` と `API_KEY_FILE` を設定します。ループバック以外からの呼び出しにはそのファイルのキーが要り、ページはアドレスから一度だけキーを受け取ります（`/panel#key=KEY`）。ページのそれ以外の呼び出しはランチャーを通ってエンジンに届くので、エンジンが動いていてもいなくても、ページのアドレスは 1 つです。パネルを使う間は、エンジンの起動と停止はパネルから行ってください。画面の説明は `PANEL-GUIDE.ja.md` にあります。ページは英語か日本語で表示します（ブラウザの言語、または Display > Language）。
+`http://127.0.0.1:LAUNCHER_PORT/panel` を開きます。`glm53.t4.conf.example` では `127.0.0.1:8010` です（`LAUNCHER_PORT` が無ければ `PORT` + 10）。他のマシンからは、ポートを転送する（`ssh -L 8010:127.0.0.1:8010 FIRST-NODE` のあと `http://127.0.0.1:8010/panel`）。ランチャーはループバックでだけ待ち受け、ほかの `LAUNCHER_HOST` は拒否します。届いた人なら誰でもエンジンの起動・停止・入れ替えができてしまうためです。ページのそれ以外の呼び出しはランチャーを通ってエンジンに届くので、エンジンが動いていてもいなくても、ページのアドレスは 1 つです。パネルを使う間は、エンジンの起動と停止はパネルから行ってください。画面の説明は `PANEL-GUIDE.ja.md` にあります。ページは英語か日本語で表示します（ブラウザの言語、または Display > Language）。
 
 - **起動**（パネルから）: ランチャーは全ノードを確かめ（つながること、エンジンや他の GPU プロセスが無いこと、計画がメモリに収まること）、幅を expert の計画（`launch/plan-<時刻>.json`）に書き、全ノードにコピーして、それを使って `tf-glm53 up` を実行します。ページには各層の読み込みが表示されます。routed expert はすべてバンクから、それ以外の重みはチェックポイントから読みます。
 - **drafter** は、起動画面で KV の形式と並べて起動ごとに選びます: MTP（チェックポイントの層）、DFlash2（`glm53.conf` の `DRAFTER` に全ノードでモデルがあるときだけ。上の「DFlash2 を使う手順」）、なし。既定は `DRAFTER_KIND` です。メモリはそれぞれ違い、DFlash2 は MTP より 1 台あたり約 4 GiB 少なく残すので、選んだ drafter で計画し直します。
@@ -219,7 +219,7 @@ done
 リリースはコンテナイメージとしても配布します。中身は、`/opt/glm53` に置いたアーカイブのファイルと、サーバーの実行に要るもの（cuBLAS 13、libibverbs とそのプロバイダー、NCCL 2.30.7）です。`glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定すると、`tf-glm53` は ssh で各ノードに入り、ランクを `IMAGE` のコンテナとして起動します。このとき各ノードに要るのは、cuBLAS・libibverbs・NCCL の代わりに Docker と NVIDIA Container Toolkit です（DGX OS には両方あります）。`tf-glm53` を動かすユーザーは、各ノードで `docker` を実行できる必要があります（`docker` グループ）。`tf-glm53`、コントロールパネルのランチャー、設定はアーカイブのときと同じく 1 台目のホストに置き、重みと expert のバンクもホストに置いたままです。
 
 ```sh
-I=ghcr.io/fiore-labo/fiore-glm5.3:r3-102
+I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102
 docker pull $I                                                # 各ノードで
 mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out $I install /out
 cd glm53 && cp glm53.conf.example glm53.conf                  # または glm53.t4.conf.example。RUNTIME=docker と IMAGE=$I を設定
@@ -235,11 +235,9 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # または glm53.
 
 ## 他のマシンへの提供
 
-サーバーは既定で `127.0.0.1` で待ち受け、OpenAI chat API を提供します。他のマシンに提供するには `HOST` を設定します。`API_KEY_FILE` を設定するとキーが必須になります。キーなしでループバック以外のアドレスを指定すると、`tf-glm53` は警告を出して起動し、API は届く人なら誰でも使える状態になります。サーバーは平文の HTTP で通信します。前段に TLS を置くか、閉じたネットワーク内に留めてください。そうしないとキーが平文で流れます。
+サーバーは既定で `127.0.0.1` で待ち受け、OpenAI chat API を提供します。他のマシンに提供するには `HOST` を設定します。API にキーはありません。ループバック以外のアドレスを指定すると、`tf-glm53` は警告を出して起動し、API は届く人なら誰でも使える状態になります。サーバーは平文の HTTP で通信するので、閉じたネットワーク内に留めるか、前段に TLS とアクセス制御（リバースプロキシ）を置いてください。コントロールパネルのランチャーはどちらの場合もループバックのままで、他のマシンからは ssh トンネルでパネルを開きます（「コントロールパネル」）。
 
-API キーファイルは 1 台目のノードでのみ読み込まれます。1 行に 1 つのキーを書き（`KEY` または `LABEL: KEY`、`#` 以降はコメント）、他のユーザーが読めない通常ファイル（`chmod 600`）でなければなりません。そうでなければサーバーは起動を拒否します。`tf-glm53 check` はこの両方を検査します。`tf-glm53 deploy` はこのファイルを他のノードにコピーしません。クライアントは `Authorization: Bearer KEY` を送ります。
-
-別のホストのモニタは、API に触れずにサーバーの状態を読めます。`METRICS_LISTEN=HOST:PORT`（例: `0.0.0.0:9894`）を設定すると、1 台目のノードがそのアドレスでも `GET /metrics`（Prometheus のテキスト）と `GET /health` にキーなしで答えます。それ以外には答えず（ほかのリクエストは 404）、API は `HOST` のままです。`tf-glm53 status` がアドレスを表示します。このポートは閉じたネットワーク内に留めてください。プロンプトや応答は出しませんが、負荷とトークン数は見えます。`tensorfold_health:*_total` のカウンタは実行中のリクエストの分も含み、後戻りしないので、速さは 2 回の読み取りの差から出します: prefill の tokens/s = Δ`prefill_tokens_total` / Δ`prefill_seconds_total`、decode = Δ`completion_tokens_total` / Δ`decode_seconds_total`、キャッシュのヒット率 = Δ`cached_tokens_total` / Δ`prompt_tokens_total`、ドラフトの受理率 = Δ`accepted_total` / Δ`drafted_total`。`tensorfold:requests_prefilling` と `tensorfold:requests_decoding` は実行中のリクエストの段階、`tensorfold:prefill_tokens_remaining` はその prefill の残り、`tensorfold:pool_*` は会話のキャッシュ、`tensorfold:engine_info` は設定を示します。
+別のホストのモニタは、API に触れずにサーバーの状態を読めます。`METRICS_LISTEN=HOST:PORT`（例: `0.0.0.0:9894`）を設定すると、1 台目のノードがそのアドレスでも `GET /metrics`（Prometheus のテキスト）と `GET /health` に答えます。それ以外には答えず（ほかのリクエストは 404）、API は `HOST` のままです。`tf-glm53 status` がアドレスを表示します。このポートは閉じたネットワーク内に留めてください。プロンプトや応答は出しませんが、負荷とトークン数は見えます。`tensorfold_health:*_total` のカウンタは実行中のリクエストの分も含み、後戻りしないので、速さは 2 回の読み取りの差から出します: prefill の tokens/s = Δ`prefill_tokens_total` / Δ`prefill_seconds_total`、decode = Δ`completion_tokens_total` / Δ`decode_seconds_total`、キャッシュのヒット率 = Δ`cached_tokens_total` / Δ`prompt_tokens_total`、ドラフトの受理率 = Δ`accepted_total` / Δ`drafted_total`。`tensorfold:requests_prefilling` と `tensorfold:requests_decoding` は実行中のリクエストの段階、`tensorfold:prefill_tokens_remaining` はその prefill の残り、`tensorfold:pool_*` は会話のキャッシュ、`tensorfold:engine_info` は設定を示します。
 
 ## 速度
 
@@ -269,7 +267,6 @@ API キーファイルは 1 台目のノードでのみ読み込まれます。1
 | `RoCE-v2-GID` | そのポートに、IPv4 アドレスを持つ RoCE v2 のエントリがありません。ポートにアドレスを割り当てるか、`GID_INDEX` を設定します |
 | `GPU-busy` | 別のプロセスが GPU を使っています（`nvidia-smi`） |
 | `memory(N<M GiB)` | そのノードのメモリを空けるか、`STORE` を下げます |
-| `API_KEY_FILE ...` | その行の表示に従います |
 
 `up` が失敗すると、すべてのランクを停止して理由を表示します。各ノードには自分のランクのログが残ります（`logs/rankR.log`、`tf-glm53 logs R`）。
 

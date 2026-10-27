@@ -48,7 +48,7 @@ Not in the archive: the model weights, the expert banks, the DFlash2 drafter and
 (section 4).
 The weights and the banks can also be made from Z.AI's official BF16 checkpoint without any of Fiore-lab's files, on
 GPU hosts: `glm53/weights/README.md` in the source repository
-(<https://github.com/fiore-labo/fiore-glm5.3/tree/main/glm53/weights>), not in the archive.
+(<https://github.com/fiore-labo/ExpertAtlas-GLM5.3/tree/main/glm53/weights>), not in the archive.
 
 ## 3. How it works, in short
 
@@ -112,9 +112,9 @@ details; the image can also be built from the archive (`docker/Dockerfile`).
    usual pair (277.9 and 368.5 GB); `-2bit` (187.3 GB) and `-5bit` (459.1 GB) are optional. The eight-node checkpoint
    can serve as the 4-bit bank (`RUNTIME.md`, "The control panel"). Check them with `./tf-glm53 verify-banks 3 4`.
 2. `./tf-glm53 launcher` on the first node; open `http://127.0.0.1:8010/panel` there (without `LAUNCHER_PORT`, the
-   port is `PORT` + 10), or forward the port (`ssh -L 8010:127.0.0.1:8010 FIRST-NODE`). Away from loopback the
-   launcher needs `LAUNCHER_HOST` and `API_KEY_FILE`, and the page takes the key once from its address
-   (`/panel#key=KEY`). The launcher stays on whether the engine runs or not; the page reaches the engine through it.
+   port is `PORT` + 10), or from another machine through an ssh tunnel (`ssh -L 8010:127.0.0.1:8010 FIRST-NODE`). The
+   launcher listens on loopback only and refuses another `LAUNCHER_HOST`: anyone who reached it could start, stop and
+   swap the engine. It stays on whether the engine runs or not; the page reaches the engine through it.
 3. On the page: choose a plan, the KV format, the context, the store, what each node keeps for the OS and the drafter;
    check the memory verdict; press Start (then Confirm). Stop from the page too.
 
@@ -127,8 +127,8 @@ details; the image can also be built from the archive (`docker/Dockerfile`).
 | `NCCL_LIB` | NCCL 2.30.7's `libnccl.so.2`, the same path on every node | the same |
 | `WEIGHTS` | the checkpoint's directory, the same path on every node | the 8x / 4x checkpoint |
 | `DRAFTER_KIND`, `MTP_K`, `DRAFTER` | the drafter (`mtp`, `dflash2`, `none`), MTP's drafts a round (3), DFlash2's directory | `mtp`, 3, empty |
-| `NAME`, `HOST`, `PORT`, `API_KEY_FILE` | the model name in the API, the listen address and port, the key file | `glm-5.3`, `127.0.0.1`, 8000, empty |
-| `METRICS_LISTEN` | an extra read-only address answering `/metrics` and `/health` without a key | off |
+| `NAME`, `HOST`, `PORT` | the model name in the API, the listen address and port | `glm-5.3`, `127.0.0.1`, 8000 |
+| `METRICS_LISTEN` | an extra read-only address answering `/metrics` and `/health` only | off |
 | `CONTEXT` | positions one request may reach, prompt and reply together | 819,200 / 737,280 |
 | `STORE` | positions kept beyond `CONTEXT` for earlier conversations (pool: 512 at least) | 819,200 / 100,000 |
 | `CACHE` | `pool` (shared blocks) or `slots` (one store per conversation) | `pool` |
@@ -179,9 +179,9 @@ forever).
 - Refused with 400: `n` other than 1, `logprobs`, `response_format` `json_object`, `tool_choice` `required`, images
   (text only), a `max_tokens` beyond the context. A streamed request that cannot fit ends with an error event.
 - A client that disconnects cancels its request.
-- Keys: when `API_KEY_FILE` is set, clients send `Authorization: Bearer KEY`. Without a key on a non-loopback `HOST`
-  the API is open to anyone who can reach it. The server speaks plain HTTP: keys and text cross the network in the
-  clear unless TLS is put in front or the server stays on a closed network.
+- No key: the API has none. On a non-loopback `HOST` it is open to anyone who can reach it, and the server speaks
+  plain HTTP, so text crosses the network in the clear unless the server stays on a closed network or TLS and access
+  control are put in front.
 - Speeds from the counters: decode tokens/s = Δ`completion_tokens_total` / Δ`decode_seconds_total`; prefill tokens/s
   = Δ`prefill_tokens_total` / Δ`prefill_seconds_total`; tokens kept per draft round = Δ`completion_tokens_total` /
   Δ`rounds_total` (1 means no draft was kept); cache hits = Δ`cached_tokens_total` / Δ`prompt_tokens_total`. The
@@ -300,5 +300,5 @@ the launcher's log in `logs/`.
 - A container needs the GPU, `/dev/infiniband`, the host network and
   `--ulimit memlock=-1 --ulimit nofile=1048576:1048576`; inside one, `tf-glm53 check` cannot see other containers' GPU
   processes.
-- The API listens on loopback by default; serving other machines needs `HOST`, and without `API_KEY_FILE` the API is
-  then open.
+- The API listens on loopback by default; serving other machines needs `HOST`, and the API, which has no key, is then
+  open to anyone who can reach it. The control panel stays on loopback (an ssh tunnel from another machine).
