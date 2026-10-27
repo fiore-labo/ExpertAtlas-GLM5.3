@@ -54,6 +54,8 @@ done; wait
 
 コピーを確認するには、全ノードで `cd ~/models/GLM-5.3-EXL3-8x-DGX-Sparks && sha256sum -c --quiet SHA256SUMS` を実行します。1 台あたり数分かかり、すべてのファイルが一致すれば何も出力しません（このディレクトリを配置した後なら、`./tf-glm53 verify` で全ノードを一度に確認できます）。`glm53.conf` の `WEIGHTS` にこのディレクトリ（ここでは `~/models/GLM-5.3-EXL3-8x-DGX-Sparks`）を指定します。
 
+重みのファイル（チェックポイントと expert バンク）はどれも、Fiore-lab のファイルを使わずに、Z.AI の公式 BF16 チェックポイントから GPU のあるホストで作ることもできます。手順はソースリポジトリの `glm53/weights/README.ja.md` にあります（<https://github.com/fiore-labo/fiore-glm5.3/blob/main/glm53/weights/README.ja.md>。アーカイブにはこのディレクトリは入っていません）。
+
 ## 起動
 
 ```sh

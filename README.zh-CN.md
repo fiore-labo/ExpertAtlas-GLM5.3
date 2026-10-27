@@ -33,6 +33,7 @@ GLM-5.3 为每个 token 在每层 256 个路由专家中选出 8 个，而不同
 - DGX OS（Ubuntu 24.04），NVIDIA 驱动 580 或更高版本，以及 cuBLAS 13。
 - 每个节点上都有 NCCL 2.30.7：即 NVIDIA 的 `nvidia-nccl-cu13` wheel，由 pip 解包（见 `packaging/RUNTIME.md`）。
 - 与节点数相符的 Fiore-lab EXL3 检查点（Hugging Face），在每个节点上放在相同路径下：八个节点用 `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`（390 GB），四个节点用 `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`（344.6 GB）。四节点检查点中，第 3 至 77 层的路由专家里使用最少的一半为 3 bit，其余为 4 bit；其他部分与八节点检查点相同。
+- 所有权重文件也都可以不使用 Fiore-lab 的任何文件，从 Z.AI 官方的 BF16 检查点自行制作（`glm53/weights/README.zh-CN.md`）。
 - 控制面板需要所用位宽的专家 bank，四个节点时为 3 bit 和 4 bit 的 bank（277.9 GB 和 368.5 GB；八节点检查点可以作为 4 bit bank；只有 4 bit 时上下文会更短），以及供启动器使用的各节点上的 `python3`。
 
 ## 运行

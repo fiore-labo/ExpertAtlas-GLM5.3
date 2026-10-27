@@ -46,6 +46,9 @@ server needs no Python at run time.
 
 Not in the archive: the model weights, the expert banks, the DFlash2 drafter and NCCL. They are downloaded separately
 (section 4).
+The weights and the banks can also be made from Z.AI's official BF16 checkpoint without any of Fiore-lab's files, on
+GPU hosts: `glm53/weights/README.md` in the source repository
+(<https://github.com/fiore-labo/fiore-glm5.3/tree/main/glm53/weights>), not in the archive.
 
 ## 3. How it works, in short
 
@@ -95,6 +98,7 @@ details; the image can also be built from the archive (`docker/Dockerfile`).
 3. The checkpoint, at the same path on every node: `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks` (390 GB, eight nodes) or
    `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks` (344.6 GB, four nodes). Download once with the Hugging Face CLI, copy with
    `rsync` to the other nodes, check with `./tf-glm53 verify`.
+   The checkpoint can also be made from the official BF16 checkpoint (section 2, `glm53/weights/`).
 4. Unpack the archive on the first node, `sha256sum -c SHA256SUMS`, copy the right example to `glm53.conf`, set
    `NODES`, `SOCKET_IFNAME`, `IB_HCA`, `NCCL_LIB`, `WEIGHTS`.
 5. `./tf-glm53 deploy` (copies the directory to the other nodes), then `./tf-glm53 up` (checks every node, starts the

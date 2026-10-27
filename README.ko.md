@@ -33,6 +33,7 @@ GLM-5.3은 토큰마다 레이어당 256개의 routed expert 가운데 8개를 �
 - DGX OS(Ubuntu 24.04), NVIDIA 드라이버 580 이상, cuBLAS 13.
 - 모든 노드에 NCCL 2.30.7. NVIDIA의 `nvidia-nccl-cu13` wheel을 pip으로 풀어 놓은 것입니다(`packaging/RUNTIME.md`).
 - 노드 수에 맞는 Fiore-lab의 EXL3 체크포인트(Hugging Face). 모든 노드의 같은 경로에 둡니다. 8대는 `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`(390 GB), 4대는 `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`(344.6 GB)입니다. 4대용 체크포인트는 레이어 3부터 77까지의 routed expert 가운데 사용 빈도가 낮은 절반을 3비트, 나머지를 4비트로 담고 있으며, 그 밖에는 8대용 체크포인트와 같습니다.
+- 모든 가중치 파일은 Fiore-lab의 파일 없이 Z.AI의 공식 BF16 체크포인트에서 직접 만들 수도 있습니다(`glm53/weights/README.md`, 영어).
 - 컨트롤 패널에는 사용하는 폭의 expert 뱅크가 필요합니다. 4대에서는 3비트와 4비트 뱅크(277.9 GB와 368.5 GB. 8대용 체크포인트를 4비트 뱅크로 쓸 수 있습니다. 4비트만으로는 문맥이 짧아집니다)와, 런처를 위한 각 노드의 `python3`이 필요합니다.
 
 ## 실행

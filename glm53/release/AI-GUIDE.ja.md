@@ -38,6 +38,7 @@
 | `VERSION`、`SHA256SUMS`、`LICENSE`、`NOTICE`、`LICENSES/`、`THIRD_PARTY_NOTICES.md` | リリースの情報とライセンス |
 
 アーカイブに含まれないもの: モデルの重み、expert バンク、DFlash2 の drafter、NCCL。これらは別にダウンロードします（4 節）。
+重みとバンクは、Fiore-lab のファイルを使わずに、Z.AI の公式 BF16 チェックポイントから GPU のあるホストで作ることもできます。手順はソースリポジトリの `glm53/weights/README.ja.md`（<https://github.com/fiore-labo/fiore-glm5.3/blob/main/glm53/weights/README.ja.md>）にあり、アーカイブには入っていません。
 
 ## 3. 仕組みの要点
 

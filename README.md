@@ -67,6 +67,8 @@ details.
   `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks` (390 GB) for eight nodes, `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks` (344.6 GB)
   for four. The four-node checkpoint holds the routed experts of layers 3 to 77 at 3 bits for the least used half and
   at 4 bits for the rest; everything else is as in the eight-node checkpoint.
+- Every weight file can also be made yourself from Z.AI's official BF16 checkpoint, without any of Fiore-lab's files:
+  `glm53/weights/README.md`.
 - For the control panel: the expert banks of the widths it uses, on four nodes the 3- and 4-bit banks (277.9 and
   368.5 GB; the eight-node checkpoint can serve as the 4-bit bank; with 4 bits alone the context is shorter), and
   `python3` on the nodes for the launcher.

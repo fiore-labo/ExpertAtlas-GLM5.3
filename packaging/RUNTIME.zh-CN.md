@@ -54,6 +54,8 @@ done; wait
 
 要校验副本，请在每个节点上运行 `cd ~/models/GLM-5.3-EXL3-8x-DGX-Sparks && sha256sum -c --quiet SHA256SUMS`：每个节点需几分钟，所有文件都一致时不输出任何内容（部署本目录之后，`./tf-glm53 verify` 可一次校验所有节点）。`glm53.conf` 中的 `WEIGHTS` 指定该目录（此处为 `~/models/GLM-5.3-EXL3-8x-DGX-Sparks`）。
 
+所有权重文件（检查点和专家 bank）也都可以不使用 Fiore-lab 的任何文件，在有 GPU 的主机上从 Z.AI 官方的 BF16 检查点自行制作。步骤见源代码仓库中的 `glm53/weights/README.zh-CN.md`（<https://github.com/fiore-labo/fiore-glm5.3/blob/main/glm53/weights/README.zh-CN.md>；归档中不包含该目录）。
+
 ## 启动
 
 ```sh

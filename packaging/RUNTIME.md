@@ -82,6 +82,10 @@ node: a few minutes each, silent when every file matches (or, once this director
 does it on every node at once). `WEIGHTS` in `glm53.conf` names the directory
 (`~/models/GLM-5.3-EXL3-8x-DGX-Sparks` here).
 
+Every weight file, the checkpoints and the expert banks, can also be made from Z.AI's official BF16 checkpoint
+without any of Fiore-lab's files, on GPU hosts: `glm53/weights/README.md` in the source repository
+(<https://github.com/fiore-labo/fiore-glm5.3/tree/main/glm53/weights>; the archive does not carry that directory).
+
 ## Start
 
 ```sh

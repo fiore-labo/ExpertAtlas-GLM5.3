@@ -33,6 +33,7 @@ GLM-5.3 はトークンごとに、1 層 256 個の routed expert から 8 個�
 - DGX OS（Ubuntu 24.04）、NVIDIA ドライバ 580 以降、cuBLAS 13。
 - 全ノードに NCCL 2.30.7。NVIDIA の `nvidia-nccl-cu13` wheel を pip で展開したものです（`packaging/RUNTIME.md`）。
 - ノード数に合った Fiore-lab の EXL3 チェックポイント（Hugging Face）。全ノードの同じパスに置きます。8 台では `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`（390 GB）、4 台では `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`（344.6 GB）です。4 台用のチェックポイントは、層 3〜77 の routed expert のうち使用頻度の低い半分を 3 ビット、残りを 4 ビットで持ち、それ以外は 8 台用のチェックポイントと同じです。
+- 重みのファイルはどれも、Fiore-lab のファイルを使わずに、Z.AI の公式 BF16 チェックポイントから自分で作ることもできます（`glm53/weights/README.ja.md`）。
 - コントロールパネルには、使う幅の expert のバンク。4 台では 3 ビットと 4 ビットのバンク（277.9 GB と 368.5 GB。8 台用のチェックポイントを 4 ビットのバンクとして使えます。4 ビットだけでは文脈が短くなります）と、ランチャー用に各ノードの `python3`。
 
 ## 実行
