@@ -137,30 +137,53 @@ fn sameDir(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, std.mem.trimEnd(u8, a, "/"), std.mem.trimEnd(u8, b, "/"));
 }
 
-/// The largest layer's new slabs (made beside the old ones) and its reads on the host, plus the growth, must fit in
-/// MemAvailable with TF_GLM53_SWAP_MARGIN_GIB (default 2) to spare: on GB10 a device allocation past it livelocks the
-/// node.
-/// 最大の層の新しい置き場 (古いものと並べて作る) とホスト上の読み込み、それに増える分が、TF_GLM53_SWAP_MARGIN_GIB
-/// (既定 2) を残して MemAvailable に収まること: GB10 ではそれを超えるデバイスの確保でノードがライブロックする。
+/// Each layer, in the order `apply` takes them, must fit in MemAvailable with TF_GLM53_SWAP_MARGIN_GIB (default 2) to
+/// spare: its new slabs (made beside the old ones) and its reads on the host, on top of the growth of the layers changed
+/// before it. On GB10 a device allocation past it livelocks the node. (The net growth alone is not enough: a re-sort
+/// that keeps every width's count can grow its first layers by most of a GiB a rank and shrink the later ones.)
+/// `apply` の順で各層が、TF_GLM53_SWAP_MARGIN_GIB (既定 2) を残して MemAvailable に収まること: その層の新しい置き場
+/// (古いものと並べて作る) とホスト上の読み込みを、それより前に変えた層で増えた分の上に。GB10 ではそれを超えるデバイスの
+/// 確保でノードがライブロックする。(差し引きの増分だけでは足りない: 幅ごとの数を保つ並べ替えでも、前の層で 1 ランク
+/// 1 GiB 近く増え、後の層で減ることがある。)
 fn checkMemory(e: *const Engine, target: []const u8) !void {
     const E = e.cfg.experts;
-    var worst: u64 = 0;
+    var peak: u64 = 0;
+    var peak_layer: usize = 0;
+    var peak_slabs: u64 = 0;
+    var peak_grown: u64 = 0;
     var grow: i64 = 0;
-    for (e.layers) |*L| if (L.experts) |*x| {
+    for (0..2) |pass| for (e.layers) |*L| if (L.experts) |*x| {
         const li = L.index - e.xfirst;
         const tgt = target[li * E ..][0..E];
         const cur = e.xbits[li * E ..][0..E];
-        if (std.mem.eql(u8, tgt, cur)) continue;
-        worst = @max(worst, layerNeed(x, tgt, cur));
+        if (std.mem.eql(u8, tgt, cur) or swapPass(tgt, cur) != pass) continue;
+        const slabs = layerNeed(x, tgt, cur);
+        const grown: u64 = @intCast(@max(grow, 0));
+        if (grown + slabs > peak) {
+            peak = grown + slabs;
+            peak_layer = L.index;
+            peak_slabs = slabs;
+            peak_grown = grown;
+        }
         const unit = expertUnit(x);
         for (tgt, cur) |t, c| grow += @as(i64, @intCast(unit * t)) - @as(i64, @intCast(unit * c));
     };
-    const need = worst + @as(u64, @intCast(@max(grow, 0))) + marginBytes();
+    const need = peak + marginBytes();
     const avail = availBytes(e.io);
     if (avail < need) {
-        std.log.err("glm53: rank {d}: expert swap needs {d} MiB available (largest layer {d} MiB, growth {d} MiB, margin {d} MiB), MemAvailable {d} MiB", .{ e.rank, need >> 20, worst >> 20, @max(grow, 0) >> 20, marginBytes() >> 20, avail >> 20 });
+        std.log.err("glm53: rank {d}: expert swap needs {d} MiB available (layer {d}: its slabs {d} MiB after a growth of {d} MiB, margin {d} MiB), MemAvailable {d} MiB", .{ e.rank, need >> 20, peak_layer, peak_slabs >> 20, peak_grown >> 20, marginBytes() >> 20, avail >> 20 });
         return error.SwapLowMemory;
     }
+}
+
+/// The pass of `apply` a changed layer goes in: 0 for one whose bits do not grow (its old slabs freed early), 1 for one
+/// that grows. By the bits, not the bytes, so every rank takes the layers in the same order.
+/// `apply` で変わる層を回すパス: bit が増えない層は 0 (古い置き場を先に解放する)、増える層は 1。バイトでなく bit で
+/// 決めるので、どのランクも同じ順で層を回す。
+fn swapPass(tgt: []const u8, cur: []const u8) usize {
+    var d: i64 = 0;
+    for (tgt, cur) |t, c| d += @as(i64, t) - @as(i64, c);
+    return @intFromBool(d > 0);
 }
 
 /// One expert's bytes per bit on this rank: three projections of dims x width, K2 = 2 x bits, dims x width / 16 x K2.
@@ -224,11 +247,15 @@ pub fn apply(e: *Engine, target: []const u8, progress: ?Progress, sync: ?Sync, s
     defer st.ms = @intCast(@max(0, t0.durationTo(std.Io.Clock.awake.now(e.io)).toMilliseconds()));
     const n_moe: u32 = @intCast(e.xbits.len / E);
     var done: u32 = 0;
-    for (e.layers) |*L| {
+    // the layers that do not grow first, then the ones that grow (swapPass): the memory a re-sort frees comes before
+    // the memory it takes
+    // 増えない層を先に、増える層を後に (swapPass): 並べ替えで空くメモリを、使うメモリより先に
+    for (0..2) |pass| for (e.layers) |*L| {
         const x = if (L.experts) |*xx| xx else continue;
         const li = L.index - e.xfirst;
         const tgt = target[li * E ..][0..E];
         const cur = e.xbits[li * E ..][0..E];
+        if (swapPass(tgt, cur) != pass) continue;
         if (!std.mem.eql(u8, tgt, cur)) {
             // the old slabs' memory comes back to GB10 some time after they are freed: wait for this layer's
             // 古い置き場のメモリは解放の少し後で GB10 に戻る: この層の分を待つ
@@ -256,7 +283,7 @@ pub fn apply(e: *Engine, target: []const u8, progress: ?Progress, sync: ?Sync, s
         }
         done += 1;
         if (progress) |p| p.f(p.ctx, done, n_moe);
-    }
+    };
 }
 
 fn closeReaders(readers: *[max_bits + 1]?weights.Reader) void {

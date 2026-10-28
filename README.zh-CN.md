@@ -10,11 +10,18 @@
 
 ## 功能
 
-- 张量并行 8 或 4，KV 缓存在 rank 对之间切分（解码上下文并行 2）。引擎和模型最多支持 1M（1,048,576 个 token）；上下文上限由 DGX Spark 的内存决定：**八个节点（FP8 KV 缓存）为 1M，四个节点（4 bit KV 缓存）约 800K（819,200）**。设置示例中为 819,200 和 737,280；在相同内存下，八个节点可设 `CONTEXT=1048576` `STORE=589824`，四个节点可设 `CONTEXT=819200` `STORE=18080`（KV 池保存 `CONTEXT` + `STORE` 个 token）。
+- 张量并行 8 或 4，KV 缓存在 rank 对之间切分（解码上下文并行 2）。引擎和模型最多支持 1M（1,048,576 个 token），**八个节点和四个节点都能达到 1M**。八个节点：使用 4 bit KV 缓存（`KV=fp4`，`NEED_GB=100`）时，除 `CONTEXT=1048576` 外还可设 `STORE=1048576`（每个节点约余 23 GiB），使用 8 bit 缓存时为 `STORE=589824`。四个节点：在控制面板中将 70 % 的路由专家设为 3 bit、其余设为 4 bit，可设 `CONTEXT=1048576`（`KV=fp4`，`STORE` 512；每个节点约余 7.5 GiB，足以在运行中重排专家）；只用四节点检查点时为 `CONTEXT=819200` `STORE=18080`。以上均用一个约 1,019,000 个 token 的提示词实测。4 bit KV 缓存会略微降低精度（相同权重下 KL 为 0.0190，8 bit 缓存为 0.0156：[glm53/release/T4.zh-CN.md](glm53/release/T4.zh-CN.md)）；下文八个节点的速度使用 8 bit 缓存。设置示例中为 819,200 和 737,280（KV 池保存 `CONTEXT` + `STORE` 个 token）。
 - 长提示词按序列并行分段读入；解码步的集合通信走 RoCE。
 - 所有对话共用一个对话缓存，以 256 个 token为一块：请求会从任意对话中已缓存的最长前缀接着处理；开头相同的对话（智能体的系统提示词、其子智能体）共享的块只保存一份。
 - 每一轮由模型校验草稿：草稿默认来自 GLM-5.3 自带的 MTP 层，也可来自可选的 DFlash2 草稿模型。无论哪种情况，回复都由模型本身决定。
 - `/metrics`（Prometheus 文本格式）和 `/health` 也统计正在运行的请求，因此监控程序在请求运行期间也能读取 prefill 与解码速度、缓存命中和草稿接受情况。设置 `METRICS_LISTEN` 后，这两个端点会在单独的地址上以只读方式开放，供其他主机上的监控程序使用。
+
+## r3.1-102 的变化
+
+- API 和控制面板默认在所有地址（`HOST=0.0.0.0`、`LAUNCHER_HOST=0.0.0.0`）上监听，没有密钥：网络中的其他机器可以直接访问。请将节点留在封闭网络中（`HOST=127.0.0.1` / `LAUNCHER_HOST=127.0.0.1` 后只能从第一个节点访问）。
+- 通过 Messages API 使用 Claude Code：`claude-glm53` 让 Claude Code 连接到服务器并启动，服务器把它的对话保留在缓存中、让长提示的流保持连接，并把图片换成注记（[packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)“Claude Code”）。
+- 控制面板也能用于由 `./tf-glm53 up` 启动的引擎（引擎默认统计专家的使用次数）；运行中的重新排序会先替换不会变大的层，并在开始前按替换过程中的内存峰值检查每个节点；内存不足的节点会在面板上标出。
+- `glm53.conf` 的全部设置项：[glm53/release/CONFIG.zh-CN.md](glm53/release/CONFIG.zh-CN.md)。
 
 ## Expert Atlas（r3-102 新功能）
 
@@ -70,11 +77,13 @@ python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
 发布以容器镜像和内容相同的归档两种形式提供；推荐使用镜像。使用镜像时，每个节点只需要 Docker 和 NVIDIA Container Toolkit（DGX OS 两者都有），不需要服务器的库：
 
 ```sh
-docker pull ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102            # 在每个节点上
-mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102 install /out
+docker pull ghcr.io/fiore-labo/expertatlas-glm5.3:r3.1-102            # 在每个节点上
+mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/expertatlas-glm5.3:r3.1-102 install /out
 ```
 
-然后在 `glm53.conf` 中设置 `RUNTIME=docker` 和 `IMAGE`，再按下文继续（[packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)“在容器中运行”）。不使用 Docker 时：下载发布归档 `tensorfold-r3-102-linux-aarch64.tar.gz`，并按照其中的 `RUNTIME.md`（本仓库中为 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)）操作。四个节点和八个节点使用同一个归档和同一个启动脚本：将 `glm53.conf.example`（八个节点）或 `glm53.t4.conf.example`（四个节点，见 [glm53/release/T4.zh-CN.md](glm53/release/T4.zh-CN.md)）复制为 `glm53.conf`，填写节点、网络名称、NCCL、权重和草稿模型，然后执行 `./tf-glm53 deploy` 和 `./tf-glm53 up`。除非为服务器指定其他地址，否则它在 `127.0.0.1` 上提供 OpenAI chat API。API 没有密钥：使用其他地址时，任何能访问到它的人都可以使用，请只在封闭网络中使用，或在其前面加一层 TLS 和访问控制。
+然后在 `glm53.conf` 中设置 `RUNTIME=docker` 和 `IMAGE`，再按下文继续（[packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)“在容器中运行”）。不使用 Docker 时：下载发布归档 `tensorfold-r3.1-102-linux-aarch64.tar.gz`，并按照其中的 `RUNTIME.md`（本仓库中为 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)）操作。四个节点和八个节点使用同一个归档和同一个启动脚本：将 `glm53.conf.example`（八个节点）或 `glm53.t4.conf.example`（四个节点，见 [glm53/release/T4.zh-CN.md](glm53/release/T4.zh-CN.md)）复制为 `glm53.conf`，填写节点、网络名称、NCCL、权重和草稿模型，然后执行 `./tf-glm53 deploy` 和 `./tf-glm53 up`。服务器默认在所有地址（`HOST=0.0.0.0`）上提供 OpenAI chat API。API 没有密钥，任何能访问到它的人都可以使用：请只在封闭网络中使用，或在其前面加一层 TLS 和访问控制（设置 `HOST=127.0.0.1` 后只能从第一个节点访问）。
+
+若要用控制面板代替 `./tf-glm53 up`，请在第一个节点上运行 `./tf-glm53 launcher`，并打开 `http://FIRST-NODE:LAUNCHER_PORT/panel`（四节点示例中端口为 8010）：引擎在那里启动和停止（[packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)“控制面板”）。`glm53.conf` 的全部设置项、由谁读取以及修改何时生效，见 [glm53/release/CONFIG.zh-CN.md](glm53/release/CONFIG.zh-CN.md)。
 
 ## 草稿模型
 
@@ -113,7 +122,7 @@ mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out g
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so
-zig build dist -Dversion=r3-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.1-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 

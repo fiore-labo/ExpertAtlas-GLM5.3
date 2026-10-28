@@ -1,5 +1,6 @@
 # Four nodes (tensor parallelism 4): the settings of T4.md. Copy to glm53.conf next to tf-glm53 and set NODES, the
-# network devices and the paths; the rest is the measured configuration.
+# network devices and the paths; the rest is the measured configuration. Every setting, its default, who reads it and
+# when a change takes effect: CONFIG.md.
 
 # The four nodes in rank order, by the address of the RDMA network; run tf-glm53 on the first one.
 NODES=(192.0.2.11 192.0.2.12 192.0.2.13 192.0.2.14)
@@ -17,7 +18,7 @@ NCCL_LIB=~/nccl-2.30.7/nvidia/nccl/lib/libnccl.so.2
 # node needs Docker and the NVIDIA container toolkit, and the libraries are the image's, so NCCL_LIB is not used).
 # RUNTIME.md, "Running in containers".
 #RUNTIME=docker
-#IMAGE=glm53-tensorfold:r3-102
+#IMAGE=glm53-tensorfold:r3.1-102
 
 # The four-node checkpoint, fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks on Hugging Face (the 3 / 4-bit expert mix, T4.md),
 # the same path on every node.
@@ -30,10 +31,11 @@ MTP_K=3
 DRAFTER=
 #DRAFTER=~/models/GLM-5.3-DFlash2
 
-# The server. The API has no key: with HOST other than loopback it is open to anyone who can reach it, so keep it
-# on a closed network or put TLS and access control in front.
+# The server. HOST 0.0.0.0 (every address) serves the network. The API has no key, so anyone who can reach it can use
+# it: keep the nodes on a closed network or put TLS and access control in front, or set HOST=127.0.0.1 to keep the API
+# to this node (another machine then reaches it through an ssh tunnel).
 NAME=glm-5.3
-HOST=127.0.0.1
+HOST=0.0.0.0
 PORT=8000
 # A monitor on another host: rank 0 also answers GET /metrics (Prometheus text) and /health at this HOST:PORT,
 # read-only, while the API stays on HOST. Empty: off. Keep it on a closed network.
@@ -42,6 +44,8 @@ PORT=8000
 # The measured configuration: 737,280 positions a request (prompt + reply), 100,000 more kept for earlier
 # conversations (the pool holds 837,280 positions in blocks of 256 that every conversation shares), decode context
 # parallelism 2, prompt chunks of 16,384 rows in 4 sequence-parallel parts, the 4-bit KV cache.
+# From the control panel four nodes reach a context of 1,048,576: 3 bits for 70 % of the routed experts, 4 bits for
+# the rest, STORE 512 (about 7.5 GiB a node to spare, enough for a live re-sort).
 CONTEXT=737280
 STORE=100000
 CACHE=pool
@@ -65,11 +69,12 @@ READY_TIMEOUT=900
 
 # The control panel, Expert Atlas (RUNTIME.md, "The control panel"): `./tf-glm53 launcher` serves it at
 # http://LAUNCHER_HOST:LAUNCHER_PORT/panel, and starts and stops the engine with the routed experts' widths chosen
-# there, from the banks listed in expert-plan/banks.json. Loopback only (another LAUNCHER_HOST is refused): from another
-# machine, an ssh tunnel (ssh -L 8010:127.0.0.1:8010 FIRST-NODE). ATLAS_DIR keeps the saved allocations (default: atlas/
+# there, from the banks listed in expert-plan/banks.json. LAUNCHER_HOST 0.0.0.0 serves the panel to the network with no
+# key: anyone who reaches it can start, stop and change the engine (127.0.0.1 keeps it to this node; another machine then
+# uses an ssh tunnel, ssh -L 8010:127.0.0.1:8010 FIRST-NODE). ATLAS_DIR keeps the saved allocations (default: atlas/
 # in this directory). With TF_GLM53_MULTI the engine changes no expert's width while it runs; expert optimisation then
 # saves the allocation for the next start.
-LAUNCHER_HOST=127.0.0.1
+LAUNCHER_HOST=0.0.0.0
 LAUNCHER_PORT=8010
 #ATLAS_DIR=
 # What a node keeps for the OS after a start from the panel, in GiB (the launch screen may pick another a start).

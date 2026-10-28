@@ -28,8 +28,8 @@ The control panel's launcher: always on, on the lane's first node, beside tf-glm
     in EXTRA_ENV, else PKG/launch/panel-settings.json), served here whether the engine runs or not; not read, replaced whole
   - every other path goes to the engine (HOST:PORT of glm53.conf), 503 while it is not running: the page has one
     address whether the engine runs or not
-  - access: loopback only (403 otherwise; another machine reaches the panel through an ssh tunnel); a start or a
-    stop at a time (409)
+  - access: anyone who reaches LAUNCHER_HOST:LAUNCHER_PORT (no key; every address by default: keep the nodes on a closed
+    network, or LAUNCHER_HOST=127.0.0.1 and an ssh tunnel); a start or a stop at a time (409)
 A start: the pre-flight (every node reachable, its GPU readable by nvidia-smi, no engine or other GPU process on any node, the plan fits; with
 LAUNCH_SNAPSHOTS=1 the nodes' state written down, with LAUNCH_DROP_CACHES=1 the page cache dropped), the bits written
 as an expert plan (tools/quant/expert_plan.py mix with expert-plan/banks.json), then `tf-glm53 up` with LAUNCH_ENV="TF_GLM53_EXPERT_PLAN=... TF_GLM53_LOAD_PROGRESS=...";
@@ -42,7 +42,7 @@ and /discard decide the pending). Kept in PKG/launch/: the learning data (usage-
 run, the last measured start (the plan's sizes and the ETA), the plans; allocations in ATLAS_DIR/allocs/user; the
 snapshots (LAUNCH_SNAPSHOTS=1) in PKG/snapshots/.
 Defaults: CONF = glm53.conf beside this script's directory (PKG = the lane directory), port LAUNCHER_PORT of CONF
-(else PORT + 10), host LAUNCHER_HOST (else 127.0.0.1; a loopback address, anything else is refused). --pkg: the lane directory on the nodes when this runs elsewhere
+(else PORT + 10), host LAUNCHER_HOST (else 0.0.0.0: every address). --pkg: the lane directory on the nodes when this runs elsewhere
 (a test from another machine). --dry-run: a start or a stop runs its read-only checks, prints what it would run, and runs
 nothing that changes a node.
 """
@@ -287,7 +287,12 @@ class Launcher:
         env = dict(t.split("=", 1) for t in shlex.split(c.get("EXTRA_ENV", "")) if "=" in t)
         self.page = env.get("TF_PANEL_HTML", os.path.join(self.pkg_local, "panel.html"))
         self.sets = env.get("TF_GLM53_EXPERT_SETS", os.path.join(self.pkg_local, "expert-sets"))
-        self.listen = (a.host or c.get("LAUNCHER_HOST") or "127.0.0.1", a.port or int(c.get("LAUNCHER_PORT") or port + 10))
+        # what a live swap keeps to spare on every rank (the engine's TF_GLM53_SWAP_MARGIN_GIB, 2 by default)
+        try:
+            self.swap_margin = int(env.get("TF_GLM53_SWAP_MARGIN_GIB", "2")) * GiB
+        except ValueError:
+            self.swap_margin = 2 * GiB
+        self.listen = (a.host or c.get("LAUNCHER_HOST") or "0.0.0.0", a.port or int(c.get("LAUNCHER_PORT") or port + 10))
         self.dir = os.path.join(self.pkg_local, "launch")
         os.makedirs(self.dir, exist_ok=True)
         self.settings_path = env.get("TF_PANEL_SETTINGS", os.path.join(self.dir, "panel-settings.json"))
@@ -1911,10 +1916,21 @@ class Launcher:
         # refuses the re-sort before the engine is asked
         miss = self.missing_bits(set(target) if run is not None else {b for a, b in zip(cur, target) if a != b})
         out["missing_bits"] = {str(w): why for w, why in miss.items()}
+        # while the engine runs and can swap: whether every node has the memory the swap needs (the engine refuses it
+        # otherwise); an engine that swaps nothing while it runs (TF_GLM53_MULTI: "available" false) only saves
+        live = run is None and up + down > 0
+        if live:
+            s, raw = self.engine_get("/v1/experts/swap", 5)
+            live = s == 200 and bool(json.loads(raw).get("available", True))
+        mem = self.swap_memory(cur, target) if live else None
+        if mem is not None:
+            out["memory"] = mem
         if not j.get("apply"):
             return 200, out
         if miss:
             return 412, dict(out, error="no data for " + ", ".join(f"{w} bit ({why})" for w, why in miss.items()))
+        if mem is not None and not mem["fits"]:
+            return 412, dict(out, error=mem["why"])
         what = f"re-sort by {basis} ({'saved runs + ' if with_saved else ''}{'the usage of ' + ufrom + ' + ' if base else ''}{'this run' if run is None else 'the last run ' + str(run['run']) + ' (' + run['state'] + ')'}): {rows} decode rows, {prows} prompt rows"
         if run is not None:
             saved = ""
@@ -1958,6 +1974,56 @@ class Launcher:
         log(f"re-sort ({basis}, {'saved runs + this run' if with_saved and include else 'saved runs' if with_saved else 'this run'}): {up + down} experts ({up} up, {down} down) in {layers} layers by {rows} decode rows, {prows} prompt rows; saved {saved or '-'}")
         return 200, dict(out, applied=True, saved=saved, swap=json.loads(sw))
 
+    def swap_need(self, cur, target):
+        """What a live swap from `cur` to `target` needs available on every rank, as the engine's checkMemory counts it
+        (expert_swap.zig): the changed layers in the engine's order (those whose bits do not grow first, then those that
+        grow), each layer's new slabs and reads on top of what the layers before it grew, the largest of those, and the
+        margin. With that layer, its slabs and the growth before it. None on three nodes (unequal shares a rank)."""
+        if S % self.world:
+            return None
+        unit = 3 * D * (I // self.world) // 8  # bytes a bit, an expert, a rank (expertUnit)
+        grow = peak = 0
+        at = (0, 0, 0)
+        for grows in (False, True):
+            for li in range(L):
+                c, t = cur[li * E:(li + 1) * E], target[li * E:(li + 1) * E]
+                d = sum(t) - sum(c)
+                if c == t or (d > 0) != grows:
+                    continue
+                slabs = sum(unit * b * (2 if b != a else 1) for a, b in zip(c, t))
+                g = max(grow, 0)
+                if g + slabs > peak:
+                    peak, at = g + slabs, (FIRST + li, slabs, g)
+                grow += unit * d
+        return peak + self.swap_margin, at
+
+    def swap_memory(self, cur, target):
+        """Whether a live swap fits on every node now: the estimate's "memory". Each node's MemAvailable as the node
+        poll read it in the last 10 s, else read again; a node not read (unreachable) counts as unknown, not short
+        (the engine checks it itself)."""
+        got = self.swap_need(cur, target)
+        if got is None:
+            return None
+        need, (layer, slabs, grown) = got
+        with self.lock:
+            nodes, t = list(self.node_info), self.node_t
+        if not nodes or time.time() - t > 10:  # read for this estimate only (the node poll keeps node_info)
+            with ThreadPoolExecutor(self.world) as ex:
+                nodes = list(ex.map(self.probe, range(self.world)))
+        read = lambda n: n.get("reachable") and n.get("mem_available")
+        ranks = [{"node": n.get("name", ""), "available_mib": n["mem_available"] >> 20 if read(n) else None,
+                  "fits": n["mem_available"] >= need if read(n) else None} for n in nodes]
+        short = [n for n in nodes if read(n) and n["mem_available"] < need]
+        why = ""
+        if short:
+            n = min(short, key=lambda n: n["mem_available"])
+            why = (f"{n['name']} has {n['mem_available'] / GiB:.1f} GiB available and changing the experts needs "
+                   f"{need / GiB:.1f} GiB on every node (layer {layer}: its new slabs {slabs / GiB:.1f} GiB after "
+                   f"{grown / GiB:.1f} GiB grown in the layers before it, and {self.swap_margin // GiB} GiB to spare): "
+                   "a start with a shorter context, or more kept for the OS, leaves room for it")
+        return {"need_mib": need >> 20, "margin_mib": self.swap_margin >> 20, "layer": layer, "layer_slabs_mib": slabs >> 20,
+                "grown_before_mib": grown >> 20, "ranks": ranks, "fits": not short, "why": why}
+
     def snapshot(self, label):
         """LAUNCH_SNAPSHOTS=1: each node's GPU, memory, containers and log tail before and after a start or a stop, in
         PKG/snapshots/<time>-<what>/ (off by default)."""
@@ -1979,10 +2045,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         pass
-
-    def allowed(self):
-        # loopback only: the launcher starts, stops and swaps the engine and has no key (main refuses another address)
-        return self.client_address[0] in ("127.0.0.1", "::1")
 
     def send_json(self, status, obj):
         # errors as the engine gives them: {"error": {"message": ...}} (the page reads error.message)
@@ -2009,8 +2071,6 @@ class Handler(BaseHTTPRequestHandler):
     def route(self, method):
         path = urlparse(self.path).path
         Lr = self.L
-        if not self.allowed():
-            return self.send_json(403, {"error": "loopback only: reach the panel through an ssh tunnel"})
         try:
             if method == "GET" and path == "/panel":
                 body = open(Lr.page, "rb").read()
@@ -2157,14 +2217,12 @@ def main():
     p.add_argument("--dry-run", action="store_true")
     a = p.parse_args()
     lr = Launcher(a)
-    # loopback only: the launcher starts, stops and swaps the engine, with no key; another machine reaches the panel
-    # through an ssh tunnel to the first node
+    # every address by default: the launcher has no key, so anyone on the network can start, stop and change the
+    # engine from the panel (a note, not a refusal; LAUNCHER_HOST=127.0.0.1 keeps it to this node)
     h = lr.listen[0]
     if not (h.startswith("127.") or h in ("localhost", "::1")):
-        sys.exit(f"LAUNCHER_HOST {h}: refused. The launcher serves the panel at 127.0.0.1 only: anyone who can reach the "
-                 f"panel can start, stop and change the engine, so it does not listen on the network. Leave LAUNCHER_HOST "
-                 f"at 127.0.0.1 and, from another machine, open the panel through an ssh tunnel: "
-                 f"ssh -L {lr.listen[1]}:127.0.0.1:{lr.listen[1]} <first node>, then http://127.0.0.1:{lr.listen[1]}/panel there")
+        log(f"note: the panel listens on {h}:{lr.listen[1]} with no key: anyone on the network can start, stop and "
+            "change the engine (LAUNCHER_HOST=127.0.0.1 keeps it to this node)")
     # this release's panel is tested on four nodes (TP4); other node counts are refused until they are tested
     # (ATLAS_ANY_WORLD=1 in the environment runs it anyway, for such a test)
     if lr.world not in TESTED_WORLDS and os.environ.get("ATLAS_ANY_WORLD") != "1":
@@ -2186,7 +2244,8 @@ def main():
     threading.Thread(target=lr.bank_check, daemon=True).start()  # the banks on the nodes
     srv = ThreadingHTTPServer(lr.listen, Handler)
     srv.daemon_threads = True
-    log(f"launcher for {lr.conf}: http://{lr.listen[0]}:{lr.listen[1]}/panel, engine {lr.engine[0]}:{lr.engine[1]}, "
+    shown = socket.gethostname() if lr.listen[0] in ("0.0.0.0", "::") else lr.listen[0]  # every address: the node's name
+    log(f"launcher for {lr.conf}: http://{shown}:{lr.listen[1]}/panel, engine {lr.engine[0]}:{lr.engine[1]}, "
         f"{lr.world} nodes, state {lr.st['state']}{' (dry run)' if lr.dry else ''}")
     srv.serve_forever()
 

@@ -14,7 +14,8 @@ gives what differs with four nodes, with its measurements.
   or later.
 - `lib/libroce_proxy.so`: the RDMA proxy of the decode collectives (needs `libibverbs.so.1`).
 - `tf-glm53`, `glm53.conf.example` (eight nodes) and `glm53.t4.conf.example` (four nodes): start, stop and check the
-  ranks.
+  ranks. `CONFIG.md` lists every setting of `glm53.conf` (also in Japanese and Simplified Chinese).
+- `claude-glm53`: Claude Code on the server ("Claude Code").
 - The control panel (four or eight nodes): `launcher/tf_launcher.py` (the launcher), `panel.html` (its page; the
   server holds the same page), `tools/quant/expert_plan.py` (writes the expert plans), `expert-plan/banks.json` (the
   expert banks and where they are) and `PANEL-GUIDE.md` (the panel's screens; also in Japanese).
@@ -40,7 +41,9 @@ It holds no model weights, no draft model and no NCCL.
 - Eight nodes: 112 GiB of memory available on every node before the start (115 with DFlash2), as `free -g` shows it:
   the ranks use about 108 GiB (111 with DFlash2) with `CONTEXT` and `STORE` at 819,200; with DFlash2 the pool (the
   default conversation cache) needs about 0.5 GiB more a rank than the slot cache (`CACHE=slots`). Each 100,000 positions of `STORE`
-  fewer need 2.7 GiB less. `tf-glm53 check` refuses a node with less.
+  fewer need 2.7 GiB less. `tf-glm53 check` refuses a node with less. With the 4-bit KV cache (`KV=fp4`) eight nodes
+  take `CONTEXT` and `STORE` at 1,048,576: the ranks used about 94 GiB (measured, with a prompt of 1,018,993 tokens);
+  check's estimate is for the 8-bit cache, so set `NEED_GB=100` there.
 - Four nodes: memory sized for this server alone (`T4.md`); with DFlash2 the lowest free memory measured was about
   3.2 GiB a node, at 512K.
 - The control panel (four or eight nodes): disk for the expert banks it uses (below) and `python3` on every node (DGX
@@ -124,6 +127,8 @@ are the rows of a prompt chunk and the sequence-parallel parts a chunk is split 
 are under "Conversations kept between requests" below. Four nodes need the four-node checkpoint, `KV=fp4` and the
 values of `glm53.t4.conf.example`; `T4.md` explains them.
 
+Every setting of `glm53.conf`, its default, who reads it and when a change takes effect: `CONFIG.md`.
+
 ## A first request
 
 The server speaks the OpenAI chat API at `http://HOST:PORT/v1` with the model named by `NAME` (`glm-5.3`, port 8000 in
@@ -136,7 +141,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/
 ```
 
 The reply's `message` holds the model's reasoning in `reasoning_content`, then the answer in `content`; `max_tokens`
-counts both. From another machine, with `HOST` set, send the request to `http://HOST:PORT`.
+counts both. From another machine, send the request to `http://FIRST-NODE:PORT` (with the default `HOST=0.0.0.0`).
 
 ## Drafters
 
@@ -283,10 +288,13 @@ changes. A start checks each layer file's size and header against the manifest; 
 ./tf-glm53 launcher           # start it; also ./tf-glm53 launcher status, ./tf-glm53 launcher stop
 ```
 
-Open `http://127.0.0.1:LAUNCHER_PORT/panel`: `127.0.0.1:8010` in `glm53.t4.conf.example` (without `LAUNCHER_PORT`,
-`PORT` + 10). From another machine, forward the port (`ssh -L 8010:127.0.0.1:8010 FIRST-NODE`, then
-`http://127.0.0.1:8010/panel`): the launcher listens on loopback only and refuses another `LAUNCHER_HOST`, since
-anyone who reached it could start, stop and swap the engine. The panel's other calls go to the engine through the
+The launcher reads `glm53.conf` when it starts: after an edit, start it again (`./tf-glm53 launcher stop`, then
+`./tf-glm53 launcher`; the engine may keep running). `CONFIG.md` lists what it reads.
+
+Open `http://FIRST-NODE:LAUNCHER_PORT/panel`: port 8010 in `glm53.t4.conf.example` (without `LAUNCHER_PORT`, `PORT`
++ 10). The launcher listens on every address by default (`LAUNCHER_HOST=0.0.0.0`) and has no key, so anyone who
+reaches it can start, stop and swap the engine: keep the nodes on a closed network, or set `LAUNCHER_HOST=127.0.0.1`
+and open the panel from another machine through an ssh tunnel (`ssh -L 8010:127.0.0.1:8010 FIRST-NODE`). The panel's other calls go to the engine through the
 launcher, so the page has one address whether the engine runs or not. Start and stop the engine from the panel while
 you use it. `PANEL-GUIDE.md` describes the screens; the page is in English or Japanese (by the browser's language, or
 Display > Language).
@@ -309,7 +317,9 @@ Display > Language).
   launch screen; the first node stays. Check copies this directory to them (`tf-glm53 deploy`) and runs
   `tf-glm53 check` on the list; Save writes `NODES` in `glm53.conf` once that list passed, keeping the previous file
   beside it (`glm53.conf.bak-<time>`).
-- **Allocations and usage records.** The engine counts the experts each prompt row and each decoded token picks. A
+- **Allocations and usage records.** The engine counts the experts each prompt row and each decoded token picks
+  (`EXPERT_LIVE=1` in `glm53.conf`, the default; a start from the panel always counts). An engine started without the
+  counts (`EXPERT_LIVE=0`) still shows the live panel with Stop, but no picks and no expert optimisation. A
   plan's widths are saved as an allocation in `ATLAS_DIR/allocs/user/<name>.json` (`atlas/` in this directory by
   default) with the usage record of the runs it was saved from: the record the run started with plus that run's
   picks. Nothing is saved by itself: Save and stop at a stop, or Save while the engine runs, names it. The name
@@ -325,7 +335,11 @@ Display > Language).
   weights that kept the most of the text the model writes, `ATLAS-TESTS.md`). The change starts once no request runs
   or waits (the page tries again until then); the engine changes the layers in place on every rank, drops the
   conversations it keeps (their KV was computed with the old experts) and serves again, and requests that arrive
-  meanwhile wait; a full change of 75 layers took 83 to 90 s on four nodes. A rank stuck past
+  meanwhile wait; a full change of 75 layers took 83 to 90 s on four nodes. The layers whose widths shrink go first,
+  then those that grow, and every node needs the largest layer's new copy on top of what the layers before it grew,
+  plus 2 GiB (`TF_GLM53_SWAP_MARGIN_GIB`): the estimate says whether each node has it, and the page refuses the change
+  with the node and the amounts when one does not (a shorter context, or more kept for the OS, at the next start
+  leaves room). A rank stuck past
   `TF_GLM53_SWAP_DEADLINE_S` (600 s by default) ends its process, and `tf-glm53`'s watcher stops every rank. The
   result is not saved by itself: Save keeps it. A start loads the widths it is given and never re-sorts.
 - With `TF_GLM53_MULTI` in `EXTRA_ENV` the engine changes no widths while it runs: expert optimisation saves the
@@ -361,7 +375,7 @@ run `docker` on every node (the `docker` group). `tf-glm53`, the control panel's
 first node's host, as with the archive; the weights and the expert banks stay on the hosts.
 
 ```sh
-I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102
+I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.1-102
 docker pull $I                                                # on every node
 mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out $I install /out
 cd glm53 && cp glm53.conf.example glm53.conf                  # or glm53.t4.conf.example; set RUNTIME=docker, IMAGE=$I
@@ -371,7 +385,7 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # or glm53.t4.conf
 - `install` writes the release's files (the same as the unpacked archive) to the directory. `./tf-glm53 pull` runs
   `docker pull IMAGE` on every node.
 - The image can be built from the archive instead: in a freshly unpacked archive,
-  `docker build -f docker/Dockerfile -t glm53-tensorfold:r3-102 .`. The build refuses any file the archive's
+  `docker build -f docker/Dockerfile -t glm53-tensorfold:r3.1-102 .`. The build refuses any file the archive's
   `SHA256SUMS` does not list, so nothing of an installation goes into the image. Copy it to the other nodes with
   `docker save` and `docker load`.
 - `tf-glm53 check` checks, on every node, that `IMAGE` is there with the first node's layers, that a container reaches
@@ -389,11 +403,14 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # or glm53.t4.conf
 
 ## Serving other machines
 
-The server listens on `127.0.0.1` by default and speaks the OpenAI chat API. To serve other machines, set `HOST`. The
-API has no key: on a non-loopback address `tf-glm53` warns and starts, and the API is open to anyone who can reach it.
+The server listens on every address by default (`HOST=0.0.0.0`) and speaks the OpenAI chat API, so other machines on
+the network reach it at `http://FIRST-NODE:PORT`. The API has no key: anyone who can reach it can use it (`tf-glm53
+check` says so), and `HOST=127.0.0.1` keeps it to the first node.
 The server speaks plain HTTP as well, so keep it on a closed network, or put TLS and access control (a reverse proxy)
-in front. The control panel's launcher stays on loopback either way; another machine reaches the panel through an ssh
-tunnel ("The control panel").
+in front. The control panel's launcher listens on every address too, with no key ("The control panel").
+The server's own page (`http://FIRST-NODE:PORT/panel`) gets the experts' counts and the memory (`/v1/experts/*`,
+`/v1/memory`) only on the first node itself, so from another machine it shows a message and nothing more: open the
+control panel's page (`http://FIRST-NODE:LAUNCHER_PORT/panel`), whose calls the launcher makes from the first node.
 
 A monitor on another host can read the server without reaching the API: set `METRICS_LISTEN=HOST:PORT` (for example
 `0.0.0.0:9894`). The first node then also answers `GET /metrics` (Prometheus text) and `GET /health` on that address,
@@ -405,6 +422,44 @@ of two reads: prefill tokens/s = Δ`prefill_tokens_total` / Δ`prefill_seconds_t
 Δ`accepted_total` / Δ`drafted_total`. `tensorfold:requests_prefilling` and `tensorfold:requests_decoding` give the
 running request's phase, `tensorfold:prefill_tokens_remaining` what its prefill has left, `tensorfold:pool_*` the
 conversation cache and `tensorfold:engine_info` the settings.
+
+## Claude Code
+
+The server also answers the Anthropic Messages API (`POST /v1/messages` and `/v1/messages/count_tokens`), so
+Claude Code can use it in place of Anthropic's service. `claude-glm53` in this archive starts Claude Code against a server:
+
+```sh
+ENDPOINT=http://FIRST-NODE:8000 ./claude-glm53      # Claude Code's own arguments may follow
+```
+
+It reads the server's model and context from `/health`, sends one short request, and starts Claude Code with every
+model alias (the small fast model too) on the server's model, a context window of the server's context less `MAX_OUT`
+(40,000) for a reply, and a 30-minute stream timeout. Run it where Claude Code is installed (it needs `curl` and
+`python3` as well); on macOS Claude Code needs the Local Network permission to reach an address on the LAN. Anthropic
+does not support pointing Claude Code at another model through a gateway: use it at your own risk.
+
+What the server does for it, with no setting:
+
+- Each request is rebuilt from its blocks, so Claude Code's cache markers and its two forms of content (a string or
+  text blocks) render the same prompt, and the attribution line at the head of Claude Code's system prompt
+  (`x-anthropic-billing-header`), whose value changes with each conversation, is dropped. Measured: a conversation's
+  later requests read 99 % or more of their prompt from the conversation cache, a new conversation's first request
+  about 84 %.
+- While a long prompt is read nothing else is sent, so the server sends a keep-alive event after each 10 s of silence;
+  Claude Code drops a stream after 300 s without one.
+- An image becomes the note `[image omitted: this model reads text only]` (`tf-glm53` sets
+  `TF_MESSAGES_OMIT_IMAGES=1`): the model reads text only, and a refused image would refuse every later request of the
+  conversation that holds it (Claude Code sends the image a Read of an image file returns).
+
+Limits:
+
+- Requests run one at a time. Claude Code's background requests (without thinking, a few tokens long, for example to
+  name a conversation) wait for the main one, and they begin unlike the main conversation's requests, so they share
+  no cache with them; they share it with each other.
+- Structured output (`output_config.format`) is refused (400); Claude Code carries on without it.
+- Effort: GLM-5.3 has low, high and max; anything else that asks for thinking runs as max (Claude Code sends xhigh).
+  Claude Code asks for at most 32,000 tokens a reply (`CLAUDE_CODE_MAX_OUTPUT_TOKENS` raises it), and a reply that
+  reaches the limit while still thinking ends with no text.
 
 ## Speed
 

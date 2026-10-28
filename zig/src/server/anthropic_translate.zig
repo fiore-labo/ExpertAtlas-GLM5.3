@@ -58,7 +58,31 @@ fn roleIs(v: Value, names: []const []const u8) bool {
     return false;
 }
 
-fn messages(cx: *Cx, value: ?Value, system: ?Value) errors.Refused!Value {
+/// Claude Code's attribution line, ``x-anthropic-billing-header: cc_version=2.1.308.93f; cc_entrypoint=cli;``, as
+/// the first system block (or the system text's first line): its version suffix changes with the conversation's first
+/// message, so at the head of the prompt it makes every new conversation (and every subagent) miss the conversation
+/// cache from there on (measured: 50% cached instead of 84% on a new conversation's first request). A local model has
+/// no use for it, so it is dropped; ``CLAUDE_CODE_ATTRIBUTION_HEADER=0`` on the client has the same effect.
+fn withoutBilling(text: []const u8) ?[]const u8 {
+    const lead = std.mem.trimStart(u8, text, " \t\r\n");
+    if (!std.mem.startsWith(u8, lead, "x-anthropic-billing-header:")) return text;
+    const nl = std.mem.indexOfScalar(u8, lead, '\n') orelse return null;
+    const rest = std.mem.trimStart(u8, lead[nl + 1 ..], "\r\n");
+    return if (rest.len == 0) null else rest;
+}
+
+/// Fiore-lab: TF_MESSAGES_OMIT_IMAGES=1 puts ``image_note`` where a Messages request has an image, in a user turn or a
+/// tool result. This server reads text only, so an image is otherwise refused, and with it every later request of a
+/// conversation that holds one (Claude Code sends the image a Read of an image file returns); unset, it is refused as
+/// upstream. tf-glm53 sets it.
+const image_note = "[image omitted: this model reads text only]";
+
+fn omitImages() bool {
+    const v = std.c.getenv("TF_MESSAGES_OMIT_IMAGES") orelse return false;
+    return std.mem.eql(u8, std.mem.span(v), "1");
+}
+
+fn messages(cx: *Cx, value: ?Value, system: ?Value, omit_images: bool) errors.Refused!Value {
     const a = cx.a;
     const list = value orelse Value.null;
     if (list != .array or list.array.len == 0) return cx.refuse("messages must be a nonempty array");
@@ -67,14 +91,20 @@ fn messages(cx: *Cx, value: ?Value, system: ?Value) errors.Refused!Value {
         const ps = try parts(cx, sys);
         for (ps) |p| if (!p.typeIs("text")) return cx.refuse("system accepts text blocks only");
         var joined: std.ArrayList(u8) = .empty;
-        for (ps, 0..) |p, i| {
-            if (i > 0) try joined.appendSlice(a, "\n\n");
-            try joined.appendSlice(a, try string(cx, p.get("text"), "system.text", true));
+        var kept: usize = 0;
+        for (ps) |p| {
+            const text = withoutBilling(try string(cx, p.get("text"), "system.text", true)) orelse continue;
+            if (kept > 0) try joined.appendSlice(a, "\n\n");
+            try joined.appendSlice(a, text);
+            kept += 1;
         }
-        const m = try json.newObject(a);
-        try m.put(a, "role", .{ .string = "system" });
-        try m.put(a, "content", .{ .string = joined.items });
-        try out.append(a, .{ .object = m });
+        // a system made only of the attribution line is no system at all
+        if (kept > 0 or ps.len == 0) {
+            const m = try json.newObject(a);
+            try m.put(a, "role", .{ .string = "system" });
+            try m.put(a, "content", .{ .string = joined.items });
+            try out.append(a, .{ .object = m });
+        }
     };
     for (list.array, 0..) |message, index| {
         if (message != .object or !roleIs(message, &.{ "user", "assistant", "system" })) return cx.refuse("message role must be user, assistant or system");
@@ -105,7 +135,7 @@ fn messages(cx: *Cx, value: ?Value, system: ?Value) errors.Refused!Value {
             if (std.mem.eql(u8, k, "text")) {
                 try content.append(a, try textPart(a, try string(cx, block.get("text"), "text", true)));
             } else if (std.mem.eql(u8, k, "image") and user) {
-                try content.append(a, try image(cx, block));
+                try content.append(a, if (omit_images) try textPart(a, image_note) else try image(cx, block));
             } else if (std.mem.eql(u8, k, "thinking") and assistant) {
                 try thoughts.appendSlice(a, try string(cx, block.get("thinking"), "thinking", true));
                 any_thought = true;
@@ -133,6 +163,9 @@ fn messages(cx: *Cx, value: ?Value, system: ?Value) errors.Refused!Value {
                         const t = try string(cx, part.get("text"), "tool_result.text", true);
                         try texts.append(a, t);
                         try result_parts.append(a, try textPart(a, t));
+                    } else if (part.typeIs("image") and omit_images) {
+                        try texts.append(a, image_note);
+                        try result_parts.append(a, try textPart(a, image_note));
                     } else if (part.typeIs("image")) {
                         try result_parts.append(a, try image(cx, part));
                         has_image = true;
@@ -181,7 +214,7 @@ pub fn translate(cx: *Cx, body: Value, count: bool) errors.Refused!Value {
     const model = try string(cx, body.get("model"), "model", false);
     const chat = try json.newObject(a);
     try chat.put(a, "model", .{ .string = model });
-    try chat.put(a, "messages", try messages(cx, body.get("messages"), body.get("system")));
+    try chat.put(a, "messages", try messages(cx, body.get("messages"), body.get("system"), omitImages()));
     if (!count) {
         _ = positiveInt(body.get("max_tokens")) orelse return cx.refuse("max_tokens must be a positive integer");
         try chat.put(a, "max_tokens", body.get("max_tokens").?);
@@ -290,4 +323,36 @@ pub fn translate(cx: *Cx, body: Value, count: bool) errors.Refused!Value {
         try chat.put(a, "thinking_budget", thinking.get("budget_tokens").?);
     }
     return .{ .object = chat };
+}
+
+test "the attribution line leaves the system prompt" {
+    try std.testing.expectEqual(@as(?[]const u8, null), withoutBilling("x-anthropic-billing-header: cc_version=2.1.308.93f; cc_entrypoint=sdk-cli;"));
+    try std.testing.expectEqualStrings("You are an agent.", withoutBilling("x-anthropic-billing-header: cc_version=2.1.308.452; cc_entrypoint=cli;\nYou are an agent.").?);
+    try std.testing.expectEqualStrings("You are an agent.", withoutBilling("You are an agent.").?);
+    var cx: Cx = .{ .a = std.testing.allocator };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    cx.a = arena.allocator();
+    const one = (try json.parse(cx.a, "{\"model\":\"m\",\"max_tokens\":4,\"system\":[{\"type\":\"text\",\"text\":\"x-anthropic-billing-header: cc_version=2.1.308.93f; cc_entrypoint=cli;\"},{\"type\":\"text\",\"text\":\"lead\",\"cache_control\":{\"type\":\"ephemeral\"}}],\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")).ok;
+    const two = (try json.parse(cx.a, "{\"model\":\"m\",\"max_tokens\":4,\"system\":[{\"type\":\"text\",\"text\":\"x-anthropic-billing-header: cc_version=2.1.308.452; cc_entrypoint=cli;\"},{\"type\":\"text\",\"text\":\"lead\"}],\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}]}")).ok;
+    const a1 = try translate(&cx, one, false);
+    const a2 = try translate(&cx, two, false);
+    try std.testing.expect(json.equal(a1.get("messages").?, a2.get("messages").?));
+    try std.testing.expectEqualStrings("lead", a1.get("messages").?.array[0].get("content").?.string);
+}
+
+test "an image becomes a note with TF_MESSAGES_OMIT_IMAGES" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    const img = "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"AAAA\"}}";
+    const list = (try json.parse(cx.a, "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"look\"}," ++ img ++ "]}," ++
+        "{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Read\",\"input\":{}}]}," ++
+        "{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":[" ++ img ++ "]}]}]")).ok;
+    const kept = try messages(&cx, list, null, false);
+    try std.testing.expectEqualStrings("image_url", kept.array[0].get("content").?.array[1].get("type").?.string);
+    try std.testing.expect(kept.array[2].get("content").? == .array);
+    const omitted = try messages(&cx, list, null, true);
+    try std.testing.expectEqualStrings(image_note, omitted.array[0].get("content").?.array[1].get("text").?.string);
+    try std.testing.expectEqualStrings(image_note, omitted.array[2].get("content").?.string);
 }

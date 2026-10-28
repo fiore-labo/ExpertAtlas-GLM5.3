@@ -35,6 +35,8 @@ pub const Out = struct {
         event: *const fn (ctx: *anyopaque, payload: ?Value) error{Closed}!void,
         /// A whole JSON reply.
         reply: *const fn (ctx: *anyopaque, status: u16, payload: Value) void,
+        /// A keep-alive on an open stream that has been silent (``chat.Sink.ping``); null: none.
+        ping: ?*const fn (ctx: *anyopaque) error{Closed}!void = null,
     };
 };
 
@@ -55,12 +57,17 @@ const ClientOut = struct {
     a: Allocator,
 
     fn out(c: *ClientOut) Out {
-        return .{ .ctx = c, .vt = &.{ .open = open, .event = event, .reply = reply } };
+        return .{ .ctx = c, .vt = &.{ .open = open, .event = event, .reply = reply, .ping = ping } };
     }
 
     fn open(ctx: *anyopaque) error{Closed}!void {
         const c: *ClientOut = @ptrCast(@alignCast(ctx));
         return sse.open(c.conn);
+    }
+
+    fn ping(ctx: *anyopaque) error{Closed}!void {
+        const c: *ClientOut = @ptrCast(@alignCast(ctx));
+        return sse.ping(c.conn);
     }
 
     fn event(ctx: *anyopaque, payload: ?Value) error{Closed}!void {
@@ -396,6 +403,12 @@ const Run = struct {
             r.prose_sent.appendSlice(r.a, if (d == .string) d.string else d.strField("content") orelse "") catch return error.Closed;
             return r.emit(r.chunk(d, null) catch return error.Closed);
         }
+
+        fn ping(ctx: *anyopaque) error{Closed}!void {
+            const s: *StreamSink = @ptrCast(@alignCast(ctx));
+            const p = s.run.out.vt.ping orelse return;
+            return p(s.run.out.ctx);
+        }
     };
 
     /// The one-call policy on a streamed delta: text filtered, tool_calls dropped; null when nothing is left.
@@ -453,7 +466,7 @@ const Run = struct {
         if (!tools and r.is_chat) r.emit(r.chunk(roleDelta(a) catch return, null) catch return) catch return;
         var sink_state: StreamSink = .{ .run = r, .tools = tools };
         handed = true;
-        var reply = chat.generate(r.srv, &cx, prepared, .{ .ctx = &sink_state, .call = StreamSink.call }, gone) catch |e| {
+        var reply = chat.generate(r.srv, &cx, prepared, .{ .ctx = &sink_state, .call = StreamSink.call, .ping = StreamSink.ping }, gone) catch |e| {
             switch (e) {
                 error.Cancelled => return,
                 error.Refused => if (cx.kind != .other and cx.kind != .server) {

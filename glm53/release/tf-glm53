@@ -16,7 +16,7 @@
 #   tf-glm53 [-c CONF] pull       RUNTIME=docker: docker pull IMAGE on every node, then each node's image compared
 #   -d KIND, before the command: the drafter for this start (mtp, dflash2 or none) instead of DRAFTER_KIND in CONF
 #
-# Run it on the first node of NODES (rank 0). Settings: glm53.conf next to this script (see glm53.conf.example;
+# Run it on the first node of NODES (rank 0). Settings: glm53.conf next to this script (every setting: CONFIG.md; see glm53.conf.example;
 # glm53.t4.conf.example and T4.md for four nodes). RUNTIME=docker runs each rank in a container of IMAGE (this
 # release as an image, docker/Dockerfile) instead of from this directory: the nodes need Docker and the NVIDIA
 # container toolkit instead of cuBLAS, libibverbs and NCCL.
@@ -49,7 +49,7 @@ esac
 [ -n "$DRAFTER_KIND_ARG" ] && DRAFTER_KIND=$DRAFTER_KIND_ARG
 
 NAME=${NAME:-glm-5.3}
-HOST=${HOST:-127.0.0.1}
+HOST=${HOST:-0.0.0.0}
 PORT=${PORT:-8000}
 METRICS_LISTEN=${METRICS_LISTEN:-} # HOST:PORT: rank 0 also answers GET /metrics and /health there, read-only
 DRAFTER_KIND=${DRAFTER_KIND:-mtp}
@@ -61,6 +61,7 @@ STORE=${STORE:-819200}
 CACHE=${CACHE:-pool}       # pool: every conversation's KV in shared blocks of 256; slots: one store per conversation
 KV=${KV:-fp8}              # the KV cache's format: fp8, or fp4 (four nodes)
 DRAFT_SAVES=${DRAFT_SAVES:-8}  # pool with DFlash2: the conversations whose drafter state is kept
+EXPERT_LIVE=${EXPERT_LIVE:-1}  # 1: rank 0 counts the experts each row picks, for the control panel (a start from the panel always does); 0: not
 ROWS=${ROWS:-8192}
 SP_PARTS=${SP_PARTS:-4}
 MASTER_PORT=${MASTER_PORT:-29551}
@@ -136,6 +137,10 @@ rank_env() {
     mtp) e="$e TF_GLM53_DRAFTER=mtp TF_GLM53_MTP_K=$MTP_K" ;;
     dflash2) e="$e TF_GLM53_DFLASH=$DRAFTER"; [ "$CACHE" = pool ] && e="$e TF_GLM53_POOL_DRAFT_SAVES=$DRAFT_SAVES" ;;
   esac
+  [ "$EXPERT_LIVE" = 1 ] && e="$e TF_GLM53_EXPERT_LIVE=1"
+  # the Messages endpoint (Claude Code) puts a note where a request has an image: the model reads text only, and a
+  # refused image would refuse every later turn of that conversation
+  e="$e TF_MESSAGES_OMIT_IMAGES=1"
   [ -n "$EXTRA_ENV" ] && e="$e $EXTRA_ENV"
   [ -n "$LAUNCH_ENV" ] && e="$e $LAUNCH_ENV"
   echo "$e"
@@ -248,8 +253,8 @@ cmd_check() {
       if [ -n "$bad" ]; then echo "  rank $r $n: NG:$bad"; : > "$tmp/ng"; else echo "  rank $r $n: ok (GID $g, $fg GiB available, $nc)"; fi ) > "$tmp/$r" &
   done; wait
   cat $(for r in $(seq 0 $LAST); do echo "$tmp/$r"; done); [ -f "$tmp/ng" ] && ng=1; rm -rf "$tmp"
-  # a non-loopback HOST is allowed: the API has no key, so it is open to anyone who can reach it (a warning)
-  if ! loopback "$HOST"; then echo "  warning: HOST $HOST is not loopback: the API has no key and is open to anyone who can reach it (keep it on a closed network, or put TLS and access control in front)"; fi
+  # every address is the default: the API has no key, so everyone on the network can use it (a note, not a refusal)
+  if ! loopback "$HOST"; then echo "  note: the API listens on $HOST:$PORT with no key: anyone on the network can use it (HOST=127.0.0.1 keeps it to this node)"; fi
   [ $ng -eq 0 ] && echo "check: ok" || echo "check: NG"
   return $ng
 }

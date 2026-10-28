@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# claude-glm53: Claude Code on an ExpertAtlas GLM-5.3 server's Messages endpoint (/v1/messages).
+#
+#   ENDPOINT=http://FIRST-NODE:8000 claude-glm53 [claude args...]
+#                                                        the server (default http://127.0.0.1:8000: on the first node)
+#   With HOST=127.0.0.1 in glm53.conf the API is on the first node only: reach it through an ssh tunnel,
+#       ssh -o ControlPath=none -N -L 18000:127.0.0.1:8000 FIRST-NODE   and ENDPOINT=http://127.0.0.1:18000
+#   On macOS, Claude Code needs the Local Network permission to reach a LAN address (System Settings > Privacy &
+#   Security > Local Network); a tunnel on 127.0.0.1 does not.
+#   API_KEY=...                                          the server's key, when it has one (sent as the bearer token)
+#   CONTEXT=...                                          the window Claude Code assumes (default: the server's
+#                                                        context_length less MAX_OUT)
+#   MAX_OUT=...                                          the room left for one reply (default 40000; Claude Code asks
+#                                                        for up to 32000 output tokens)
+#
+# It reads the server's /health (model name, context length), sends one short Messages request to check the name is
+# served, then starts `claude` with every model alias (opus, sonnet, haiku, fable, the small fast model) on the
+# server's model, so no request goes to Anthropic. Any other argument goes to claude unchanged.
+#
+# What the server does for Claude Code (no setting needed): it rebuilds each request from its blocks, so the
+# cache_control markers and content given as a string or as text blocks render the same prompt (the conversation cache
+# hits 99 % of a session's later requests); it drops Claude Code's attribution line (x-anthropic-billing-header), whose
+# version suffix changes with each conversation's first message and would make every new conversation miss the cache
+# after the tools; and it sends an SSE ping every 10 s of silence (TF_SSE_PING_S), so a long prefill is not cut by
+# Claude Code's 300 s stream idle timeout. With TF_MESSAGES_OMIT_IMAGES=1 (tf-glm53 sets it) an image becomes a note,
+# since the model reads text only.
+# The settings below repeat the last two on the client, for an older server: no attribution line, a 30-minute byte
+# idle timeout.
+#
+# Anthropic does not support pointing Claude Code at a non-Claude model through a gateway; use at your own risk.
+set -uo pipefail
+
+ENDPOINT=${ENDPOINT:-http://127.0.0.1:8000}
+ENDPOINT=${ENDPOINT%/}
+MAX_OUT=${MAX_OUT:-40000}
+command -v claude > /dev/null || { echo "claude-glm53: claude (Claude Code) is not on PATH"; exit 2; }
+command -v curl > /dev/null || { echo "claude-glm53: curl is not on PATH"; exit 2; }
+command -v python3 > /dev/null || { echo "claude-glm53: python3 is not on PATH"; exit 2; }
+
+auth=()
+[ -n "${API_KEY:-}" ] && auth=(-H "Authorization: Bearer $API_KEY")
+
+health=$(curl -s -m 10 "${auth[@]+"${auth[@]}"}" "$ENDPOINT/health") || { echo "claude-glm53: $ENDPOINT/health does not answer"; exit 1; }
+read -r MODEL SERVER_CONTEXT < <(printf '%s' "$health" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("- 0"); sys.exit()
+print(d.get("model") or "-", d.get("context_length") or 0)')
+if [ "${MODEL:--}" = "-" ]; then echo "claude-glm53: $ENDPOINT/health is not an ExpertAtlas server's (no model)"; exit 1; fi
+MODEL=${MODEL_NAME:-$MODEL}
+
+code=$(curl -s -m 120 -o /dev/null -w '%{http_code}' "${auth[@]+"${auth[@]}"}" -X POST "$ENDPOINT/v1/messages" \
+  -H 'Content-Type: application/json' -H 'anthropic-version: 2023-06-01' \
+  -d "{\"model\":\"$MODEL\",\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}") || code=000
+if [ "$code" != 200 ]; then
+  echo "claude-glm53: a Messages request to $ENDPOINT came back $code (model $MODEL)"
+  [ "$code" = 401 ] && echo "  the server has a key: set API_KEY"
+  exit 1
+fi
+
+if [ -z "${CONTEXT:-}" ]; then
+  if [ "${SERVER_CONTEXT:-0}" -gt $((MAX_OUT * 2)) ]; then CONTEXT=$((SERVER_CONTEXT - MAX_OUT)); else CONTEXT=200000; fi
+fi
+
+export ANTHROPIC_BASE_URL="$ENDPOINT"
+# a token keeps Claude Code from falling back to a saved claude.ai login
+export ANTHROPIC_AUTH_TOKEN="${API_KEY:-local-expertatlas}"
+export ANTHROPIC_MODEL="$MODEL" ANTHROPIC_DEFAULT_OPUS_MODEL="$MODEL" ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL" \
+       ANTHROPIC_DEFAULT_HAIKU_MODEL="$MODEL" ANTHROPIC_DEFAULT_FABLE_MODEL="$MODEL" ANTHROPIC_SMALL_FAST_MODEL="$MODEL"
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$CONTEXT"
+export CLAUDE_CODE_ATTRIBUTION_HEADER="${CLAUDE_CODE_ATTRIBUTION_HEADER:-0}"
+export CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS="${CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS:-1800000}"
+
+echo "claude-glm53: $ENDPOINT, model $MODEL, server context ${SERVER_CONTEXT:-?}, Claude Code window $CONTEXT"
+exec claude "$@"
