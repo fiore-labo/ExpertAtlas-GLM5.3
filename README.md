@@ -19,10 +19,14 @@ where the details are.
 ## What it does
 
 - Tensor parallelism 8 or 4 with the KV cache split across rank pairs (decode context parallelism 2). The engine and
-  the model take up to 1M tokens (1,048,576); the DGX Spark's memory sets the context: **1M on eight nodes** (FP8 KV
-  cache) and **about 800K (819,200) on four** (4-bit KV cache). The conf examples ship with 819,200 and 737,280; with
-  the same memory, eight nodes take `CONTEXT=1048576` `STORE=589824` and four nodes `CONTEXT=819200` `STORE=18080`
-  (the KV pool holds `CONTEXT` + `STORE` positions).
+  the model take up to 1M tokens (1,048,576), and **both node counts reach 1M**. Eight nodes: `CONTEXT=1048576` with
+  `STORE=1048576` beside it on the 4-bit KV cache (`KV=fp4`, `NEED_GB=100`; about 23 GiB a node to spare), or
+  `STORE=589824` on the 8-bit one. Four nodes: `CONTEXT=1048576` from the control panel with 3 bits for 70 % of the
+  routed experts and 4 bits for the rest (`KV=fp4`, `STORE` 512; about 7.5 GiB a node to spare, enough for a live
+  re-sort); the four-node checkpoint alone takes `CONTEXT=819200` `STORE=18080`. Each was measured with one prompt of
+  about 1,019,000 tokens. The 4-bit KV cache costs some accuracy (KL 0.0190 against 0.0156 with the 8-bit cache, same
+  weights: [glm53/release/T4.md](glm53/release/T4.md)); the speeds below are with the 8-bit cache on eight nodes. The
+  conf examples ship with 819,200 and 737,280 (the KV pool holds `CONTEXT` + `STORE` positions).
 - Long prompts read in sequence-parallel parts; decode-step collectives over RoCE.
 - One conversation cache for all conversations, in blocks of 256 positions: a request resumes from the longest cached
   prefix of any conversation, and conversations that begin alike (an agent's system prompt, its sub-agents) hold the
@@ -32,6 +36,19 @@ where the details are.
 - `/metrics` (Prometheus text) and `/health` count the running request too, so a monitor reads prefill and decode
   speed, cache hits and draft acceptance while a request runs. `METRICS_LISTEN` serves the two read-only on an address
   of their own, for a monitor on another host.
+
+## New in r3.1-102
+
+- The API and the control panel listen on every address by default (`HOST=0.0.0.0`, `LAUNCHER_HOST=0.0.0.0`), with
+  no key: other machines on the network reach them directly. Keep the nodes on a closed network
+  (`HOST=127.0.0.1` / `LAUNCHER_HOST=127.0.0.1` keep them to the first node).
+- Claude Code on the Messages API: `claude-glm53` starts it against a server, and the server keeps its conversations
+  in the cache, keeps long prompts' streams alive and turns images into a note
+  ([packaging/RUNTIME.md](packaging/RUNTIME.md), "Claude Code").
+- The control panel works with an engine started by `./tf-glm53 up` too (the engine counts the experts' use by
+  default). A re-sort while the engine runs swaps the layers that do not grow first and checks every node's memory
+  against the swap's peak before it starts; the panel names a node that is short.
+- Every setting of `glm53.conf`: [glm53/release/CONFIG.md](glm53/release/CONFIG.md).
 
 ## Expert Atlas (new in r3-102)
 
@@ -113,18 +130,23 @@ the image, every node needs Docker and the NVIDIA container toolkit (DGX OS has 
 server's libraries:
 
 ```sh
-docker pull ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102            # on every node
-mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102 install /out
+docker pull ghcr.io/fiore-labo/expertatlas-glm5.3:r3.1-102            # on every node
+mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/expertatlas-glm5.3:r3.1-102 install /out
 ```
 
 then set `RUNTIME=docker` and `IMAGE` in `glm53.conf` and go on as below ([packaging/RUNTIME.md](packaging/RUNTIME.md),
-"Running in containers"). Without Docker: download the release archive `tensorfold-r3-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
+"Running in containers"). Without Docker: download the release archive `tensorfold-r3.1-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
 ([packaging/RUNTIME.md](packaging/RUNTIME.md) here). The same archive and launcher serve four or eight nodes: copy
 `glm53.conf.example` (eight nodes) or `glm53.t4.conf.example` (four nodes, see
 [glm53/release/T4.md](glm53/release/T4.md)) to `glm53.conf`, fill in the nodes, network names, NCCL, weights and
-drafter, then `./tf-glm53 deploy` and `./tf-glm53 up`. The server speaks the OpenAI chat API on `127.0.0.1` unless you
-give it another address. The API has no key: on another address it is open to anyone who can reach it, so keep it on
-a closed network or put TLS and access control in front.
+drafter, then `./tf-glm53 deploy` and `./tf-glm53 up`. The server speaks the OpenAI chat API on every address
+(`HOST=0.0.0.0`) by default. The API has no key, so anyone who can reach it can use it: keep it on a closed network
+or put TLS and access control in front (`HOST=127.0.0.1` keeps it to the first node).
+
+To work from the control panel instead of `./tf-glm53 up`, run `./tf-glm53 launcher` on the first node and open
+`http://FIRST-NODE:LAUNCHER_PORT/panel` (port 8010 in the four-node example): the engine starts and stops there
+([packaging/RUNTIME.md](packaging/RUNTIME.md), "The control panel"). Every setting of `glm53.conf`, who reads it
+and when a change takes effect: [glm53/release/CONFIG.md](glm53/release/CONFIG.md).
 
 ## Drafters
 
@@ -183,7 +205,7 @@ libibverbs headers (`libibverbs-dev`):
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so
-zig build dist -Dversion=r3-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.1-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 

@@ -8,7 +8,8 @@
 
 - `bin/tensorfold-native`：服务器，内含为 GB10（sm_121）构建的 CUDA 内核。Linux aarch64，glibc 2.28 或更高版本。
 - `lib/libroce_proxy.so`：解码集合通信使用的 RDMA 代理（需要 `libibverbs.so.1`）。
-- `tf-glm53`、`glm53.conf.example`（八个节点）和 `glm53.t4.conf.example`（四个节点）：用于启动、停止和检查各 rank。
+- `tf-glm53`、`glm53.conf.example`（八个节点）和 `glm53.t4.conf.example`（四个节点）：用于启动、停止和检查各 rank。`glm53.conf` 的全部设置项见 `CONFIG.zh-CN.md`（另有英文版和日文版）。
+- `claude-glm53`：在服务器上使用 Claude Code（“Claude Code”）。
 - 控制面板（四个或八个节点）：`launcher/tf_launcher.py`（启动器）、`panel.html`（其页面；服务器内含同一页面）、`tools/quant/expert_plan.py`（编写专家计划）和 `expert-plan/banks.json`（专家 bank 及其位置）和 `PANEL-GUIDE.md`（面板页面的说明；另有日文版）。
 - `RUNTIME.md`（本页）和 `T4.md`（四个节点），各自另有日文版（`.ja.md`）和简体中文版（`.zh-CN.md`）；`ATLAS-TESTS.md`（专家重新排序的测量；另有日文版）。
 - `AI-GUIDE.md`：为帮助你准备、使用系统或排查故障的 AI 助手，把整个系统写在一页上（英文；另有日文版）。
@@ -24,7 +25,7 @@
 - 每个节点相同路径下的 NCCL 2.30.7（见下文）。
 - `libibverbs.so.1`，以及连接各系统的同一个 RoCE v2 网络（四个节点时，每个节点一个 100 Gb/s 端口即可）；每个节点（包括第一台本身）都能从第一台通过其在 `NODES` 中的地址以 ssh 免密码访问。
 - 检查点所需的磁盘空间，在每个节点上放在相同路径下（见下文）：八个节点为 390 GB（363 GiB），四个节点为 344.6 GB（321 GiB）。
-- 八个节点：启动前每个节点需有 112 GiB 可用内存（使用 DFlash2 时为 115），以 `free -g` 的显示为准：当 `CONTEXT` 和 `STORE` 均为 819,200 时，各 rank 约使用 108 GiB（使用 DFlash2 时为 111）；使用 DFlash2 时，池（默认的对话缓存）每个 rank 比 slots（`CACHE=slots`）多用约 0.5 GiB。`STORE` 每减少 100,000 个 token，所需内存减少 2.7 GiB。可用内存不足的节点会被 `tf-glm53 check` 拒绝。
+- 八个节点：启动前每个节点需有 112 GiB 可用内存（使用 DFlash2 时为 115），以 `free -g` 的显示为准：当 `CONTEXT` 和 `STORE` 均为 819,200 时，各 rank 约使用 108 GiB（使用 DFlash2 时为 111）；使用 DFlash2 时，池（默认的对话缓存）每个 rank 比 slots（`CACHE=slots`）多用约 0.5 GiB。`STORE` 每减少 100,000 个 token，所需内存减少 2.7 GiB。可用内存不足的节点会被 `tf-glm53 check` 拒绝。使用 4 bit KV 缓存（`KV=fp4`）时，八个节点可将 `CONTEXT` 和 `STORE` 均设为 1,048,576，各 rank 约使用 94 GiB（用 1,018,993 个 token 的提示词实测）；`tf-glm53 check` 的估算按 8 bit 缓存计算，因此这时请设置 `NEED_GB=100`。
 - 四个节点：内存按只运行本服务器来分配（见 `T4.zh-CN.md`）；使用 DFlash2 时测得的最低可用内存为每个节点约 3.2 GiB（512K 时）。
 - 控制面板（四个或八个节点）：所用专家 bank 的磁盘空间（见下文），以及每个节点上的 `python3`（DGX OS 自带）。
 - 在容器中运行时（见“在容器中运行”）：每个节点需要 Docker 和 NVIDIA Container Toolkit，而不是 cuBLAS、libibverbs 和 NCCL。
@@ -88,6 +89,8 @@ cp glm53.conf.example glm53.conf    # nodes, network names, NCCL, weights, draft
 
 `KV` 是 KV 缓存的格式：FP8 或 4 bit。`DCP` 是解码上下文并行，`ROWS` 和 `SP_PARTS` 分别是提示词分块的行数和每块拆分成的序列并行段数。`CONTEXT`、`STORE` 和 `CACHE` 见下文“请求之间保留的对话”。四个节点需要四节点检查点、`KV=fp4` 以及 `glm53.t4.conf.example` 中的取值；详见 `T4.zh-CN.md`。
 
+`glm53.conf` 的全部设置项、默认值、由谁读取以及修改何时生效，见 `CONFIG.zh-CN.md`。
+
 ## 第一个请求
 
 服务器在 `http://HOST:PORT/v1` 上提供 OpenAI chat API，模型名由 `NAME` 指定（在 `glm53.conf.example` 中为 `glm-5.3`，端口 8000）。在第一个节点上：
@@ -98,7 +101,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/
   "messages": [{"role": "user", "content": "Say hello in one short sentence."}]}'
 ```
 
-回复的 `message` 中，`reasoning_content` 是模型的推理过程，其后 `content` 是答案；`max_tokens` 同时计入两者。从其他机器访问时，在已设置 `HOST` 的前提下，将请求发送到 `http://HOST:PORT`。
+回复的 `message` 中，`reasoning_content` 是模型的推理过程，其后 `content` 是答案；`max_tokens` 同时计入两者。从其他机器访问时，将请求发送到 `http://FIRST-NODE:PORT`（默认的 `HOST=0.0.0.0` 时）。
 
 ## 草稿模型
 
@@ -193,15 +196,17 @@ done
 ./tf-glm53 launcher           # start it; also ./tf-glm53 launcher status, ./tf-glm53 launcher stop
 ```
 
-打开 `http://127.0.0.1:LAUNCHER_PORT/panel`：在 `glm53.t4.conf.example` 中为 `127.0.0.1:8010`（没有 `LAUNCHER_PORT` 时为 `PORT` + 10）。从其他机器访问时，转发端口（`ssh -L 8010:127.0.0.1:8010 FIRST-NODE`，然后打开 `http://127.0.0.1:8010/panel`）。启动器只在回环地址上监听，其他 `LAUNCHER_HOST` 会被拒绝，因为任何能访问到它的人都可以启动、停止和替换引擎。页面的其他调用经由启动器到达引擎，因此无论引擎是否运行，页面只有一个地址。使用面板期间，请从面板启动和停止引擎。页面说明见 `PANEL-GUIDE.md`；页面以英文或日文显示（按浏览器的语言，或 Display > Language）。
+启动器在自身启动时读取 `glm53.conf`：编辑后请重新启动启动器（`./tf-glm53 launcher stop`，然后 `./tf-glm53 launcher`；引擎可以继续运行）。它读取的项目见 `CONFIG.zh-CN.md`。
+
+打开 `http://FIRST-NODE:LAUNCHER_PORT/panel`：在 `glm53.t4.conf.example` 中端口为 8010（没有 `LAUNCHER_PORT` 时为 `PORT` + 10）。启动器默认监听所有地址（`LAUNCHER_HOST=0.0.0.0`），且没有密钥，任何能访问到它的人都可以启动、停止和替换引擎：请只在封闭网络中使用，或设置 `LAUNCHER_HOST=127.0.0.1`，从其他机器通过 ssh 隧道打开面板（`ssh -L 8010:127.0.0.1:8010 FIRST-NODE`，然后打开 `http://127.0.0.1:8010/panel`）。页面的其他调用经由启动器到达引擎，因此无论引擎是否运行，页面只有一个地址。使用面板期间，请从面板启动和停止引擎。页面说明见 `PANEL-GUIDE.md`；页面以英文或日文显示（按浏览器的语言，或 Display > Language）。
 
 - **启动**（从面板）：启动器检查每个节点（可连通、没有引擎或其他 GPU 进程、计划能放进其内存），把位宽写成专家计划（`launch/plan-<时间>.json`），复制到每个节点，并用它执行 `tf-glm53 up`；页面会显示每一层的载入。此后所有路由专家都来自 bank，检查点提供其他权重。
 - **草稿模型**在启动界面上与 KV 格式并列，每次启动时选择：MTP（检查点自身的层）、DFlash2（只有当 `glm53.conf` 的 `DRAFTER` 在每个节点上都有其模型时才提供，见上文“使用 DFlash2 的步骤”）或不用；默认是 `DRAFTER_KIND`。各自占用的内存不同：DFlash2 比 MTP 每个节点少留约 4 GiB，因此会按所选的草稿模型重新规划。
 - **上下文**也在启动界面上按每次启动选择：128K、256K、512K、`CONTEXT` 或能容纳的最长值（最多 1,048,576 个 token）；计划内存容纳不下的长度会缩短到能容纳的长度。
 - **STORE**（在上下文之外为之前的对话保留的 token）也在那里选择：`STORE`、指定的大小，或上下文用剩的全部内存；**每个节点为操作系统保留的内存**（`RESERVE_GB`，默认 4 GiB，2 至 32）也可以选择。计划用这两者确定 KV 缓存的大小，启动时引擎自身的内存检查也保留同样的量。KV 缓存在启动时分配，运行中不会增长。
 - **节点**：引擎停止时，可以在启动界面上更改 worker 的地址（`NODES` 中第一个之后的）；第一台节点保持不变。“检查”会把本目录复制到这些节点（`tf-glm53 deploy`），并对该列表执行 `tf-glm53 check`；只有该列表通过检查后，“保存”才会改写 `glm53.conf` 中的 `NODES`，并在旁边保留之前的文件（`glm53.conf.bak-<时间>`）。
-- **配置与使用记录**：引擎统计每个提示行和每个解码 token 选中的专家。计划的位宽作为配置保存在 `ATLAS_DIR/allocs/user/<名称>.json`（默认为本目录下的 `atlas/`），并带有保存它的那些运行的使用记录（运行开始时带有的记录加上该次运行的选择）。不会自动保存任何内容：停止时的“保存并停止”或运行中的“保存”会为其命名。默认名称是该次运行所基于的配置，并覆盖保存（旧版本移到 `ATLAS_DIR/allocs/trash/`）。启动界面以上一次运行的比例的新计划打开（还没有任何运行时为全部 3 bit）；“打开”会按位原样恢复上一次运行的配置或已保存的配置，从它启动时使用其位宽和保存时的 bank。计划按其来源配置的使用记录为专家排序，使用最多的专家得到最宽的位宽；没有记录的计划按页面自带的次数排序，这些次数是 Fiore-lab 在 12 类工作（编程、智能体、日文和英文文本、Linux 运维、安全）上测得的。
-- **专家优化**在引擎运行时按本次运行的使用记录重新排列已载入的专家，每种位宽的专家数量保持不变，因此在相同内存下，被选中专家的平均位宽会提高。排序所用的次数在面板的 Count 中选择：decode、prefill 或 Both（Both 以 0.7 加权专家的 decode 占比、以 0.3 加权其 prefill 占比，这组权重最能保持模型所写文本的精度，见 `ATLAS-TESTS.md`）。在没有正在运行或等待的请求后才开始更改（在此之前页面会重试）；引擎在每个 rank 上就地更改各层，丢弃所保留的对话（它们的 KV 是用旧专家计算的），然后继续服务，期间到达的请求会等待；在四个节点上，75 层的完整更改用了 83 至 90 秒。超过 `TF_GLM53_SWAP_DEADLINE_S`（默认 600 秒）仍卡住的 rank 会结束其进程，`tf-glm53` 的监视进程会停止所有 rank。结果不会自动保存：用“保存”保留。启动只载入给定的位宽，不会重新排序。
+- **配置与使用记录**：引擎统计每个提示行和每个解码 token 选中的专家（`glm53.conf` 中的 `EXPERT_LIVE=1`，默认开启；从面板启动时始终统计）。未开启统计而启动的引擎（`EXPERT_LIVE=0`）仍会显示运行面板和“停止”，但不显示选择，也没有专家优化。计划的位宽作为配置保存在 `ATLAS_DIR/allocs/user/<名称>.json`（默认为本目录下的 `atlas/`），并带有保存它的那些运行的使用记录（运行开始时带有的记录加上该次运行的选择）。不会自动保存任何内容：停止时的“保存并停止”或运行中的“保存”会为其命名。默认名称是该次运行所基于的配置，并覆盖保存（旧版本移到 `ATLAS_DIR/allocs/trash/`）。启动界面以上一次运行的比例的新计划打开（还没有任何运行时为全部 3 bit）；“打开”会按位原样恢复上一次运行的配置或已保存的配置，从它启动时使用其位宽和保存时的 bank。计划按其来源配置的使用记录为专家排序，使用最多的专家得到最宽的位宽；没有记录的计划按页面自带的次数排序，这些次数是 Fiore-lab 在 12 类工作（编程、智能体、日文和英文文本、Linux 运维、安全）上测得的。
+- **专家优化**在引擎运行时按本次运行的使用记录重新排列已载入的专家，每种位宽的专家数量保持不变，因此在相同内存下，被选中专家的平均位宽会提高。排序所用的次数在面板的 Count 中选择：decode、prefill 或 Both（Both 以 0.7 加权专家的 decode 占比、以 0.3 加权其 prefill 占比，这组权重最能保持模型所写文本的精度，见 `ATLAS-TESTS.md`）。在没有正在运行或等待的请求后才开始更改（在此之前页面会重试）；引擎在每个 rank 上就地更改各层，丢弃所保留的对话（它们的 KV 是用旧专家计算的），然后继续服务，期间到达的请求会等待；在四个节点上，75 层的完整更改用了 83 至 90 秒。位宽减小的层先换，增大的层后换；每个节点在之前各层增加的量之上，还需要最大一层的新副本以及 2 GiB（`TF_GLM53_SWAP_MARGIN_GIB`）的可用内存：估算会显示每个节点是否足够，不足时页面会给出该节点和所需的量并拒绝更改（下次启动时缩短上下文或为操作系统保留更多内存即可腾出空间）。超过 `TF_GLM53_SWAP_DEADLINE_S`（默认 600 秒）仍卡住的 rank 会结束其进程，`tf-glm53` 的监视进程会停止所有 rank。结果不会自动保存：用“保存”保留。启动只载入给定的位宽，不会重新排序。
 - `EXTRA_ENV` 中有 `TF_GLM53_MULTI` 时，引擎运行期间不更改位宽：专家优化会以名称（`opt-<时间>`）保存估算的位宽，供停止后以它启动。
 - 页面的设置（配色、圆的排列方式等）是所有浏览器共用的一个文件：`launch/panel-settings.json`（可用 `EXTRA_ENV` 中的 `TF_PANEL_SETTINGS` 更改位置）。
 - `glm53.conf` 中的 `LAUNCH_SNAPSHOTS=1` 会在每次启动和停止的前后，把每个节点的 GPU、内存和日志末尾写入 `snapshots/`；`LAUNCH_DROP_CACHES=1` 会在启动前于每个节点丢弃页面缓存（需要免密码的 `sudo`）。两者默认关闭。
@@ -219,7 +224,7 @@ done
 本发布也以容器镜像形式提供：`/opt/glm53` 中是归档的文件，另有服务器运行所需的内容（cuBLAS 13、libibverbs 及其 provider、NCCL 2.30.7）。在 `glm53.conf` 中设置 `RUNTIME=docker` 和 `IMAGE` 后，`tf-glm53` 会通过 ssh 在每个节点上把各 rank 作为 `IMAGE` 的容器启动。这时每个节点需要的是 Docker 和 NVIDIA Container Toolkit（DGX OS 两者都有），而不是 cuBLAS、libibverbs 和 NCCL；运行 `tf-glm53` 的用户必须能在每个节点上运行 `docker`（`docker` 组）。`tf-glm53`、控制面板的启动器和设置与使用归档时一样留在第一个节点的主机上；权重和专家 bank 也留在主机上。
 
 ```sh
-I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102
+I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.1-102
 docker pull $I                                                # 在每个节点上
 mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out $I install /out
 cd glm53 && cp glm53.conf.example glm53.conf                  # 或 glm53.t4.conf.example；设置 RUNTIME=docker 和 IMAGE=$I
@@ -227,7 +232,7 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # 或 glm53.t4.con
 ```
 
 - `install` 把本发布的文件（与解开的归档相同）写到该目录。`./tf-glm53 pull` 在每个节点上执行 `docker pull IMAGE`。
-- 镜像也可以由归档构建：在刚解开的归档中执行 `docker build -f docker/Dockerfile -t glm53-tensorfold:r3-102 .`。只要有归档 `SHA256SUMS` 未列出的文件，构建就会失败，因此安装环境中的设置或日志不会进入镜像。用 `docker save` 和 `docker load` 复制到其他节点。
+- 镜像也可以由归档构建：在刚解开的归档中执行 `docker build -f docker/Dockerfile -t glm53-tensorfold:r3.1-102 .`。只要有归档 `SHA256SUMS` 未列出的文件，构建就会失败，因此安装环境中的设置或日志不会进入镜像。用 `docker save` 和 `docker load` 复制到其他节点。
 - `tf-glm53 check` 在每个节点上检查：`IMAGE` 存在且层与第一个节点相同；容器能访问 GPU（`--gpus all`）；镜像中是与本目录相同的发布（否则为 `NG: image-not-this-release`）。
 - 每个 rank 的容器获得 GPU、`/dev/infiniband`、主机网络和 IPC、`--ulimit memlock=-1 --ulimit nofile=1048576:1048576`、`--oom-score-adj 1000`、主机用户和一个 init。以相同路径挂载：只读的 `WEIGHTS`、`DRAFTER`（DFlash2）以及该节点上 `expert-plan/banks.json` 中的每个 bank；可写的 `logs/` 和 `launch/`。容器名为 `glm53-p<PORT>-r<rank>`，停止后即删除。`tf-glm53 down`、`status`、监视进程和控制面板对它们的处理与从主机运行的 rank 相同。
 - 四个节点上的测量（八节点检查点，上下文 131,072 个 token，MTP）：启动用了 4 分钟，与在主机上相同；冒烟测试通过；`down` 在 4 秒内停止所有 rank；强制终止一个 rank 的容器后，监视进程停止了其余 rank，43 秒后所有容器都已消失。
@@ -235,9 +240,31 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # 或 glm53.t4.con
 
 ## 为其他机器提供服务
 
-服务器默认监听 `127.0.0.1`，提供 OpenAI chat API。要为其他机器提供服务，请设置 `HOST`。API 没有密钥：使用非回环地址时，`tf-glm53` 会给出警告并启动，此时任何能访问到该地址的人都可以使用 API。服务器使用明文 HTTP，因此请只在封闭网络中使用，或在其前面加一层 TLS 和访问控制（反向代理）。无论哪种情况，控制面板的启动器都只在回环地址上监听，其他机器通过 ssh 隧道打开面板（“控制面板”）。
+服务器默认监听所有地址（`HOST=0.0.0.0`）并提供 OpenAI chat API，网络中的其他机器可以通过 `http://FIRST-NODE:PORT` 访问。API 没有密钥：任何能访问到它的人都可以使用（`tf-glm53 check` 会提示这一点）；设置 `HOST=127.0.0.1` 后只能从第一个节点访问。服务器使用明文 HTTP，因此请只在封闭网络中使用，或在其前面加一层 TLS 和访问控制（反向代理）。控制面板的启动器同样监听所有地址，且没有密钥（“控制面板”）。服务器自身的页面（`http://FIRST-NODE:PORT/panel`）只能在第一个节点本机上读取专家的次数和内存（`/v1/experts/*`、`/v1/memory`），因此从其他机器打开时只显示一条消息：请打开控制面板的页面（`http://FIRST-NODE:LAUNCHER_PORT/panel`），它的调用由启动器在第一个节点上发出。
 
 其他主机上的监控程序无需访问 API 即可读取服务器状态：设置 `METRICS_LISTEN=HOST:PORT`（例如 `0.0.0.0:9894`）后，第一个节点也会在该地址上响应 `GET /metrics`（Prometheus 文本格式）和 `GET /health`，且只响应这两者（其他请求一律返回 404），API 仍留在 `HOST` 上。`tf-glm53 status` 会显示该地址。请只在封闭网络中开放此端口：它不显示提示词或回复，但会显示负载和 token 数。`tensorfold_health:*_total` 计数器包含正在运行的请求且不会回退，因此速度由两次读取的差值得出：prefill tokens/s = Δ`prefill_tokens_total` / Δ`prefill_seconds_total`，解码 = Δ`completion_tokens_total` / Δ`decode_seconds_total`，缓存命中率 = Δ`cached_tokens_total` / Δ`prompt_tokens_total`，草稿接受率 = Δ`accepted_total` / Δ`drafted_total`。`tensorfold:requests_prefilling` 和 `tensorfold:requests_decoding` 表示正在运行的请求所处阶段，`tensorfold:prefill_tokens_remaining` 表示其 prefill 剩余量，`tensorfold:pool_*` 表示对话缓存，`tensorfold:engine_info` 表示设置。
+
+## Claude Code
+
+服务器也响应 Anthropic 的 Messages API（`POST /v1/messages` 和 `/v1/messages/count_tokens`），因此 Claude Code 可以用它代替 Anthropic 的服务。本归档中的 `claude-glm53` 会让 Claude Code 连接到服务器并启动：
+
+```sh
+ENDPOINT=http://FIRST-NODE:8000 ./claude-glm53      # 后面可以接 Claude Code 自己的参数
+```
+
+它从服务器的 `/health` 读取模型和上下文，发送一个简短的请求，然后启动 Claude Code：所有模型别名（包括小型快速模型）都指向服务器的模型，上下文窗口为服务器的上下文减去为回复保留的 `MAX_OUT`（40,000），流的超时为 30 分钟。请在安装了 Claude Code 的机器上运行（还需要 `curl` 和 `python3`）；在 macOS 上，Claude Code 需要“本地网络”权限才能访问局域网地址。Anthropic 不支持通过网关让 Claude Code 使用其他模型：请自行承担风险。
+
+服务器为它所做的事（无需设置）：
+
+- 每个请求都由其内容块重新构建，因此 Claude Code 的缓存标记和两种内容写法会渲染出相同的提示；Claude Code 系统提示开头的归属行（`x-anthropic-billing-header`）的值随每个对话变化，因此会被去掉。实测：同一对话的后续请求有 99 % 以上的提示从对话缓存中读取，新对话的第一个请求约为 84 %。
+- 读取长提示时不发送任何内容，因此服务器在每 10 秒的静默后发送一个 keep-alive 事件；Claude Code 在 300 秒没有收到时会断开流。
+- 图片会变成注记 `[image omitted: this model reads text only]`（`tf-glm53` 设置 `TF_MESSAGES_OMIT_IMAGES=1`）：模型只读文本，拒绝图片会使包含它的对话之后的每个请求都被拒绝（Claude Code 用 Read 读取图片文件时会发送图片）。
+
+限制：
+
+- 请求逐个处理。Claude Code 的后台请求（不思考、只有几个 token，例如为对话命名）会等待主请求，而且开头与主对话的请求不同，因此与它们不共享缓存；后台请求之间会共享。
+- 结构化输出（`output_config.format`）会被拒绝（400）；Claude Code 会在没有它的情况下继续。
+- 思考强度：GLM-5.3 有 low、high 和 max，其他要求思考的值按 max 运行（Claude Code 发送 xhigh）。Claude Code 每次回复最多请求 32,000 个 token（`CLAUDE_CODE_MAX_OUTPUT_TOKENS` 可以提高），在思考途中达到上限的回复没有正文。
 
 ## 速度
 

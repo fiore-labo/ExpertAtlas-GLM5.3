@@ -10,11 +10,18 @@ GB10을 1개씩 탑재한 NVIDIA DGX Spark 4대 또는 8대에서 텐서 병렬 
 
 ## 주요 기능
 
-- 텐서 병렬 8 또는 4. KV 캐시는 랭크 쌍에 나누어 둡니다(decode 컨텍스트 병렬 2). 엔진과 모델은 최대 1M 토큰(1,048,576)까지 처리할 수 있으며, 컨텍스트 길이는 DGX Spark의 메모리로 정해집니다. **8대에서 1M**(FP8 KV 캐시), **4대에서 약 800K(819,200)**(4비트 KV 캐시)입니다. 설정 예시는 819,200과 737,280으로 되어 있습니다. 같은 메모리로 8대는 `CONTEXT=1048576` `STORE=589824`, 4대는 `CONTEXT=819200` `STORE=18080`으로 설정할 수 있습니다(KV 풀은 `CONTEXT` + `STORE`개의 위치를 보유합니다).
+- 텐서 병렬 8 또는 4. KV 캐시는 랭크 쌍에 나누어 둡니다(decode 컨텍스트 병렬 2). 엔진과 모델은 최대 1M 토큰(1,048,576)까지 처리하며, **8대와 4대 모두 1M에 도달합니다**. 8대: 4비트 KV 캐시(`KV=fp4`, `NEED_GB=100`)라면 `CONTEXT=1048576`에 더해 `STORE=1048576`(노드당 약 23 GiB 여유), 8비트 캐시라면 `STORE=589824`. 4대: 컨트롤 패널에서 routed expert의 70 %를 3비트, 나머지를 4비트로 하여 `CONTEXT=1048576`(`KV=fp4`, `STORE` 512. 노드당 약 7.5 GiB 여유가 있어 실행 중 재정렬도 가능합니다). 4대용 체크포인트만으로는 `CONTEXT=819200` `STORE=18080`입니다. 모두 약 1,019,000 토큰의 프롬프트 1개로 실측했습니다. 4비트 KV 캐시는 정확도가 조금 낮아집니다(같은 가중치에서 KL 0.0190, 8비트 캐시는 0.0156: [glm53/release/T4.md](glm53/release/T4.md), 영어). 아래 속도에서 8대는 8비트 캐시입니다. 설정 예시는 819,200과 737,280으로 되어 있습니다(KV 풀은 `CONTEXT` + `STORE`개의 위치를 보유합니다).
 - 긴 프롬프트는 시퀀스 병렬로 나누어 읽고, decode 단계의 집합 통신은 RoCE로 수행합니다.
 - 모든 대화가 하나의 대화 캐시를 256개 위치 단위의 블록으로 함께 씁니다. 요청은 어느 대화의 것이든 캐시에 있는 가장 긴 앞부분부터 이어서 처리하며, 같은 내용으로 시작하는 대화(에이전트의 시스템 프롬프트, 그 서브에이전트)는 공통 블록을 한 번만 보유합니다.
 - 매 라운드 드래프트를 모델이 검증합니다. 드래프트는 기본적으로 GLM-5.3 자체의 MTP 레이어가 만들며, 선택 사항인 DFlash2 drafter를 쓸 수도 있습니다. 어느 경우든 응답은 모델 자신이 선택한 것입니다.
 - `/metrics`(Prometheus 텍스트)와 `/health`는 실행 중인 요청도 집계하므로, 모니터는 요청이 실행되는 동안에도 prefill과 decode 속도, 캐시 적중, 드래프트 채택을 읽을 수 있습니다. `METRICS_LISTEN`을 설정하면 다른 호스트의 모니터를 위해 이 두 가지를 별도의 주소에서 읽기 전용으로 제공합니다.
+
+## r3.1-102에서 바뀐 점
+
+- API와 컨트롤 패널은 기본적으로 모든 주소(`HOST=0.0.0.0`, `LAUNCHER_HOST=0.0.0.0`)에서 키 없이 대기합니다. 네트워크의 다른 머신에서 바로 접근할 수 있습니다. 노드는 닫힌 네트워크 안에 두세요(`HOST=127.0.0.1` / `LAUNCHER_HOST=127.0.0.1`이면 첫 번째 노드에서만 사용할 수 있습니다).
+- Messages API로 Claude Code를 쓸 수 있습니다. `claude-glm53`이 Claude Code를 서버에 연결해 시작하고, 서버는 그 대화를 캐시에 유지하고 긴 프롬프트의 스트림을 유지하며 이미지를 메모로 바꿉니다([packaging/RUNTIME.md](packaging/RUNTIME.md) "Claude Code", 영어).
+- 컨트롤 패널은 `./tf-glm53 up`으로 시작한 엔진에서도 동작합니다(엔진은 기본적으로 expert 사용 횟수를 셉니다). 실행 중 재정렬은 커지지 않는 층부터 바꾸고, 시작하기 전에 교체 도중의 메모리 최대치로 모든 노드를 확인합니다. 메모리가 부족한 노드는 패널이 알려 줍니다.
+- `glm53.conf`의 모든 설정 항목: [glm53/release/CONFIG.md](glm53/release/CONFIG.md)(영어).
 
 ## Expert Atlas(r3-102의 새 기능)
 
@@ -73,11 +80,13 @@ Fiore-lab의 것과 구조가 같고 같은 방식으로 로드됩니다.
 릴리스는 컨테이너 이미지와, 같은 파일을 담은 아카이브의 두 가지 형태로 배포합니다. 권장하는 방법은 이미지입니다. 이미지를 쓰면 각 노드에는 Docker와 NVIDIA Container Toolkit(DGX OS에는 둘 다 있습니다)만 있으면 되고, 서버의 라이브러리는 필요하지 않습니다.
 
 ```sh
-docker pull ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102            # 각 노드에서
-mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102 install /out
+docker pull ghcr.io/fiore-labo/expertatlas-glm5.3:r3.1-102            # 각 노드에서
+mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/expertatlas-glm5.3:r3.1-102 install /out
 ```
 
-그런 다음 `glm53.conf`에 `RUNTIME=docker`와 `IMAGE`를 설정하고 아래와 같이 진행합니다([packaging/RUNTIME.md](packaging/RUNTIME.md) "Running in containers", 영어). Docker를 쓰지 않는 경우: 릴리스 아카이브 `tensorfold-r3-102-linux-aarch64.tar.gz`를 내려받아 함께 들어 있는 `RUNTIME.md`(이 저장소에서는 [packaging/RUNTIME.md](packaging/RUNTIME.md), 영어)를 따르세요. 4대든 8대든 같은 아카이브와 실행 스크립트를 사용합니다. `glm53.conf.example`(8대) 또는 `glm53.t4.conf.example`(4대, [glm53/release/T4.md](glm53/release/T4.md) 참고, 영어)를 `glm53.conf`로 복사하고 노드, 네트워크 이름, NCCL, 가중치, drafter를 채운 다음 `./tf-glm53 deploy`와 `./tf-glm53 up`을 실행합니다. 다른 주소를 지정하지 않으면 서버는 `127.0.0.1`에서 OpenAI chat API를 제공합니다. API에는 키가 없으므로 다른 주소에서는 접근할 수 있는 누구나 사용할 수 있습니다. 닫힌 네트워크 안에서만 쓰거나 앞에 TLS와 접근 제어를 두세요.
+그런 다음 `glm53.conf`에 `RUNTIME=docker`와 `IMAGE`를 설정하고 아래와 같이 진행합니다([packaging/RUNTIME.md](packaging/RUNTIME.md) "Running in containers", 영어). Docker를 쓰지 않는 경우: 릴리스 아카이브 `tensorfold-r3.1-102-linux-aarch64.tar.gz`를 내려받아 함께 들어 있는 `RUNTIME.md`(이 저장소에서는 [packaging/RUNTIME.md](packaging/RUNTIME.md), 영어)를 따르세요. 4대든 8대든 같은 아카이브와 실행 스크립트를 사용합니다. `glm53.conf.example`(8대) 또는 `glm53.t4.conf.example`(4대, [glm53/release/T4.md](glm53/release/T4.md) 참고, 영어)를 `glm53.conf`로 복사하고 노드, 네트워크 이름, NCCL, 가중치, drafter를 채운 다음 `./tf-glm53 deploy`와 `./tf-glm53 up`을 실행합니다. 서버는 기본적으로 모든 주소(`HOST=0.0.0.0`)에서 OpenAI chat API를 제공합니다. API에는 키가 없으므로 접근할 수 있는 누구나 사용할 수 있습니다. 닫힌 네트워크 안에서만 쓰거나 앞에 TLS와 접근 제어를 두세요(`HOST=127.0.0.1`이면 첫 번째 노드에서만 사용할 수 있습니다).
+
+`./tf-glm53 up` 대신 컨트롤 패널에서 쓰려면 첫 번째 노드에서 `./tf-glm53 launcher`를 실행하고 `http://FIRST-NODE:LAUNCHER_PORT/panel`(4대 예시에서는 포트 8010)을 엽니다. 엔진의 시작과 정지는 거기서 합니다([packaging/RUNTIME.md](packaging/RUNTIME.md) "The control panel", 영어). `glm53.conf`의 모든 설정 항목, 읽는 쪽, 변경이 적용되는 시점은 [glm53/release/CONFIG.md](glm53/release/CONFIG.md)(영어)에 있습니다.
 
 ## Drafter
 
@@ -116,7 +125,7 @@ Zig 0.17.0이 `PATH`에 있고(또는 `build_libs.sh`에는 `ZIG=`로 그 경로
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so
-zig build dist -Dversion=r3-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.1-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 

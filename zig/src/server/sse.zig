@@ -19,6 +19,11 @@ pub fn data(conn: *Conn, a: Allocator, payload: json.Value) error{Closed}!void {
     return conn.writeAll(std.mem.concat(a, u8, &.{ "data: ", text, "\n\n" }) catch return error.Closed);
 }
 
+/// ``: ping`` and a blank line: an SSE comment, which clients skip (a keep-alive on OpenAI streams).
+pub fn ping(conn: *Conn) error{Closed}!void {
+    return conn.writeAll(": ping\n\n");
+}
+
 pub fn done(conn: *Conn) error{Closed}!void {
     return conn.writeAll("data: [DONE]\n\n");
 }

@@ -1,6 +1,7 @@
 # Settings for tf-glm53. Copy to glm53.conf next to tf-glm53 and edit. Every node must reach the others over ssh
 # without a password, and this directory, the weights and (if used) the DFlash2 drafter must sit at the same path on
-# all of them (`tf-glm53 deploy` copies this directory).
+# all of them (`tf-glm53 deploy` copies this directory). Every setting, its default, who reads it and when a change
+# takes effect: CONFIG.md.
 
 # The eight nodes in rank order, by the address of the RDMA network; run tf-glm53 on the first one.
 NODES=(192.0.2.11 192.0.2.12 192.0.2.13 192.0.2.14 192.0.2.15 192.0.2.16 192.0.2.17 192.0.2.18)
@@ -21,7 +22,7 @@ NCCL_LIB=~/nccl-2.30.7/nvidia/nccl/lib/libnccl.so.2
 # node needs Docker and the NVIDIA container toolkit, and the libraries are the image's, so NCCL_LIB is not used).
 # RUNTIME.md, "Running in containers".
 #RUNTIME=docker
-#IMAGE=glm53-tensorfold:r3-102
+#IMAGE=glm53-tensorfold:r3.1-102
 
 # The checkpoint for eight ranks, the same path on every node (RUNTIME.md: fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks).
 WEIGHTS=~/models/GLM-5.3-EXL3-8x-DGX-Sparks
@@ -39,10 +40,11 @@ MTP_K=3
 DRAFTER=
 #DRAFTER=~/models/GLM-5.3-DFlash2
 
-# The server. The API has no key: with HOST other than loopback it is open to anyone who can reach it, so keep it
-# on a closed network or put TLS and access control in front.
+# The server. HOST 0.0.0.0 (every address) serves the network. The API has no key, so anyone who can reach it can use
+# it: keep the nodes on a closed network or put TLS and access control in front, or set HOST=127.0.0.1 to keep the API
+# to this node (another machine then reaches it through an ssh tunnel).
 NAME=glm-5.3
-HOST=127.0.0.1
+HOST=0.0.0.0
 PORT=8000
 # A monitor on another host: rank 0 also answers GET /metrics (Prometheus text) and /health at this HOST:PORT,
 # read-only, while the API stays on HOST. Empty: off. Keep it on a closed network.
@@ -52,6 +54,8 @@ PORT=8000
 # CACHE=pool (the default) keeps CONTEXT + STORE positions in blocks of 256 that every conversation shares: a request
 # resumes from the longest cached prefix of any conversation, and conversations that start alike (one system prompt)
 # hold its blocks once. CACHE=slots keeps one store of STORE positions per conversation.
+# With the 4-bit KV cache (KV=fp4: a little less accurate, T4.md) eight nodes take CONTEXT=1048576 and
+# STORE=1048576 with NEED_GB=100 (measured: about 94 GiB a node in use, 23 GiB to spare).
 CONTEXT=819200
 STORE=819200
 CACHE=pool

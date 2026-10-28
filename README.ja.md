@@ -11,11 +11,18 @@
 
 ## できること
 
-- テンソル並列 8 または 4。KV キャッシュはランクのペアに分割します（decode コンテキスト並列 2）。エンジンとモデルは 1M（1,048,576 トークン）まで扱えます。コンテキストの上限は DGX Spark のメモリで決まり、**8 台（FP8 KV キャッシュ）で 1M、4 台（4 ビット KV キャッシュ）で約 800K（819,200）**です。設定例は 819,200 と 737,280 になっています。同じメモリのまま、8 台は `CONTEXT=1048576` `STORE=589824`、4 台は `CONTEXT=819200` `STORE=18080` にできます（KV プールは `CONTEXT` + `STORE` トークンを持ちます）。
+- テンソル並列 8 または 4。KV キャッシュはランクのペアに分割します（decode コンテキスト並列 2）。エンジンとモデルは 1M（1,048,576 トークン）まで扱え、**8 台でも 4 台でも 1M に届きます**。8 台: 4 ビット KV キャッシュ（`KV=fp4`、`NEED_GB=100`）なら `CONTEXT=1048576` に加えて `STORE=1048576`（1 ノードあたり約 23 GiB の余裕）、8 ビットのキャッシュなら `STORE=589824`。4 台: コントロールパネルで routed expert の 70 % を 3 ビット、残りを 4 ビットにして `CONTEXT=1048576`（`KV=fp4`、`STORE` 512。1 ノードあたり約 7.5 GiB の余裕があり、動作中の並べ替えもできます）。4 台用チェックポイントだけなら `CONTEXT=819200` `STORE=18080` です。どれも約 1,019,000 トークンのプロンプト 1 本で実測しました。4 ビット KV キャッシュは精度が少し下がります（同じ重みで KL 0.0190、8 ビットのキャッシュでは 0.0156: [glm53/release/T4.ja.md](glm53/release/T4.ja.md)）。下の速度の 8 台は 8 ビットのキャッシュです。設定例は 819,200 と 737,280 になっています（KV プールは `CONTEXT` + `STORE` トークンを持ちます）。
 - 長いプロンプトはシーケンス並列で分割して読み込みます。decode ステップの集団通信は RoCE 上で行います。
 - すべての会話で 1 つの会話キャッシュを使い、256 トークンのブロック単位で保持します。リクエストは、どの会話のものであってもキャッシュにある最も長い先頭部分から再開します。同じように始まる会話（エージェントのシステムプロンプト、そのサブエージェント）は、共通のブロックを 1 回だけ保持します。
 - ラウンドごとにドラフトをモデルが検証します。ドラフトを作るのは、既定では GLM-5.3 自身の MTP 層、またはオプションの DFlash2 drafter です。どの場合も、応答はモデル自身が選んだものです。
 - `/metrics`（Prometheus のテキスト）と `/health` は実行中のリクエストの分も数えるので、モニタはリクエストの実行中にも prefill と decode の速さ、キャッシュのヒット、ドラフトの受理を読めます。`METRICS_LISTEN` を設定すると、別のホストのモニタ向けに、この 2 つを専用のアドレスで読み取り専用で開きます。
+
+## r3.1-102 で変わったこと
+
+- API とコントロールパネルは、既定で全アドレス（`HOST=0.0.0.0`、`LAUNCHER_HOST=0.0.0.0`）でキーなしで待ち受けます。ネットワーク上の他のマシンから直接使えます。ノードは閉じたネットワーク内に置いてください（`HOST=127.0.0.1` / `LAUNCHER_HOST=127.0.0.1` で 1 台目のノードからだけになります）。
+- Messages API で Claude Code が使えます。`claude-glm53` が Claude Code をサーバーに向けて起動し、サーバーはその会話をキャッシュに保ち、長いプロンプトのストリームを保ち、画像を注記に置き換えます（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「Claude Code」）。
+- コントロールパネルは、`./tf-glm53 up` で起動したエンジンでも使えます（エンジンは既定で expert の使用回数を数えます）。動作中の並べ替えは、大きくならない層から先に入れ替え、始める前に入れ替えの途中で最も多く使うメモリを全ノードで確かめます。足りないノードはパネルが示します。
+- `glm53.conf` の全設定項目: [glm53/release/CONFIG.ja.md](glm53/release/CONFIG.ja.md)。
 
 ## Expert Atlas（r3-102 の新機能）
 
@@ -74,11 +81,13 @@ Fiore-lab のものと形が同じで、同じように読み込まれます。
 リリースは、コンテナイメージと、同じファイルを持つアーカイブの 2 つの形で配布します。おすすめはイメージです。イメージを使う場合、各ノードに要るのは Docker と NVIDIA Container Toolkit（DGX OS には両方あります）だけで、サーバーのライブラリは要りません。
 
 ```sh
-docker pull ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102            # 各ノードで
-mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/expertatlas-glm5.3:r3-102 install /out
+docker pull ghcr.io/fiore-labo/expertatlas-glm5.3:r3.1-102            # 各ノードで
+mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/expertatlas-glm5.3:r3.1-102 install /out
 ```
 
-そのあと `glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定し、以下と同じように進めます（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。4 台でも 8 台でも、同じアーカイブと起動スクリプトを使います。`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーし、ノード、ネットワーク名、NCCL、重み、drafter を記入してから、`./tf-glm53 deploy` と `./tf-glm53 up` を実行します。サーバーは、別のアドレスを指定しない限り `127.0.0.1` 上で OpenAI chat API を提供します。API にキーはないので、別のアドレスにすると届く人なら誰でも使えます。閉じたネットワーク内に留めるか、前段に TLS とアクセス制御を置いてください。
+そのあと `glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定し、以下と同じように進めます（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3.1-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。4 台でも 8 台でも、同じアーカイブと起動スクリプトを使います。`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーし、ノード、ネットワーク名、NCCL、重み、drafter を記入してから、`./tf-glm53 deploy` と `./tf-glm53 up` を実行します。サーバーは既定で全アドレス（`HOST=0.0.0.0`）で OpenAI chat API を提供します。API にキーはないので、届く人なら誰でも使えます。閉じたネットワーク内に留めるか、前段に TLS とアクセス制御を置いてください（`HOST=127.0.0.1` にすると 1 台目のノードからだけになります）。
+
+`./tf-glm53 up` の代わりにコントロールパネルから使うときは、1 台目のノードで `./tf-glm53 launcher` を実行し、`http://FIRST-NODE:LAUNCHER_PORT/panel`（4 台の例ではポート 8010）を開きます。エンジンの起動と停止はそこで行います（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コントロールパネル」）。`glm53.conf` の全設定項目、読む側、変更が効く時期は [glm53/release/CONFIG.ja.md](glm53/release/CONFIG.ja.md) にあります。
 
 ## Drafter
 
@@ -117,7 +126,7 @@ Zig 0.17.0 が `PATH` 上にあり（または `build_libs.sh` には `ZIG=` で
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so
-zig build dist -Dversion=r3-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.1-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 

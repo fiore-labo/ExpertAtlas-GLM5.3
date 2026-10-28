@@ -33,11 +33,21 @@ pub const Input = struct {
     id: []const u8 = "",
 };
 
-/// A streamed piece: content text (a string) or a delta object (reasoning or tool calls).
+/// A streamed piece: content text (a string) or a delta object (reasoning or tool calls). ``ping``, when the stream
+/// has one, keeps a silent stream alive (a long prefill sends nothing for minutes; Claude Code drops a stream after
+/// 300 s of silence): ``Generation.loop`` calls it after ``pingInterval`` without a write.
 pub const Sink = struct {
     ctx: *anyopaque,
     call: *const fn (ctx: *anyopaque, delta: Value) error{Closed}!void,
+    ping: ?*const fn (ctx: *anyopaque) error{Closed}!void = null,
 };
+
+/// TF_SSE_PING_S: seconds of stream silence before a keep-alive (default 10; 0 turns it off), in nanoseconds.
+fn pingInterval() i96 {
+    const v = std.c.getenv("TF_SSE_PING_S") orelse return 10 * std.time.ns_per_s;
+    const s = std.fmt.parseInt(u32, std.mem.span(v), 10) catch return 10 * std.time.ns_per_s;
+    return @as(i96, s) * std.time.ns_per_s;
+}
 
 pub const Reply = struct {
     content: []const u8,
@@ -236,7 +246,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     };
     release(srv, preparing); // a background request waits only while a foreground one prepares
     preparing = false;
-    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools };
+    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .ping_ns = pingInterval(), .last_write = submitted };
     defer srv.noteRequest(prepared.prompt_len, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds, if (box.cached) |c| @as(usize, c) else null, box.stats.decode_seconds, box.stats.queue_seconds);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     const result: Failure!Reply = blk: {
@@ -325,6 +335,8 @@ const Generation = struct {
     engine_done: bool = false,
     consumed: usize = 0,
     chunk_index: usize = 0,
+    ping_ns: i96 = 0, // silence before a keep-alive (0: none)
+    last_write: i96 = 0, // when the stream last carried something
 
     fn eos(g: *const Generation, t: u32) bool {
         return !g.ignore_eos and std.mem.indexOfScalar(u32, g.srv.eos, t) != null;
@@ -408,6 +420,22 @@ const Generation = struct {
             g.cancel();
             return error.Cancelled;
         };
+        g.last_write = nowNs(g.srv.io);
+    }
+
+    /// A keep-alive on a stream silent for ``ping_ns`` (the prefill, a long tool-call argument held back): the
+    /// connection thread writes it between its waits, so nothing else writes at the same time.
+    fn keepAlive(g: *Generation) Failure!void {
+        if (g.ping_ns == 0) return;
+        const sink = g.sink orelse return;
+        const ping = sink.ping orelse return;
+        const now = nowNs(g.srv.io);
+        if (now - g.last_write < g.ping_ns) return;
+        ping(sink.ctx) catch {
+            g.cancel();
+            return error.Cancelled;
+        };
+        g.last_write = now;
     }
 
     /// Ends the request and waits for the engine; one it ended unfinished counts as a disconnect, as the Mac scheduler counts it.
@@ -452,7 +480,10 @@ const Generation = struct {
                 g.cancel();
                 return error.Cancelled;
             }
-            const tokens = chunk orelse continue;
+            const tokens = chunk orelse {
+                try g.keepAlive();
+                continue;
+            };
             if (g.reason == null) try g.commit(tokens);
         }
     }

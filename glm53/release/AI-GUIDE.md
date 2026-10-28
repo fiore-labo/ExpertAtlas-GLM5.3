@@ -1,4 +1,4 @@
-# A guide for AI assistants: full GLM-5.3 on DGX Spark (release r3-102)
+# A guide for AI assistants: full GLM-5.3 on DGX Spark (release r3.1-102)
 
 This page describes the whole system in one place: what it is, what each part does, how it is used, what it can do
 and what it cannot. It is written for AI assistants that help someone understand, install, run or troubleshoot this
@@ -19,8 +19,8 @@ server needs no Python at run time.
 |---|---|
 | Model | GLM-5.3, full size, EXL3-quantized checkpoints published by Fiore-lab on Hugging Face |
 | Nodes | 4 or 8 DGX Spark (GB10) on one RoCE v2 network; nothing else is supported |
-| Context | up to 1,048,576 tokens; the memory sets it: 1,048,576 on eight nodes (FP8 KV, `STORE` 589,824) and 819,200 on four (4-bit KV, `STORE` 18,080). The examples ship 819,200 and 737,280 |
-| API | OpenAI-compatible chat API (`/v1/chat/completions`) on `127.0.0.1:8000` by default |
+| Context | up to 1,048,576 tokens on both node counts. Eight nodes: `STORE` 1,048,576 beside it on the 4-bit KV cache (`KV=fp4`, `NEED_GB=100`), 589,824 on the 8-bit one. Four nodes: from the control panel with 70 % of the routed experts at 3 bits and 30 % at 4 (4-bit KV, `STORE` 512); the four-node checkpoint alone 819,200 (`STORE` 18,080). Measured with one prompt of about 1,019,000 tokens each. The 4-bit KV cache costs some accuracy (KL 0.0190 against 0.0156, `T4.md`). The examples ship 819,200 and 737,280 |
+| API | OpenAI-compatible chat API (`/v1/chat/completions`) on every address (`0.0.0.0:8000`) by default |
 | Requests | one runs at a time; up to 32 more wait in a queue |
 | Drafters | MTP (the checkpoint's own layer, default), DFlash2 (optional, not included, separate licence), or none |
 | Control panel | "Expert Atlas": per-expert bit widths (2/3/4/5 bits), a web page; four or eight nodes |
@@ -34,7 +34,9 @@ server needs no Python at run time.
 | `bin/tensorfold-native` | the server: the GLM-5.3 engine and the HTTP API, CUDA kernels for GB10 (sm_121) built in |
 | `lib/libroce_proxy.so` | the RDMA proxy the decode collectives use (needs `libibverbs.so.1`) |
 | `tf-glm53` | the script that deploys, checks, starts, stops and watches the ranks; run it on the first node |
+| `claude-glm53` | starts Claude Code against the server's Messages API (RUNTIME.md, "Claude Code") |
 | `glm53.conf.example` / `glm53.t4.conf.example` | settings for eight / four nodes; one is copied to `glm53.conf` |
+| `CONFIG.md` | every setting of `glm53.conf`: its default, who reads it and when a change takes effect |
 | `launcher/tf_launcher.py` | the control panel's launcher (system `python3`, standard library only) |
 | `panel.html` | the control panel's page (the server holds the same page) |
 | `tools/quant/expert_plan.py` | writes the expert plans (which width each expert loads at) |
@@ -111,10 +113,12 @@ details; the image can also be built from the archive (`docker/Dockerfile`).
    `~/models/GLM-5.3-EXL3-Experts-<N>bit`): on four nodes `fiore-lab/GLM-5.3-EXL3-Experts-3bit` and `-4bit` are the
    usual pair (277.9 and 368.5 GB); `-2bit` (187.3 GB) and `-5bit` (459.1 GB) are optional. The eight-node checkpoint
    can serve as the 4-bit bank (`RUNTIME.md`, "The control panel"). Check them with `./tf-glm53 verify-banks 3 4`.
-2. `./tf-glm53 launcher` on the first node; open `http://127.0.0.1:8010/panel` there (without `LAUNCHER_PORT`, the
-   port is `PORT` + 10), or from another machine through an ssh tunnel (`ssh -L 8010:127.0.0.1:8010 FIRST-NODE`). The
-   launcher listens on loopback only and refuses another `LAUNCHER_HOST`: anyone who reached it could start, stop and
-   swap the engine. It stays on whether the engine runs or not; the page reaches the engine through it.
+2. `./tf-glm53 launcher` on the first node; open `http://FIRST-NODE:8010/panel` (without `LAUNCHER_PORT`, the port is
+   `PORT` + 10). The launcher listens on every address by default and has no key: anyone who reaches it can start,
+   stop and swap the engine (`LAUNCHER_HOST=127.0.0.1` keeps it to the node; then an ssh tunnel,
+   `ssh -L 8010:127.0.0.1:8010 FIRST-NODE`). It stays on whether the engine runs or not; the page reaches the engine
+   through it. It reads `glm53.conf` when it starts, so an edit needs `./tf-glm53 launcher stop` and
+   `./tf-glm53 launcher` again.
 3. On the page: choose a plan, the KV format, the context, the store, what each node keeps for the OS and the drafter;
    check the memory verdict; press Start (then Confirm). Stop from the page too.
 
@@ -127,7 +131,7 @@ details; the image can also be built from the archive (`docker/Dockerfile`).
 | `NCCL_LIB` | NCCL 2.30.7's `libnccl.so.2`, the same path on every node | the same |
 | `WEIGHTS` | the checkpoint's directory, the same path on every node | the 8x / 4x checkpoint |
 | `DRAFTER_KIND`, `MTP_K`, `DRAFTER` | the drafter (`mtp`, `dflash2`, `none`), MTP's drafts a round (3), DFlash2's directory | `mtp`, 3, empty |
-| `NAME`, `HOST`, `PORT` | the model name in the API, the listen address and port | `glm-5.3`, `127.0.0.1`, 8000 |
+| `NAME`, `HOST`, `PORT` | the model name in the API, the listen address and port | `glm-5.3`, `0.0.0.0`, 8000 |
 | `METRICS_LISTEN` | an extra read-only address answering `/metrics` and `/health` only | off |
 | `CONTEXT` | positions one request may reach, prompt and reply together | 819,200 / 737,280 |
 | `STORE` | positions kept beyond `CONTEXT` for earlier conversations (pool: 512 at least) | 819,200 / 100,000 |
@@ -138,7 +142,7 @@ details; the image can also be built from the archive (`docker/Dockerfile`).
 | `MASTER_PORT`, `READY_TIMEOUT` | the ranks' rendezvous port; seconds to wait for the server | 29551, 900 |
 | `RUNTIME`, `IMAGE` | how the ranks run: `host` (default, from this directory) or `docker` (each in a container of `IMAGE`) | `host`, empty |
 | `EXTRA_ENV` | engine variables, for example `TF_GLM53_MULTI=4` (several conversations decoded together; off by default) | empty |
-| `LAUNCHER_HOST`, `LAUNCHER_PORT`, `ATLAS_DIR`, `RESERVE_GB` | the control panel: its address, port, saved allocations, memory kept for the OS | four-node example: `127.0.0.1`, 8010, `atlas/`, 4 |
+| `LAUNCHER_HOST`, `LAUNCHER_PORT`, `ATLAS_DIR`, `RESERVE_GB` | the control panel: its address, port, saved allocations, memory kept for the OS | four-node example: `0.0.0.0`, 8010, `atlas/`, 4 |
 
 ## 6. Commands (`./tf-glm53`, run on the first node)
 
@@ -179,9 +183,9 @@ forever).
 - Refused with 400: `n` other than 1, `logprobs`, `response_format` `json_object`, `tool_choice` `required`, images
   (text only), a `max_tokens` beyond the context. A streamed request that cannot fit ends with an error event.
 - A client that disconnects cancels its request.
-- No key: the API has none. On a non-loopback `HOST` it is open to anyone who can reach it, and the server speaks
-  plain HTTP, so text crosses the network in the clear unless the server stays on a closed network or TLS and access
-  control are put in front.
+- No key: the API has none. By default it listens on every address (`HOST=0.0.0.0`), so anyone who can reach it can
+  use it, and the server speaks plain HTTP, so text crosses the network in the clear unless the server stays on a
+  closed network or TLS and access control are put in front (`HOST=127.0.0.1` keeps the API to the first node).
 - Speeds from the counters: decode tokens/s = Δ`completion_tokens_total` / Δ`decode_seconds_total`; prefill tokens/s
   = Δ`prefill_tokens_total` / Δ`prefill_seconds_total`; tokens kept per draft round = Δ`completion_tokens_total` /
   Δ`rounds_total` (1 means no draft was kept); cache hits = Δ`cached_tokens_total` / Δ`prompt_tokens_total`. The
@@ -215,14 +219,18 @@ and its fields may change between releases.
   run's usage record (the record it started with plus this run's picks), each width keeping its number of experts, so
   the memory stays the same. It starts once no request runs or waits, swaps the layers in place on every rank, drops
   the conversations it keeps (their KV was computed with the old experts) and serves again; requests that arrive
-  meanwhile wait (a full change of 75 layers took 83 to 90 s on four nodes). The result is not saved by itself. A start
+  meanwhile wait (a full change of 75 layers took 83 to 90 s on four nodes). Every node needs room for the largest
+  layer's new copy on top of what the layers before it grew, plus 2 GiB; the estimate says whether each has it, and
+  the page refuses the change, naming the node, when one does not. The result is not saved by itself. A start
   loads the widths it is given and never re-sorts. With `TF_GLM53_MULTI` in `EXTRA_ENV` nothing changes while the
   engine runs: the estimate's widths are saved under a name (`opt-<time>`) for a stop and a start with it.
 - **What the re-sort gains** (four nodes, half 3 / half 4 bits, Both): the KL divergence from the all-4-bit model fell
   24 % on the reply's tokens at 8,192 tokens and 32 to 34 % at 128K and 256K tokens; 15 to 22 % on the prompt's tokens
   (`ATLAS-TESTS.md`). On kinds of work not in the counts it ranks by the gain is smaller (about two thirds).
 - **Memory, four nodes** (4-bit KV, `STORE` 100,000, MTP): all 3 bits fits 737,280 tokens of context; half 3 / half
-  4 bits 737,280; a quarter 3 / three quarters 4 bits 622,592; all 4 bits 327,680; all 5 bits does not fit. DFlash2
+  4 bits 737,280; a quarter 3 / three quarters 4 bits 622,592; all 4 bits 327,680; all 5 bits does not fit. With
+  `CONTEXT` 1,048,576 and `STORE` 512, 70 % at 3 bits and 30 % at 4 bits fits with about 7.5 GiB a node to spare,
+  enough for a live re-sort. DFlash2
   needs about 4 GiB more a node. Mixes with 2-bit experts were 13 to 30 % further from the reference at the same memory.
 
 ## 9. What it can do (measured)
@@ -300,5 +308,5 @@ the launcher's log in `logs/`.
 - A container needs the GPU, `/dev/infiniband`, the host network and
   `--ulimit memlock=-1 --ulimit nofile=1048576:1048576`; inside one, `tf-glm53 check` cannot see other containers' GPU
   processes.
-- The API listens on loopback by default; serving other machines needs `HOST`, and the API, which has no key, is then
-  open to anyone who can reach it. The control panel stays on loopback (an ssh tunnel from another machine).
+- The API listens on every address by default (`HOST=0.0.0.0`) and has no key: anyone who can reach it can use it
+  (`HOST=127.0.0.1` keeps it to the first node). The control panel's launcher too (`LAUNCHER_HOST`).

@@ -105,7 +105,13 @@ const Wire = struct {
     payload: Value = .null,
 
     fn out(w: *Wire) openai.Out {
-        return .{ .ctx = w, .vt = &.{ .open = open, .event = event, .reply = whole } };
+        return .{ .ctx = w, .vt = &.{ .open = open, .event = event, .reply = whole, .ping = ping } };
+    }
+
+    /// Messages' own keep-alive event, which Claude Code reads as activity.
+    fn ping(ctx: *anyopaque) error{Closed}!void {
+        const w: *Wire = @ptrCast(@alignCast(ctx));
+        return w.reply.send("ping", try w.reply.obj("ping"));
     }
 
     fn open(ctx: *anyopaque) error{Closed}!void {
