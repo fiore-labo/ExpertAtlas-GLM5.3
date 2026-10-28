@@ -154,6 +154,20 @@ pub fn experts(srv: *Server, conn: *Conn, a: Allocator, route: []const u8) void 
     conn.sendJson(200, body);
 }
 
+/// Fiore-lab: GET /v1/experts/usage[?window=SECONDS] on the read-only listener (TENSORFOLD_METRICS_LISTEN), with no
+/// key: the usage counts only (no token text, unlike /v1/experts/recent), for a monitor that keeps them.
+pub fn usageReadOnly(srv: *Server, conn: *Conn, a: Allocator) void {
+    var window: u32 = 60;
+    if (std.mem.indexOfScalar(u8, conn.path, '?')) |q| {
+        var it = std.mem.tokenizeScalar(u8, conn.path[q + 1 ..], '&');
+        while (it.next()) |kv| {
+            if (std.mem.startsWith(u8, kv, "window=")) window = @min(std.fmt.parseInt(u32, kv["window=".len..], 10) catch window, 3600);
+        }
+    }
+    const body = srv.engine.experts(a, .{ .usage = window }) orelse return routes.unknown(conn, a);
+    conn.sendJson(200, body);
+}
+
 /// The byte-level BPE byte alphabet backwards (the vocabulary: printable Latin-1 stands for itself, the other 68
 /// bytes are U+0100 onwards), -1 for a character outside it.
 /// byte-level BPE のバイトの表の逆 (語彙: 印字できる Latin-1 はそのまま、ほかの 68 バイトは U+0100 から)。

@@ -46,8 +46,8 @@ It holds no model weights, no draft model and no NCCL.
   check's estimate is for the 8-bit cache, so set `NEED_GB=100` there.
 - Four nodes: memory sized for this server alone (`T4.md`); with DFlash2 the lowest free memory measured was about
   3.2 GiB a node, at 512K.
-- The control panel (four or eight nodes): disk for the expert banks it uses (below) and `python3` on every node (DGX
-  OS has it).
+- `python3` on every node, for the log keeper (DGX OS has it), with the archive and with the image alike.
+- The control panel (four or eight nodes): disk for the expert banks it uses (below).
 - In containers ("Running in containers"): Docker and the NVIDIA container toolkit on every node instead of cuBLAS,
   libibverbs and NCCL.
 
@@ -353,20 +353,26 @@ Display > Language).
 ## When a rank stops
 
 `tf-glm53 up` leaves a watcher that checks the ranks every 5 seconds. If some ranks are gone while others still run
-(twice in a row), it stops them all, since the others would wait forever, and names the ranks that were gone in
-`watch.log` in the logs directory. Start again with `tf-glm53 up`. Start and stop the ranks with `tf-glm53` only: ranks started by hand
+(twice in a row), it stops them all, since the others would wait forever, and names the ranks that were gone in its
+log (`tf-glm53 logs watch`). Start again with `tf-glm53 up`. Start and stop the ranks with `tf-glm53` only: ranks started by hand
 have no watcher, and if one fails while starting, the others wait in a collective until they are stopped.
 
 A start that fails (a rank stops, the server is not ready within `READY_TIMEOUT`, the smoke test fails, or Ctrl-C)
-stops every rank before `tf-glm53 up` returns. Each node keeps its rank's log as `rankR.log` in the logs directory, and
-the start before as `rankR.log.prev`; `tf-glm53 logs R` follows rank R's.
+stops every rank before `tf-glm53 up` returns. Each node keeps its rank's log, and the start before's;
+`tf-glm53 logs R` follows rank R's (`R.prev`: the start before's).
 
-The logs directory (the ranks', the watcher's and the launcher's logs) is in memory, `/dev/shm/tf-glm53-<uid>-p<PORT>`
-on every node, when the user running `tf-glm53` lingers (`sudo loginctl enable-linger USER`, once a node); otherwise it
-is `logs/` in this directory, on disk, and `tf-glm53 check` says how to move it. Without lingering, logind removes a
-user's `/dev/shm` files when the user's last session ends, so the logs stay on disk there. Logs in memory are gone after
-a reboot. The server leaves out the access line of the requests a monitor or the panel repeats (`/health`, `/metrics`,
-`/v1/experts/*`, `/v1/memory`), so the logs stay small. `LOGS_IN_MEMORY=0` keeps them on disk (`CONFIG.md`).
+The logs are kept in memory, nothing on disk: `tf-glm53 up` starts a log keeper on every node (`tools/logkeep.py`,
+`python3` with its standard library; it reads and answers on an abstract unix socket, so it has no file either), and
+each rank's output, the watcher's, the launcher's and `tf-glm53`'s own go into it. Each log keeps its last
+`LOG_KEEP_MB` (8 by default); older lines go, and a reboot or a stopped keeper loses them. The keeper stays on after a
+stop, so a failed start's logs can still be read; the next start keeps one start before. It answers the user it runs
+as only (an abstract socket has no file permissions, so it checks the peer's user). A change of `LOG_LISTEN` or
+`LOG_KEEP_MB` takes effect at the next `tf-glm53 up`, which starts the keepers anew (the lines they held are lost).
+`tf-glm53 logs R | R.prev | watch | launcher` follows one. To keep the logs anywhere for longer, set `LOG_LISTEN=HOST:PORT`: each node's keeper
+then also answers, read-only and with no key, `GET /streams` (the logs it holds) and `GET /logs?stream=rank0&after=N`
+(the lines after line N, numbered), for a monitor on another host that polls them and stores them ("Serving other
+machines"). The server leaves out the access line of the requests a monitor or the panel repeats (`/health`,
+`/metrics`, `/v1/experts/*`, `/v1/memory`), so the logs stay small.
 
 Each rank runs with `oom_score_adj` 1000. A node that runs out of memory then loses its rank to the kernel's OOM
 killer and the watcher stops the others; the node itself stays up. (A shell started over ssh inherits sshd's -1000,
@@ -382,7 +388,7 @@ run `docker` on every node (the `docker` group). `tf-glm53`, the control panel's
 first node's host, as with the archive; the weights and the expert banks stay on the hosts.
 
 ```sh
-I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.1-102
+I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.2-102
 docker pull $I                                                # on every node
 mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out $I install /out
 cd glm53 && cp glm53.conf.example glm53.conf                  # or glm53.t4.conf.example; set RUNTIME=docker, IMAGE=$I
@@ -392,7 +398,7 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # or glm53.t4.conf
 - `install` writes the release's files (the same as the unpacked archive) to the directory. `./tf-glm53 pull` runs
   `docker pull IMAGE` on every node.
 - The image can be built from the archive instead: in a freshly unpacked archive,
-  `docker build -f docker/Dockerfile -t glm53-tensorfold:r3.1-102 .`. The build refuses any file the archive's
+  `docker build -f docker/Dockerfile -t glm53-tensorfold:r3.2-102 .`. The build refuses any file the archive's
   `SHA256SUMS` does not list, so nothing of an installation goes into the image. Copy it to the other nodes with
   `docker save` and `docker load`.
 - `tf-glm53 check` checks, on every node, that `IMAGE` is there with the first node's layers, that a container reaches
@@ -400,7 +406,8 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # or glm53.t4.conf
 - Each rank's container has the GPU, `/dev/infiniband`, the host network and IPC,
   `--ulimit memlock=-1 --ulimit nofile=1048576:1048576`, `--oom-score-adj 1000`, the host user and an init. Mounted
   at the same paths: `WEIGHTS`, `DRAFTER` (DFlash2) and every bank of `expert-plan/banks.json` the node has, read-only;
-  the logs directory and `launch/`, writable. Containers are named `glm53-p<PORT>-r<rank>` and removed when they stop.
+  `launch/`, writable. Docker keeps no log of them (`--log-driver none`): their output goes to the node's log keeper.
+  Containers are named `glm53-p<PORT>-r<rank>` and removed when they stop.
   `tf-glm53 down`, `status`, the watcher and the control panel work on them as on ranks run from the host.
 - Measured on four nodes (the eight-node checkpoint, 131,072 tokens of context, MTP): the start took 4 minutes, as
   on the host; the smoke test passed; `down` stopped every rank in 4 s; with one rank's container killed, the watcher
@@ -420,8 +427,10 @@ The server's own page (`http://FIRST-NODE:PORT/panel`) gets the experts' counts 
 control panel's page (`http://FIRST-NODE:LAUNCHER_PORT/panel`), whose calls the launcher makes from the first node.
 
 A monitor on another host can read the server without reaching the API: set `METRICS_LISTEN=HOST:PORT` (for example
-`0.0.0.0:9894`). The first node then also answers `GET /metrics` (Prometheus text) and `GET /health` on that address,
-and nothing else (any other request gets 404), while the API stays on `HOST`. `tf-glm53 status` prints
+`0.0.0.0:9894`). The first node then also answers `GET /metrics` (Prometheus text), `GET /health` and
+`GET /v1/experts/usage` (the experts' use counts, no text) on that address, and nothing else (any other request gets
+404), while the API stays on `HOST`. With `LOG_LISTEN` every node's log keeper answers its logs too (above, "When a rank
+stops"): a monitor that polls both keeps the record, and the nodes write nothing to disk. `tf-glm53 status` prints
 the address. Keep the port on a closed network: it shows no prompt or reply, but it shows the load and the token counts.
 The `tensorfold_health:*_total` counters include the running request and never fall back, so a speed is the difference
 of two reads: prefill tokens/s = Δ`prefill_tokens_total` / Δ`prefill_seconds_total`, decode = Δ`completion_tokens_total`
@@ -505,7 +514,7 @@ the first node cannot reach: `ssh -o BatchMode=yes ADDRESS true` must work from 
 | `GPU-busy` | another process holds the GPU (`nvidia-smi`) |
 | `memory(N<M GiB)` | free memory on that node, or lower `STORE` |
 
-When `up` fails it stops every rank and says why; each node keeps its rank's log (`rankR.log` in the logs directory, `tf-glm53 logs R`):
+When `up` fails it stops every rank and says why; each node keeps its rank's log in memory (`tf-glm53 logs R`):
 
 - `a rank stopped (N/M running)`: the lines above it name the rank and its log's last errors. `NCCL WARN` lines about
   connections: `NODES` must be the addresses on the RoCE network, `SOCKET_IFNAME` and `IB_HCA` that network's names on

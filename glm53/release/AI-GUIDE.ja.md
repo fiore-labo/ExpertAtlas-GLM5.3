@@ -1,6 +1,6 @@
 [English](AI-GUIDE.md) | 日本語
 
-# AI アシスタント向けガイド: DGX Spark で動かすフルサイズの GLM-5.3（リリース r3.1-102）
+# AI アシスタント向けガイド: DGX Spark で動かすフルサイズの GLM-5.3（リリース r3.2-102）
 
 このページは、システム全体を 1 か所にまとめたものです: これが何か、各部分が何をするか、どう使うか、何ができて何ができないか。利用者がこのリリースを理解する、インストールする、動かす、不具合を切り分けるのを手伝う AI アシスタント向けに書いていますが、人が読んでも同じ内容です。数値は他のページから取っています。詳細はそれらのページにあり、このページより詳しく書いています: `RUNTIME.ja.md`（動かし方。4 台と 8 台の両方）、`T4.ja.md`（4 台）、`PANEL-GUIDE.ja.md`（コントロールパネルの画面）、`ATLAS-TESTS.ja.md`（expert の並べ替えの測定）。ソースのリポジトリでは `packaging/RUNTIME.ja.md`、`glm53/release/T4.ja.md`、`glm53/release/PANEL-GUIDE.ja.md`、`glm53/release/ATLAS-TESTS.ja.md` です。英語版（`AI-GUIDE.md`）が原文です。
 
@@ -63,7 +63,7 @@
 
 ### コンテナで動かす（おすすめ）
 
-`glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定すると、`tf-glm53` は各ランクをリリースのイメージのコンテナとして各ノードで起動します（1 ランクに 1 コンテナ。1 台目から ssh で）。各ノードに要るのは、cuBLAS・libibverbs・NCCL の代わりに Docker と NVIDIA Container Toolkit で（DGX OS には両方あります）、下の手順 1 と 2 は要りません。各ノードでイメージを `docker pull` し（または `./tf-glm53 pull`）、1 台目で `docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out` でリリースのファイルをディレクトリに書き、手順 4 から進めます。重みとバンクはホストに置いたまま、読み取り専用でマウントします。詳細は `RUNTIME.ja.md`「コンテナで動かす」にあります。イメージはアーカイブから作ることもできます（`docker/Dockerfile`）。
+`glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定すると、`tf-glm53` は各ランクをリリースのイメージのコンテナとして各ノードで起動します（1 ランクに 1 コンテナ。1 台目から ssh で）。各ノードに要るのは、cuBLAS・libibverbs・NCCL の代わりに Docker と NVIDIA Container Toolkit で（DGX OS には両方あります）、下の手順 1 と 2 は要りません。各ノードでイメージを `docker pull` し（または `./tf-glm53 pull`）、1 台目で `mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out` でリリースのファイルをディレクトリに書き（ディレクトリは先に作ります。マウントのために Docker が作ると root のものになり、書き込めません）、手順 4 から進めます。重みとバンクはホストに置いたまま、読み取り専用でマウントします。詳細は `RUNTIME.ja.md`「コンテナで動かす」にあります。イメージはアーカイブから作ることもできます（`docker/Dockerfile`）。
 
 ### 準備（共通）
 
@@ -114,7 +114,7 @@
 | `down` | 全ランクを止めます（TERM、30 秒後に KILL） |
 | `status` | ランク、空きメモリ、drafter、会話のキャッシュ、サーバーの `/health` |
 | `smoke` | 答えを確かめる 3 件のリクエスト |
-| `logs [R]` | ランク R のログを追います（既定は 0）。ログは各ノードの記録の場所の `rankR.log` |
+| `logs [R]` | ランク R のログを追います（既定は 0。`R.prev`、`watch`、`launcher` も）。ログは各ノードのメモリにあります |
 | `launcher [stop\|status]` | コントロールパネルのランチャーを起動、停止、または状態表示 |
 | `-d KIND`（コマンドの前） | この起動の drafter（`mtp`、`dflash2`、`none`） |
 | `pull` | `RUNTIME=docker` のとき、各ノードで `docker pull IMAGE` |
@@ -200,7 +200,7 @@
 | `slot cache: WARNING: no store`（`CACHE=slots`） | 起動時にあるランクで `STORE` 分のメモリが足りなかった | メモリを空けるか `STORE` を下げ、`down` と `up` |
 | ログに `PoolWriteRefused` | あるランクが、リクエスト自身のブロック以外へのプールの書き込みを拒んだ | そのリクエストの終わりで全ランクが止まります。`./tf-glm53 up` |
 
-ログ: 各ノードの記録の場所に、`rankR.log`（前回の起動の分は `.prev`）、`watch.log`（監視が消えていたと判断したランク）、ランチャーのログがあります。記録の場所は、ユーザーがノードで lingering（`loginctl enable-linger`）ならメモリ上の `/dev/shm/tf-glm53-<uid>-p<PORT>`、そうでなければリリースのディレクトリの `logs/` です。どちらかは `tf-glm53 check` が表示します。
+ログ: 各ノードのログ係（`tools/logkeep.py`）のメモリにあり、ディスクには書きません。各ランクの分（その前の起動の分は `R.prev`）、監視プロセスの分（消えていたと判断したランク）、ランチャーの分を、`tf-glm53 logs R | R.prev | watch | launcher` で読みます。`LOG_LISTEN` を設定すると、モニタが HTTP で読んで保存できます。
 
 ## 12. 間違えやすい点
 

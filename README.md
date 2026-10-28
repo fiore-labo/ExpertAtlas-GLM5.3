@@ -37,6 +37,17 @@ where the details are.
   speed, cache hits and draft acceptance while a request runs. `METRICS_LISTEN` serves the two read-only on an address
   of their own, for a monitor on another host.
 
+## New in r3.2-102
+
+- Nothing is written to disk while the engine serves. Each rank's log, the watcher's and the launcher's are kept in
+  memory, in a log keeper on every node (`tools/logkeep.py`; `python3`, which DGX OS has, on every node, with the
+  archive and with the image alike), the last `LOG_KEEP_MB` (8) of each; `./tf-glm53 logs R` reads them. With
+  `RUNTIME=docker` the containers keep no log either. r3.1-102 kept them in memory only when the user lingered; r3.2-102
+  needs no linger.
+- A monitor on another host keeps the records: with `LOG_LISTEN=HOST:PORT` every node's keeper answers its logs,
+  read-only and with no key (`GET /streams`, `GET /logs`), and the metrics listener (`METRICS_LISTEN`) also answers the
+  experts' use counts (`GET /v1/experts/usage`) ([packaging/RUNTIME.md](packaging/RUNTIME.md), "Serving other machines").
+
 ## New in r3.1-102
 
 - The API and the control panel listen on every address by default (`HOST=0.0.0.0`, `LAUNCHER_HOST=0.0.0.0`), with
@@ -130,12 +141,12 @@ the image, every node needs Docker and the NVIDIA container toolkit (DGX OS has 
 server's libraries:
 
 ```sh
-docker pull ghcr.io/fiore-labo/expertatlas-glm5.3:r3.1-102            # on every node
-mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/expertatlas-glm5.3:r3.1-102 install /out
+docker pull ghcr.io/fiore-labo/expertatlas-glm5.3:r3.2-102            # on every node
+mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/expertatlas-glm5.3:r3.2-102 install /out
 ```
 
 then set `RUNTIME=docker` and `IMAGE` in `glm53.conf` and go on as below ([packaging/RUNTIME.md](packaging/RUNTIME.md),
-"Running in containers"). Without Docker: download the release archive `tensorfold-r3.1-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
+"Running in containers"). Without Docker: download the release archive `tensorfold-r3.2-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
 ([packaging/RUNTIME.md](packaging/RUNTIME.md) here). The same archive and launcher serve four or eight nodes: copy
 `glm53.conf.example` (eight nodes) or `glm53.t4.conf.example` (four nodes, see
 [glm53/release/T4.md](glm53/release/T4.md)) to `glm53.conf`, fill in the nodes, network names, NCCL, weights and
@@ -205,7 +216,7 @@ libibverbs headers (`libibverbs-dev`):
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so
-zig build dist -Dversion=r3.1-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 

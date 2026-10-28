@@ -27,7 +27,8 @@
 - 检查点所需的磁盘空间，在每个节点上放在相同路径下（见下文）：八个节点为 390 GB（363 GiB），四个节点为 344.6 GB（321 GiB）。
 - 八个节点：启动前每个节点需有 112 GiB 可用内存（使用 DFlash2 时为 115），以 `free -g` 的显示为准：当 `CONTEXT` 和 `STORE` 均为 819,200 时，各 rank 约使用 108 GiB（使用 DFlash2 时为 111）；使用 DFlash2 时，池（默认的对话缓存）每个 rank 比 slots（`CACHE=slots`）多用约 0.5 GiB。`STORE` 每减少 100,000 个 token，所需内存减少 2.7 GiB。可用内存不足的节点会被 `tf-glm53 check` 拒绝。使用 4 bit KV 缓存（`KV=fp4`）时，八个节点可将 `CONTEXT` 和 `STORE` 均设为 1,048,576，各 rank 约使用 94 GiB（用 1,018,993 个 token 的提示词实测）；`tf-glm53 check` 的估算按 8 bit 缓存计算，因此这时请设置 `NEED_GB=100`。
 - 四个节点：内存按只运行本服务器来分配（见 `T4.zh-CN.md`）；使用 DFlash2 时测得的最低可用内存为每个节点约 3.2 GiB（512K 时）。
-- 控制面板（四个或八个节点）：所用专家 bank 的磁盘空间（见下文），以及每个节点上的 `python3`（DGX OS 自带）。
+- 每个节点上的 `python3`，供日志保管进程使用，归档和镜像都需要（DGX OS 自带）。
+- 控制面板（四个或八个节点）：所用专家 bank 的磁盘空间（见下文）。
 - 在容器中运行时（见“在容器中运行”）：每个节点需要 Docker 和 NVIDIA Container Toolkit，而不是 cuBLAS、libibverbs 和 NCCL。
 
 ## 首次启动之前
@@ -213,11 +214,11 @@ done
 
 ## 当某个 rank 停止时
 
-`tf-glm53 up` 会留下一个监视进程，每 5 秒检查一次各 rank。如果一部分 rank 已退出而其他 rank 仍在运行（连续两次），它会停止所有 rank，因为剩下的 rank 会永远等待，并在日志目录的 `watch.log` 中记下已退出的 rank。请用 `tf-glm53 up` 重新启动。请只用 `tf-glm53` 启动和停止各 rank：手动启动的 rank 没有监视进程，若其中一个在启动时失败，其他 rank 会在集合通信中一直等待，直到被停止。
+`tf-glm53 up` 会留下一个监视进程，每 5 秒检查一次各 rank。如果一部分 rank 已退出而其他 rank 仍在运行（连续两次），它会停止所有 rank，因为剩下的 rank 会永远等待，并在它自己的日志中记下已退出的 rank（`tf-glm53 logs watch`）。请用 `tf-glm53 up` 重新启动。请只用 `tf-glm53` 启动和停止各 rank：手动启动的 rank 没有监视进程，若其中一个在启动时失败，其他 rank 会在集合通信中一直等待，直到被停止。
 
-启动失败时（某个 rank 停止、服务器未在 `READY_TIMEOUT` 内就绪、冒烟测试失败，或按下 Ctrl-C），`tf-glm53 up` 会在返回前停止所有 rank。每个节点将其 rank 的日志保存在日志目录的 `rankR.log` 中，上一次启动的日志保存在 `rankR.log.prev` 中；`tf-glm53 logs R` 持续跟踪 rank R 的日志。
+启动失败时（某个 rank 停止、服务器未在 `READY_TIMEOUT` 内就绪、冒烟测试失败，或按下 Ctrl-C），`tf-glm53 up` 会在返回前停止所有 rank。每个节点保留其 rank 的日志以及上一次启动的日志；`tf-glm53 logs R` 持续跟踪 rank R 的日志（`R.prev`：上一次启动的）。
 
-日志目录（各 rank、监视进程和启动器的日志）：当运行 `tf-glm53` 的用户处于 lingering 状态时（`sudo loginctl enable-linger USER`，每个节点一次），它在每个节点的内存中，即 `/dev/shm/tf-glm53-<uid>-p<PORT>`；否则为本目录下的 `logs/`（磁盘），`tf-glm53 check` 会说明如何移到内存。不处于 lingering 状态时，logind 会在用户最后一个会话结束时删除该用户在 `/dev/shm` 中的文件，因此这时日志留在磁盘上。内存中的日志在重启后消失。服务器不为监控或面板重复发出的请求（`/health`、`/metrics`、`/v1/experts/*`、`/v1/memory`）写访问行，因此日志保持很小。`LOGS_IN_MEMORY=0` 让日志留在磁盘上（`CONFIG.zh-CN.md`）。
+日志保存在内存中，不向磁盘写入任何内容：`tf-glm53 up` 在每个节点上启动一个日志保管进程（`tools/logkeep.py`，只用标准库的 `python3`；它通过抽象 unix 套接字读写，因此自身也没有文件），每个 rank、监视进程、启动器以及 `tf-glm53` 本身的输出都进入其中。每条日志保留最近的 `LOG_KEEP_MB`（默认 8），较旧的行被丢弃；重启或保管进程停止时日志也会消失。保管进程在停止引擎后仍然运行，因此失败的启动的日志仍可读取；下一次启动时保留上一次启动的日志。保管进程只响应启动它的用户的连接（抽象套接字没有文件权限，因此它检查对方的 uid）。修改 `LOG_LISTEN` 或 `LOG_KEEP_MB` 后，下一次 `tf-glm53 up` 会重新启动保管进程使其生效（之前保存的行会丢失）。`tf-glm53 logs R | R.prev | watch | launcher` 跟踪其中一条。若要在别处长期保存，请设置 `LOG_LISTEN=HOST:PORT`：每个节点的保管进程还会以只读、无密钥的方式响应 `GET /streams`（所持有的日志）和 `GET /logs?stream=rank0&after=N`（第 N 行之后带编号的行），供另一台主机上的监控程序轮询并保存（“为其他机器提供服务”）。服务器不为监控或面板重复发出的请求（`/health`、`/metrics`、`/v1/experts/*`、`/v1/memory`）写访问行，因此日志保持很小。
 
 每个 rank 以 `oom_score_adj` 1000 运行。节点内存耗尽时，内核的 OOM killer 会结束该 rank，监视进程再停止其余 rank，节点本身继续运行。（通过 ssh 启动的 shell 会继承 sshd 的 -1000；保持该值的 rank 不会被 OOM killer 选中，节点反而会卡死。）
 
@@ -226,7 +227,7 @@ done
 本发布也以容器镜像形式提供：`/opt/glm53` 中是归档的文件，另有服务器运行所需的内容（cuBLAS 13、libibverbs 及其 provider、NCCL 2.30.7）。在 `glm53.conf` 中设置 `RUNTIME=docker` 和 `IMAGE` 后，`tf-glm53` 会通过 ssh 在每个节点上把各 rank 作为 `IMAGE` 的容器启动。这时每个节点需要的是 Docker 和 NVIDIA Container Toolkit（DGX OS 两者都有），而不是 cuBLAS、libibverbs 和 NCCL；运行 `tf-glm53` 的用户必须能在每个节点上运行 `docker`（`docker` 组）。`tf-glm53`、控制面板的启动器和设置与使用归档时一样留在第一个节点的主机上；权重和专家 bank 也留在主机上。
 
 ```sh
-I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.1-102
+I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.2-102
 docker pull $I                                                # 在每个节点上
 mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out $I install /out
 cd glm53 && cp glm53.conf.example glm53.conf                  # 或 glm53.t4.conf.example；设置 RUNTIME=docker 和 IMAGE=$I
@@ -234,9 +235,9 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # 或 glm53.t4.con
 ```
 
 - `install` 把本发布的文件（与解开的归档相同）写到该目录。`./tf-glm53 pull` 在每个节点上执行 `docker pull IMAGE`。
-- 镜像也可以由归档构建：在刚解开的归档中执行 `docker build -f docker/Dockerfile -t glm53-tensorfold:r3.1-102 .`。只要有归档 `SHA256SUMS` 未列出的文件，构建就会失败，因此安装环境中的设置或日志不会进入镜像。用 `docker save` 和 `docker load` 复制到其他节点。
+- 镜像也可以由归档构建：在刚解开的归档中执行 `docker build -f docker/Dockerfile -t glm53-tensorfold:r3.2-102 .`。只要有归档 `SHA256SUMS` 未列出的文件，构建就会失败，因此安装环境中的设置或日志不会进入镜像。用 `docker save` 和 `docker load` 复制到其他节点。
 - `tf-glm53 check` 在每个节点上检查：`IMAGE` 存在且层与第一个节点相同；容器能访问 GPU（`--gpus all`）；镜像中是与本目录相同的发布（否则为 `NG: image-not-this-release`）。
-- 每个 rank 的容器获得 GPU、`/dev/infiniband`、主机网络和 IPC、`--ulimit memlock=-1 --ulimit nofile=1048576:1048576`、`--oom-score-adj 1000`、主机用户和一个 init。以相同路径挂载：只读的 `WEIGHTS`、`DRAFTER`（DFlash2）以及该节点上 `expert-plan/banks.json` 中的每个 bank；可写的 日志目录和 `launch/`。容器名为 `glm53-p<PORT>-r<rank>`，停止后即删除。`tf-glm53 down`、`status`、监视进程和控制面板对它们的处理与从主机运行的 rank 相同。
+- 每个 rank 的容器获得 GPU、`/dev/infiniband`、主机网络和 IPC、`--ulimit memlock=-1 --ulimit nofile=1048576:1048576`、`--oom-score-adj 1000`、主机用户和一个 init。以相同路径挂载：只读的 `WEIGHTS`、`DRAFTER`（DFlash2）以及该节点上 `expert-plan/banks.json` 中的每个 bank；可写的 `launch/`。Docker 不保存容器的日志（`--log-driver none`）：其输出进入节点的日志保管进程。容器名为 `glm53-p<PORT>-r<rank>`，停止后即删除。`tf-glm53 down`、`status`、监视进程和控制面板对它们的处理与从主机运行的 rank 相同。
 - 四个节点上的测量（八节点检查点，上下文 131,072 个 token，MTP）：启动用了 4 分钟，与在主机上相同；冒烟测试通过；`down` 在 4 秒内停止所有 rank；强制终止一个 rank 的容器后，监视进程停止了其余 rank，43 秒后所有容器都已消失。
 - 主机上的 `systemctl daemon-reload` 可能使运行中的 GPU 容器失去 GPU（容器内 `nvidia-smi` 失败）：执行 `tf-glm53 down` 再 `up`。
 
@@ -244,7 +245,7 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # 或 glm53.t4.con
 
 服务器默认监听所有地址（`HOST=0.0.0.0`）并提供 OpenAI chat API，网络中的其他机器可以通过 `http://FIRST-NODE:PORT` 访问。API 没有密钥：任何能访问到它的人都可以使用（`tf-glm53 check` 会提示这一点）；设置 `HOST=127.0.0.1` 后只能从第一个节点访问。服务器使用明文 HTTP，因此请只在封闭网络中使用，或在其前面加一层 TLS 和访问控制（反向代理）。控制面板的启动器同样监听所有地址，且没有密钥（“控制面板”）。服务器自身的页面（`http://FIRST-NODE:PORT/panel`）只能在第一个节点本机上读取专家的次数和内存（`/v1/experts/*`、`/v1/memory`），因此从其他机器打开时只显示一条消息：请打开控制面板的页面（`http://FIRST-NODE:LAUNCHER_PORT/panel`），它的调用由启动器在第一个节点上发出。
 
-其他主机上的监控程序无需访问 API 即可读取服务器状态：设置 `METRICS_LISTEN=HOST:PORT`（例如 `0.0.0.0:9894`）后，第一个节点也会在该地址上响应 `GET /metrics`（Prometheus 文本格式）和 `GET /health`，且只响应这两者（其他请求一律返回 404），API 仍留在 `HOST` 上。`tf-glm53 status` 会显示该地址。请只在封闭网络中开放此端口：它不显示提示词或回复，但会显示负载和 token 数。`tensorfold_health:*_total` 计数器包含正在运行的请求且不会回退，因此速度由两次读取的差值得出：prefill tokens/s = Δ`prefill_tokens_total` / Δ`prefill_seconds_total`，解码 = Δ`completion_tokens_total` / Δ`decode_seconds_total`，缓存命中率 = Δ`cached_tokens_total` / Δ`prompt_tokens_total`，草稿接受率 = Δ`accepted_total` / Δ`drafted_total`。`tensorfold:requests_prefilling` 和 `tensorfold:requests_decoding` 表示正在运行的请求所处阶段，`tensorfold:prefill_tokens_remaining` 表示其 prefill 剩余量，`tensorfold:pool_*` 表示对话缓存，`tensorfold:engine_info` 表示设置。
+其他主机上的监控程序无需访问 API 即可读取服务器状态：设置 `METRICS_LISTEN=HOST:PORT`（例如 `0.0.0.0:9894`）后，第一个节点也会在该地址上响应 `GET /metrics`（Prometheus 文本格式）、`GET /health` 和 `GET /v1/experts/usage`（专家的使用次数，不含文本），且只响应这些（其他请求一律返回 404），API 仍留在 `HOST` 上。`tf-glm53 status` 会显示该地址。请只在封闭网络中开放此端口：它不显示提示词或回复，但会显示负载和 token 数。`tensorfold_health:*_total` 计数器包含正在运行的请求且不会回退，因此速度由两次读取的差值得出：prefill tokens/s = Δ`prefill_tokens_total` / Δ`prefill_seconds_total`，解码 = Δ`completion_tokens_total` / Δ`decode_seconds_total`，缓存命中率 = Δ`cached_tokens_total` / Δ`prompt_tokens_total`，草稿接受率 = Δ`accepted_total` / Δ`drafted_total`。`tensorfold:requests_prefilling` 和 `tensorfold:requests_decoding` 表示正在运行的请求所处阶段，`tensorfold:prefill_tokens_remaining` 表示其 prefill 剩余量，`tensorfold:pool_*` 表示对话缓存，`tensorfold:engine_info` 表示设置。
 
 ## Claude Code
 
@@ -297,7 +298,7 @@ ENDPOINT=http://FIRST-NODE:8000 ./claude-glm53      # 后面可以接 Claude Cod
 | `GPU-busy` | 另一个进程占用了 GPU（`nvidia-smi`） |
 | `memory(N<M GiB)` | 释放该节点上的内存，或调低 `STORE` |
 
-`up` 失败时会停止所有 rank 并说明原因；每个节点都保留其 rank 的日志（日志目录的 `rankR.log`，`tf-glm53 logs R`）：
+`up` 失败时会停止所有 rank 并说明原因；每个节点都在内存中保留其 rank 的日志（`tf-glm53 logs R`）：
 
 - `a rank stopped (N/M running)`：其上方的行会列出停止的 rank 及其日志中最后的错误。若出现关于连接的 `NCCL WARN` 行：`NODES` 必须是 RoCE 网络上的地址，`SOCKET_IFNAME` 和 `IB_HCA` 必须是每个节点上该网络的名称，并且各节点之间必须能在该网络上通过任意端口互相访问。`cannot listen on`：该节点上的 `PORT` 已被占用。`PoolValuesDiffer`：各 rank 以不同的池设置启动，因而拒绝启动；请用 `tf-glm53` 从同一个 `glm53.conf` 启动所有 rank。
 - `not ready after N s`：检查点位于本地 NVMe 硬盘时，启动约需两分半钟；更慢的磁盘或网络存储需要更长时间：请调高 `READY_TIMEOUT`。始终无法完成的 rendezvous 也会一直等待：请确认第一个节点上的 `MASTER_PORT` 未被占用。

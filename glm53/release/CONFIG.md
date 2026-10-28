@@ -67,9 +67,10 @@ fill in the nodes, the network devices and the paths. The examples carry the mea
 | `NAME` | `glm-5.3` | The model's name in the API: `/v1/models` lists it and replies carry it (a request may name any model). |
 | `HOST` | `0.0.0.0` | The address the API listens on. `0.0.0.0`: every address. The API has no key, so anyone who reaches it can use it: keep the nodes on a closed network, or put TLS and access control in front. `127.0.0.1`: this node only; another machine then reaches it through an ssh tunnel. |
 | `PORT` | `8000` | The API's port. |
-| `METRICS_LISTEN` | empty | `HOST:PORT` where the first node also answers `GET /metrics` (Prometheus text) and `GET /health`, read-only, for a monitor on another host. Empty: off. |
+| `METRICS_LISTEN` | empty | `HOST:PORT` where the first node also answers `GET /metrics` (Prometheus text), `GET /health` and `GET /v1/experts/usage` (the experts' use counts), read-only, for a monitor on another host. Empty: off. |
 | `EXPERT_LIVE` | `1` | `1`: the first node counts the experts each prompt row and each decoded token picks, for the control panel (its live view, the usage records and expert optimisation). `0`: not counted; the panel then shows the running engine with Stop, but no picks and no optimisation. A start from the panel always counts. |
-| `LOGS_IN_MEMORY` | `1` | `1`: the logs (each rank's, the watcher's, the launcher's) in memory, `/dev/shm/tf-glm53-<uid>-p<PORT>` on every node, when the user lingers (`sudo loginctl enable-linger USER` on every node); otherwise in `logs/` here, on disk. `0`: `logs/` always. Logs in memory are gone after a reboot. |
+| `LOG_LISTEN` | empty | `HOST:PORT` where each node's log keeper also answers, read-only and with no key, `GET /streams` and `GET /logs?stream=S&after=N`, for a monitor on another host that keeps the logs. Empty: the logs stay in each node's memory only (`tf-glm53 logs`). A change takes effect at the next `tf-glm53 up`, which starts the keepers anew (the lines they held are lost). |
+| `LOG_KEEP_MB` | `8` | The MB each log (each rank's, the watcher's, the launcher's) keeps in memory; older lines go. Nothing is written to disk. A change takes effect as `LOG_LISTEN`'s does. |
 
 ### Context, cache and KV
 

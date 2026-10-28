@@ -10,7 +10,7 @@
 #   tf-glm53 [-c CONF] down       stop every rank (TERM, then KILL after 30 s)
 #   tf-glm53 [-c CONF] status     ranks, free memory, the conversation cache, the server's /health and METRICS_LISTEN
 #   tf-glm53 [-c CONF] smoke      three requests whose answers are checked, the last one reusing the cached prompt
-#   tf-glm53 [-c CONF] logs [R]   follow rank R's log (default 0)
+#   tf-glm53 [-c CONF] logs [R]   follow rank R's log (default 0; R.prev: the start before; watch, launcher), in memory
 #   tf-glm53 [-c CONF] launcher [stop|status]   the control panel's launcher on this node, always on (start / stop /
 #                                 status); it serves /panel and /v1/launch/* on LAUNCHER_PORT (glm53/launcher)
 #   tf-glm53 [-c CONF] pull       RUNTIME=docker: docker pull IMAGE on every node, then each node's image compared
@@ -39,7 +39,7 @@ for a in "$@"; do case $a in -h|--help) usage; exit 0 ;; esac; done
 [ $# -eq 0 ] && { usage; exit 1; }
 case "${1:-}" in
   deploy|check|verify|up|down|status|smoke|watch|pull) [ $# -le 1 ] || { echo "$1 takes no arguments (got: ${*:2})"; exit 2; } ;;
-  logs) [ $# -le 2 ] && [[ ${2:-0} =~ ^[0-9]+$ ]] || { echo "logs [RANK]: a rank number"; exit 2; } ;;
+  logs) [ $# -le 2 ] && [[ ${2:-0} =~ ^([0-9]+(\.prev)?|watch|launcher)(\.prev)?$ ]] || { echo "logs [R]: a rank number (R.prev: the start before), watch or launcher"; exit 2; } ;;
   verify-banks) for a in "${@:2}"; do [[ $a =~ ^[2-5]$ ]] || { echo "verify-banks [BITS...]: widths 2 to 5 (got: $a)"; exit 2; }; done ;;
   launcher) [ $# -le 2 ] || { echo "launcher [start|stop|status]"; exit 2; } ;;
 esac
@@ -62,7 +62,8 @@ CACHE=${CACHE:-pool}       # pool: every conversation's KV in shared blocks of 2
 KV=${KV:-fp8}              # the KV cache's format: fp8, or fp4 (four nodes)
 DRAFT_SAVES=${DRAFT_SAVES:-8}  # pool with DFlash2: the conversations whose drafter state is kept
 EXPERT_LIVE=${EXPERT_LIVE:-1}  # 1: rank 0 counts the experts each row picks, for the control panel (a start from the panel always does); 0: not
-LOGS_IN_MEMORY=${LOGS_IN_MEMORY:-1}  # 1: the logs in memory (/dev/shm) when this user lingers (loginctl enable-linger), else in logs/; 0: logs/ always
+LOG_LISTEN=${LOG_LISTEN:-}      # HOST:PORT: each node's log keeper also answers GET /streams and /logs there, read-only (a monitor)
+LOG_KEEP_MB=${LOG_KEEP_MB:-8}   # the MB each log (each rank's, the watcher's, the launcher's) keeps in memory
 ROWS=${ROWS:-8192}
 SP_PARTS=${SP_PARTS:-4}
 MASTER_PORT=${MASTER_PORT:-29551}
@@ -81,12 +82,12 @@ case $RUNTIME in
   docker) [ -n "$IMAGE" ] || { echo "RUNTIME=docker needs IMAGE (this release's image, e.g. ghcr.io/OWNER/glm53-tensorfold:VERSION)"; exit 2; } ;;
   *) echo "RUNTIME must be host or docker"; exit 2 ;;
 esac
-# the logs (each rank's, the watcher's, the launcher's), the same path on every node: in memory when this user lingers
-# (logind removes a user's /dev/shm files at the last logout otherwise), else in logs/ here
-LOGS=$PKG/logs
-if [ "$LOGS_IN_MEMORY" = 1 ] && [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" = yes ]; then
-  LOGS=/dev/shm/tf-glm53-$(id -u)-p$PORT
-fi
+# the logs (each rank's, the watcher's, the launcher's): in memory, in this lane's log keeper on each node
+# (tools/logkeep.py, an abstract unix socket: no file, nothing on disk, nothing for logind to remove at logout)
+KEEP="python3 $PKG/tools/logkeep.py --sock tf-glm53-$(id -un)-p$PORT"
+# the node's keeper, started when it does not answer; it stays on (a stop leaves the logs for a look). up adds
+# --renew: a keeper with other LOG_LISTEN / LOG_KEEP_MB (or of another release) is replaced, its lines lost
+KEEPER_UP="$KEEP start ${LOG_LISTEN:+--listen $LOG_LISTEN} --keep $LOG_KEEP_MB"
 BIN=$PKG/bin/tensorfold-native
 # where a rank finds the release's library and NCCL: this directory and NCCL_LIB, or the image's own
 RUN_PKG=$PKG; RUN_NCCL=$NCCL_LIB
@@ -166,15 +167,16 @@ for b in json.load(open(sys.argv[1]))["banks"]: print(os.path.expanduser(b["dir"
 
 # rank R's container: the GPU, the RDMA devices and the host network, the locked-memory and open-file limits NCCL and
 # the RDMA proxy need, oom_score_adj 1000 (out of memory the kernel takes the rank, not the node), the host user, an
-# init that passes TERM on; its output to LOGS/rankR.log through the image's entry (serve LOG ARGS)
+# init that passes TERM on; its output (serve - ARGS: to stdout, Docker's own log off) into the node's log keeper
 docker_rank() {
   local r=$1 gid=$2 a=$3 m=$4 env="" kv d ro=""
   for kv in $(rank_env "$r" "$gid") $m; do env="$env -e $kv"; done
   for d in $(mount_dirs); do ro="$ro $d"; done
   echo "docker rm -f $CN$r >/dev/null 2>&1; M=; for d in $ro; do [ -d \$d ] && M=\"\$M -v \$d:\$d:ro\"; done;" \
-    "docker run -d --rm --init --name $CN$r --user \$(id -u):\$(id -g) --gpus all --network host --ipc host" \
+    "nohup docker run --rm --init --log-driver none --name $CN$r --user \$(id -u):\$(id -g) --gpus all --network host --ipc host" \
     "--device /dev/infiniband --cap-add IPC_LOCK --ulimit memlock=-1 --ulimit nofile=1048576:1048576 --oom-score-adj 1000" \
-    "-w /opt/glm53 \$M -v $LOGS:$LOGS -v $PKG/launch:$PKG/launch$env $IMAGE serve $LOGS/rank$r.log $WEIGHTS $a >/dev/null"
+    "-w /opt/glm53 \$M -v $PKG/launch:$PKG/launch$env $IMAGE serve - $WEIGHTS $a < /dev/null 2>&1 | nohup $KEEP send rank$r > /dev/null 2>&1 &" \
+    "for i in \$(seq 30); do [ -n \"\$(docker ps -q -f name='^/$CN$r\$')\" ] && break; sleep 1; done; [ -n \"\$(docker ps -q -f name='^/$CN$r\$')\" ]"
 }
 
 # this directory's identity on a node: every file of SHA256SUMS checked but expert-plan/banks.json, which is settings
@@ -233,7 +235,7 @@ cmd_check() {
         echo -n ' weights='\$(cd $WEIGHTS 2>/dev/null && { find . -maxdepth 1 -type f -printf '%f %s\\n' | LC_ALL=C sort | sha256sum; sha256sum config.json; } | sha256sum | cut -c1-64)
         $probe
         echo -n ' hca='\$([ -d /sys/class/infiniband/$IB_HCA ] && echo 1 || echo 0)
-        echo -n ' linger='\$(loginctl show-user \$(id -un) -p Linger --value 2>/dev/null || echo no)
+        echo -n ' py='\$(python3 -c 'print(1)' 2>/dev/null || echo 0)
         echo -n ' gid='\$($GID_PROBE)
         echo -n ' gpu='\$(nvidia-smi -L >/dev/null 2>&1 && echo ok || echo unreadable)
         echo -n ' running='\$( { $PIDS; nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null; } | grep -c '^ *[0-9]')
@@ -253,24 +255,19 @@ cmd_check() {
         [[ $o == *"ibverbs=0"* ]] && bad="$bad libibverbs"
       fi
       [[ $o == *"hca=0"* ]] && bad="$bad $IB_HCA"
+      [[ $o == *"py=1"* ]] || bad="$bad python3(the log keeper)"
       [[ $o =~ gid=[0-9] ]] || bad="$bad RoCE-v2-GID"
       [[ $o == *"gpu=unreadable"* ]] && bad="$bad GPU-unreadable(nvidia-smi fails)"
       [[ $o == *"running=0"* ]] || bad="$bad GPU-busy"
       fg=$(echo "$o" | grep -o 'free_gb=[0-9]*' | cut -d= -f2); [ "${fg:-0}" -ge "$need" ] || bad="$bad memory(${fg:-?}<$need GiB)"
       g=$(echo "$o" | grep -o 'gid=[0-9]*' | cut -d= -f2)
       nc=$(echo "$o" | grep -o 'nccl=[^ ]*' | cut -d= -f2); [ "$RUNTIME" = docker ] && nc="image ${wimg}"
-      if [ -n "$bad" ]; then echo "  rank $r $n: NG:$bad"; : > "$tmp/ng"; else echo "  rank $r $n: ok (GID $g, $fg GiB available, $nc)"; fi
-      [[ $o == *"linger=yes"* ]] || : > "$tmp/nolinger-$r" ) > "$tmp/$r" &
+      if [ -n "$bad" ]; then echo "  rank $r $n: NG:$bad"; : > "$tmp/ng"; else echo "  rank $r $n: ok (GID $g, $fg GiB available, $nc)"; fi ) > "$tmp/$r" &
   done; wait
-  nl=$(cd "$tmp" && ls nolinger-* 2>/dev/null | sed 's/nolinger-//' | sort -n | tr '\n' ' ')
   cat $(for r in $(seq 0 $LAST); do echo "$tmp/$r"; done); [ -f "$tmp/ng" ] && ng=1; rm -rf "$tmp"
   # every address is the default: the API has no key, so everyone on the network can use it (a note, not a refusal)
   if ! loopback "$HOST"; then echo "  note: the API listens on $HOST:$PORT with no key: anyone on the network can use it (HOST=127.0.0.1 keeps it to this node)"; fi
-  # where the logs are: in memory needs this user to linger on every node (logind removes them at the last logout)
-  if [ "$LOGS_IN_MEMORY" = 1 ]; then
-    if [ "${LOGS#/dev/shm/}" != "$LOGS" ] && [ -n "$nl" ]; then echo "  note: the logs are in memory ($LOGS), but this user does not linger on rank ${nl% }: logind removes them there at the last logout (sudo loginctl enable-linger $(id -un) on those nodes)"
-    elif [ "${LOGS#/dev/shm/}" = "$LOGS" ]; then echo "  note: the logs are on disk ($LOGS): to keep them in memory, sudo loginctl enable-linger $(id -un) on every node (CONFIG.md, LOGS_IN_MEMORY)"; fi
-  fi
+  echo "  logs: in memory on each node (tf-glm53 logs R)${LOG_LISTEN:+, read-only at http://NODE:${LOG_LISTEN##*:}/streams for a monitor}"
   [ $ng -eq 0 ] && echo "check: ok" || echo "check: NG"
   return $ng
 }
@@ -377,7 +374,7 @@ gone_ranks() {                                      # each rank not running, wit
     ( n=${NODES[$r]}
       case $(alive "$n") in
         1) ;;
-        0) echo "  rank $r $n stopped: $(on "$n" "grep -a -i -E 'error|panic|cannot' $LOGS/rank$r.log 2>/dev/null | grep -a -v -E 'SafeAllocator|stack trac' | tail -2 | tr '\n' ' '" | cut -c1-300)" ;;
+        0) echo "  rank $r $n stopped: $(on "$n" "$KEEP cat rank$r 2>/dev/null | grep -a -i -E 'error|panic|cannot' | grep -a -v -E 'SafeAllocator|stack trac' | tail -2 | tr '\n' ' '" | cut -c1-300)" ;;
         *) echo "  rank $r $n: not reachable over ssh" ;;
       esac ) > "$tmp/$r" &
   done; wait
@@ -388,7 +385,7 @@ fail_up() {                                         # a start that failed: stop 
   trap - INT TERM
   echo "$1: stopping every rank"
   cmd_down
-  echo "the logs stay on each node in $LOGS (tf-glm53 logs R); the previous start's are rankR.log.prev"
+  echo "the logs stay in memory on each node (tf-glm53 logs R; the start before: tf-glm53 logs R.prev)"
   return 1
 }
 
@@ -396,8 +393,13 @@ cmd_up() {
   # three nodes: this engine joins 8 / world shares of an expert; TP=3's units (3 / 3 / 2) need another engine
   [ "$WORLD" -eq 3 ] && { echo "3 nodes (TP=3): this engine does not split GLM-5.3 over three ranks yet: not started"; return 1; }
   cmd_check || { echo "not started"; return 1; }
-  local r n gid args
+  local r n gid args bad
   args="--host $HOST --port $PORT --name $NAME --context $CONTEXT"
+  # each node's keeper (renewed when the settings changed), its rank's log opened anew (the start before's lines to
+  # rankR.prev now, so the wait below never reads the last start's "serving" line as this one's)
+  bad=$(for r in $(seq 0 $LAST); do s=rank$r; [ "$r" -eq 0 ] && s="rank0 watch"
+    ( e=$(on "${NODES[$r]}" "$KEEPER_UP --renew && $KEEP open $s" 2>&1) || echo "  ${NODES[$r]}: the log keeper did not start: ${e:-python3?}" ) & done; wait)
+  [ -n "$bad" ] && { echo "$bad"; echo "not started"; return 1; }
   trap 'fail_up "interrupted"; exit 130' INT TERM
   for r in $(seq $LAST -1 0); do
     n=${NODES[$r]}
@@ -406,22 +408,21 @@ cmd_up() {
     a=$args; [ "$r" -gt 0 ] && a="--host 127.0.0.1 --port $PORT --name $NAME --context $CONTEXT"
     # rank 0 alone opens METRICS_LISTEN (the others' counters stay at 0)
     m=""; [ "$r" -eq 0 ] && [ -n "$METRICS_LISTEN" ] && m="TENSORFOLD_METRICS_LISTEN='$METRICS_LISTEN' "
-    # the last start's log is kept as rankR.log.prev; only the server goes to the background, its output to the log:
-    # ssh returns at once. oom_score_adj 1000: the kernel's OOM killer takes the rank first (a shell of sshd inherits
+    # the server and its output's writer go to the background, the output into the node's keeper (the start before
+    # becomes rankR.prev there): ssh returns at once. oom_score_adj 1000: the kernel's OOM killer takes the rank first (a shell of sshd inherits
     # -1000, never taken: out of memory the node then livelocks and needs a cold power cycle)
     if [ "$RUNTIME" = docker ]; then
-      on "$n" "mkdir -p $LOGS $PKG/launch; [ -f $LOGS/rank$r.log ] && mv -f $LOGS/rank$r.log $LOGS/rank$r.log.prev; $(docker_rank "$r" "$gid" "$a" "${m:+TENSORFOLD_METRICS_LISTEN=$METRICS_LISTEN}")" \
+      on "$n" "mkdir -p $PKG/launch; $(docker_rank "$r" "$gid" "$a" "${m:+TENSORFOLD_METRICS_LISTEN=$METRICS_LISTEN}")" \
         || { fail_up "rank $r's container did not start on $n"; return 1; }
       continue
     fi
-    on "$n" "mkdir -p $LOGS; cd $PKG || exit 1; [ -f $LOGS/rank$r.log ] && mv -f $LOGS/rank$r.log $LOGS/rank$r.log.prev; echo 1000 > /proc/self/oom_score_adj || exit 1; export $(rank_env "$r" "$gid"); ${m}nohup ./bin/tensorfold-native serve $WEIGHTS $a > $LOGS/rank$r.log 2>&1 < /dev/null &"
+    on "$n" "cd $PKG || exit 1; echo 1000 > /proc/self/oom_score_adj || exit 1; export $(rank_env "$r" "$gid"); ${m}nohup ./bin/tensorfold-native serve $WEIGHTS $a < /dev/null 2>&1 | nohup $KEEP send rank$r > /dev/null 2>&1 &"
   done
-  [ -f "$LOGS/watch.log" ] && mv -f "$LOGS/watch.log" "$LOGS/watch.log.prev"
-  drafter_line > "$LOGS/drafter"
-  ( nohup bash "$SELF" -c "$CONF" watch > "$LOGS/watch.log" 2>&1 < /dev/null & )
+  drafter_line | $KEEP send drafter
+  ( nohup bash "$SELF" -c "$CONF" watch < /dev/null 2>&1 | nohup $KEEP send watch > /dev/null 2>&1 & )
   echo "started; waiting for the server (up to ${READY_TIMEOUT}s)"
   local t0 el up; t0=$(date +%s)
-  while ! grep -q "serving .* at http://" "$LOGS/rank0.log" 2>/dev/null; do
+  while ! $KEEP cat rank0 2>/dev/null | grep -q "serving .* at http://"; do
     sleep 10; el=$(( $(date +%s) - t0 ))
     up=0; for n in "${NODES[@]}"; do [ "$(alive "$n")" = 1 ] && up=$((up + 1)); done
     if [ $up -lt $WORLD ] && [ $el -gt 20 ]; then
@@ -431,7 +432,7 @@ cmd_up() {
     [ $el -gt "$READY_TIMEOUT" ] && { fail_up "not ready after ${READY_TIMEOUT}s"; return 1; }
     [ $((el % 60)) -lt 10 ] && echo "  ${el}s"
   done
-  echo "ready after $(( $(date +%s) - t0 ))s: $(grep -m1 'serving .* at http://' "$LOGS/rank0.log" | sed 's/.*serving/serving/')"
+  echo "ready after $(( $(date +%s) - t0 ))s: $($KEEP cat rank0 | grep -m1 'serving .* at http://' | sed 's/.*serving/serving/')"
   echo "drafter: $(drafter_line)"
   store_line
   cmd_smoke || { fail_up "the smoke test failed"; return 1; }
@@ -441,7 +442,7 @@ cmd_up() {
 cmd_status() {
   local n
   for n in "${NODES[@]}"; do echo "  $n running $(alive "$n"), $(on "$n" "free -g | awk '/^Mem/{print \$7}'") GiB available" & done; wait
-  [ -f "$LOGS/drafter" ] && echo "drafter (the last start): $(cat "$LOGS/drafter")"
+  local d; d=$($KEEP cat drafter 2>/dev/null | tail -1); [ -n "$d" ] && echo "drafter (the last start): $d"
   store_line
   local h; h=$(curl -s -m 3 "$(url)/health")
   echo "${h:0:300}"
@@ -457,14 +458,14 @@ cmd_status() {
 # With the pool (TF_GLM53_PREFIX=pool) its own line: the positions every conversation shares, in blocks of 256
 store_line() {
   local s p
-  p=$(grep -m1 -o 'pool: [0-9]* blocks of 256 positions + Z ([0-9]* positions, capacity [0-9]*), [0-9]* slots at most' "$LOGS/rank0.log" 2>/dev/null)
+  p=$(grep -m1 -o 'pool: [0-9]* blocks of 256 positions + Z ([0-9]* positions, capacity [0-9]*), [0-9]* slots at most' <($KEEP cat rank0 2>/dev/null))
   if [ -n "$p" ]; then
     set -- $(echo "$p" | grep -o '[0-9][0-9]*')
     echo "conversation cache (pool): $3 positions in $1 blocks of 256, shared by up to $5 conversations (context $4)"
     return
   fi
-  s=$(grep -m1 -o 'slot cache: store of [0-9]* positions' "$LOGS/rank0.log" 2>/dev/null | grep -o '[0-9][0-9]*')
-  if [ -z "$s" ]; then echo "slot cache: not reported in $LOGS/rank0.log"
+  s=$($KEEP cat rank0 2>/dev/null | grep -m1 -o 'slot cache: store of [0-9]* positions' | grep -o '[0-9][0-9]*')
+  if [ -z "$s" ]; then echo "slot cache: not reported in rank 0's log"
   elif [ "$s" -eq 0 ] && [ "$STORE" -gt 0 ]; then echo "slot cache: WARNING: no store (a rank could not allocate $STORE positions); a request resumes only the conversation just before it: lower STORE or free memory, then down and up"
   else echo "slot cache: $s positions kept for earlier conversations"; fi
 }
@@ -483,12 +484,12 @@ cmd_launcher() {                                   # start (default), stop or st
   case ${1:-start} in
     start) [ -n "$p" ] && { echo "launcher: running (pid $p)"; return 0; }
       [ -f "$PKG/launcher/tf_launcher.py" ] || { echo "no $PKG/launcher/tf_launcher.py"; return 1; }
-      mkdir -p "$LOGS"; [ -f "$LOGS/launcher.log" ] && mv -f "$LOGS/launcher.log" "$LOGS/launcher.log.prev"
-      ( TF_LOGS=$LOGS nohup python3 "$PKG/launcher/tf_launcher.py" -c "$CONF" > "$LOGS/launcher.log" 2>&1 < /dev/null & )
+      e=$(eval "$KEEPER_UP && $KEEP open launcher" 2>&1) || { echo "launcher: the log keeper did not start: ${e:-python3?}"; return 1; }
+      ( TF_LOGKEEP="$KEEP" PYTHONUNBUFFERED=1 nohup python3 "$PKG/launcher/tf_launcher.py" -c "$CONF" < /dev/null 2>&1 | nohup $KEEP send launcher > /dev/null 2>&1 & )
       sleep 3; p=$(pgrep -f "$pat")
-      [ -n "$p" ] && echo "launcher: started (pid $p): $(grep -m1 -o 'http://[^ ]*/panel' "$LOGS/launcher.log")" || { echo "launcher: did not start:"; tail -5 "$LOGS/launcher.log"; return 1; } ;;
+      [ -n "$p" ] && echo "launcher: started (pid $p): $($KEEP cat launcher | grep -m1 -o 'http://[^ ]*/panel')" || { echo "launcher: did not start:"; $KEEP cat launcher | tail -5; return 1; } ;;
     stop) [ -z "$p" ] && { echo "launcher: not running"; return 0; }; kill -TERM $p; echo "launcher: stopped (pid $p)" ;;
-    status) [ -n "$p" ] && echo "launcher: running (pid $p): $(grep -m1 -o 'http://[^ ]*/panel' "$LOGS/launcher.log")" || echo "launcher: not running" ;;
+    status) [ -n "$p" ] && echo "launcher: running (pid $p): $($KEEP cat launcher 2>/dev/null | grep -m1 -o 'http://[^ ]*/panel')" || echo "launcher: not running" ;;
     *) echo "launcher [start|stop|status]"; return 2 ;;
   esac
 }
@@ -513,7 +514,9 @@ cmd_smoke() {
   c=$(ask "[$q1]" 2>/dev/null)
   [[ $c == *70* ]] && echo "  2/3 ok (70)" || { echo "  2/3 FAIL: '$c'"; ok=1; }
   q2="{\"role\": \"assistant\", \"content\": \"$c\"}, {\"role\": \"user\", \"content\": \"And warehouse T19? Answer with the number only.\"}"
-  c=$(ask "[$q1, $q2]" 2>"$LOGS/.cached"); cached=$(tail -1 "$LOGS/.cached")
+  # the cached count (ask's stderr, written first) and the reply from one output, with no file
+  local both; both=$(ask "[$q1, $q2]" 2>&1)
+  if [[ $(echo "$both" | head -1) =~ ^[0-9]+$ ]]; then cached=$(echo "$both" | head -1); c=$(echo "$both" | tail -n +2); else cached=; c=$both; fi
   [[ $c == *36* ]] && [ "${cached:-0}" -gt 0 ] && echo "  3/3 ok (36, ${cached} cached prompt tokens)" || { echo "  3/3 FAIL: '$c', cached ${cached:-0}"; ok=1; }
   [ $ok -eq 0 ] && echo "smoke: PASS" || echo "smoke: FAIL"
   return $ok
@@ -529,7 +532,7 @@ case "${1:-}" in
   status) cmd_status ;;
   smoke)  cmd_smoke ;;
   watch)  cmd_watch ;;
-  logs)   on "${NODES[${2:-0}]}" "tail -f $LOGS/rank${2:-0}.log" ;;
+  logs)   r=${2:-0}; case $r in watch*|launcher*) eval "$KEEP follow $r" ;; *) on "${NODES[${r%%.*}]}" "$KEEP follow rank$r" ;; esac ;;
   launcher) cmd_launcher "${2:-start}" ;;
   pull)   cmd_pull ;;
   *)      usage; exit 1 ;;
