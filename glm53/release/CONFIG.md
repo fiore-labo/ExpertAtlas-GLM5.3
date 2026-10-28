@@ -69,6 +69,7 @@ fill in the nodes, the network devices and the paths. The examples carry the mea
 | `PORT` | `8000` | The API's port. |
 | `METRICS_LISTEN` | empty | `HOST:PORT` where the first node also answers `GET /metrics` (Prometheus text) and `GET /health`, read-only, for a monitor on another host. Empty: off. |
 | `EXPERT_LIVE` | `1` | `1`: the first node counts the experts each prompt row and each decoded token picks, for the control panel (its live view, the usage records and expert optimisation). `0`: not counted; the panel then shows the running engine with Stop, but no picks and no optimisation. A start from the panel always counts. |
+| `LOGS_IN_MEMORY` | `1` | `1`: the logs (each rank's, the watcher's, the launcher's) in memory, `/dev/shm/tf-glm53-<uid>-p<PORT>` on every node, when the user lingers (`sudo loginctl enable-linger USER` on every node); otherwise in `logs/` here, on disk. `0`: `logs/` always. Logs in memory are gone after a reboot. |
 
 ### Context, cache and KV
 

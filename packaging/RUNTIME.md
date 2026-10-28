@@ -354,12 +354,19 @@ Display > Language).
 
 `tf-glm53 up` leaves a watcher that checks the ranks every 5 seconds. If some ranks are gone while others still run
 (twice in a row), it stops them all, since the others would wait forever, and names the ranks that were gone in
-`logs/watch.log`. Start again with `tf-glm53 up`. Start and stop the ranks with `tf-glm53` only: ranks started by hand
+`watch.log` in the logs directory. Start again with `tf-glm53 up`. Start and stop the ranks with `tf-glm53` only: ranks started by hand
 have no watcher, and if one fails while starting, the others wait in a collective until they are stopped.
 
 A start that fails (a rank stops, the server is not ready within `READY_TIMEOUT`, the smoke test fails, or Ctrl-C)
-stops every rank before `tf-glm53 up` returns. Each node keeps its rank's log in `logs/rankR.log`, and the start before
-in `logs/rankR.log.prev`; `tf-glm53 logs R` follows rank R's.
+stops every rank before `tf-glm53 up` returns. Each node keeps its rank's log as `rankR.log` in the logs directory, and
+the start before as `rankR.log.prev`; `tf-glm53 logs R` follows rank R's.
+
+The logs directory (the ranks', the watcher's and the launcher's logs) is in memory, `/dev/shm/tf-glm53-<uid>-p<PORT>`
+on every node, when the user running `tf-glm53` lingers (`sudo loginctl enable-linger USER`, once a node); otherwise it
+is `logs/` in this directory, on disk, and `tf-glm53 check` says how to move it. Without lingering, logind removes a
+user's `/dev/shm` files when the user's last session ends, so the logs stay on disk there. Logs in memory are gone after
+a reboot. The server leaves out the access line of the requests a monitor or the panel repeats (`/health`, `/metrics`,
+`/v1/experts/*`, `/v1/memory`), so the logs stay small. `LOGS_IN_MEMORY=0` keeps them on disk (`CONFIG.md`).
 
 Each rank runs with `oom_score_adj` 1000. A node that runs out of memory then loses its rank to the kernel's OOM
 killer and the watcher stops the others; the node itself stays up. (A shell started over ssh inherits sshd's -1000,
@@ -393,7 +400,7 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # or glm53.t4.conf
 - Each rank's container has the GPU, `/dev/infiniband`, the host network and IPC,
   `--ulimit memlock=-1 --ulimit nofile=1048576:1048576`, `--oom-score-adj 1000`, the host user and an init. Mounted
   at the same paths: `WEIGHTS`, `DRAFTER` (DFlash2) and every bank of `expert-plan/banks.json` the node has, read-only;
-  `logs/` and `launch/`, writable. Containers are named `glm53-p<PORT>-r<rank>` and removed when they stop.
+  the logs directory and `launch/`, writable. Containers are named `glm53-p<PORT>-r<rank>` and removed when they stop.
   `tf-glm53 down`, `status`, the watcher and the control panel work on them as on ranks run from the host.
 - Measured on four nodes (the eight-node checkpoint, 131,072 tokens of context, MTP): the start took 4 minutes, as
   on the host; the smoke test passed; `down` stopped every rank in 4 s; with one rank's container killed, the watcher
@@ -498,7 +505,7 @@ the first node cannot reach: `ssh -o BatchMode=yes ADDRESS true` must work from 
 | `GPU-busy` | another process holds the GPU (`nvidia-smi`) |
 | `memory(N<M GiB)` | free memory on that node, or lower `STORE` |
 
-When `up` fails it stops every rank and says why; each node keeps its rank's log (`logs/rankR.log`, `tf-glm53 logs R`):
+When `up` fails it stops every rank and says why; each node keeps its rank's log (`rankR.log` in the logs directory, `tf-glm53 logs R`):
 
 - `a rank stopped (N/M running)`: the lines above it name the rank and its log's last errors. `NCCL WARN` lines about
   connections: `NODES` must be the addresses on the RoCE network, `SOCKET_IFNAME` and `IB_HCA` that network's names on

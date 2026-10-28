@@ -62,6 +62,7 @@ CACHE=${CACHE:-pool}       # pool: every conversation's KV in shared blocks of 2
 KV=${KV:-fp8}              # the KV cache's format: fp8, or fp4 (four nodes)
 DRAFT_SAVES=${DRAFT_SAVES:-8}  # pool with DFlash2: the conversations whose drafter state is kept
 EXPERT_LIVE=${EXPERT_LIVE:-1}  # 1: rank 0 counts the experts each row picks, for the control panel (a start from the panel always does); 0: not
+LOGS_IN_MEMORY=${LOGS_IN_MEMORY:-1}  # 1: the logs in memory (/dev/shm) when this user lingers (loginctl enable-linger), else in logs/; 0: logs/ always
 ROWS=${ROWS:-8192}
 SP_PARTS=${SP_PARTS:-4}
 MASTER_PORT=${MASTER_PORT:-29551}
@@ -80,7 +81,12 @@ case $RUNTIME in
   docker) [ -n "$IMAGE" ] || { echo "RUNTIME=docker needs IMAGE (this release's image, e.g. ghcr.io/OWNER/glm53-tensorfold:VERSION)"; exit 2; } ;;
   *) echo "RUNTIME must be host or docker"; exit 2 ;;
 esac
+# the logs (each rank's, the watcher's, the launcher's), the same path on every node: in memory when this user lingers
+# (logind removes a user's /dev/shm files at the last logout otherwise), else in logs/ here
 LOGS=$PKG/logs
+if [ "$LOGS_IN_MEMORY" = 1 ] && [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" = yes ]; then
+  LOGS=/dev/shm/tf-glm53-$(id -u)-p$PORT
+fi
 BIN=$PKG/bin/tensorfold-native
 # where a rank finds the release's library and NCCL: this directory and NCCL_LIB, or the image's own
 RUN_PKG=$PKG; RUN_NCCL=$NCCL_LIB
@@ -141,6 +147,8 @@ rank_env() {
   # the Messages endpoint (Claude Code) puts a note where a request has an image: the model reads text only, and a
   # refused image would refuse every later turn of that conversation
   e="$e TF_MESSAGES_OMIT_IMAGES=1"
+  # no access line for the GETs a monitor or the control panel repeats (several a second), so the log stays small
+  e="$e TF_QUIET_POLLS=1"
   [ -n "$EXTRA_ENV" ] && e="$e $EXTRA_ENV"
   [ -n "$LAUNCH_ENV" ] && e="$e $LAUNCH_ENV"
   echo "$e"
@@ -225,6 +233,7 @@ cmd_check() {
         echo -n ' weights='\$(cd $WEIGHTS 2>/dev/null && { find . -maxdepth 1 -type f -printf '%f %s\\n' | LC_ALL=C sort | sha256sum; sha256sum config.json; } | sha256sum | cut -c1-64)
         $probe
         echo -n ' hca='\$([ -d /sys/class/infiniband/$IB_HCA ] && echo 1 || echo 0)
+        echo -n ' linger='\$(loginctl show-user \$(id -un) -p Linger --value 2>/dev/null || echo no)
         echo -n ' gid='\$($GID_PROBE)
         echo -n ' gpu='\$(nvidia-smi -L >/dev/null 2>&1 && echo ok || echo unreadable)
         echo -n ' running='\$( { $PIDS; nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null; } | grep -c '^ *[0-9]')
@@ -250,11 +259,18 @@ cmd_check() {
       fg=$(echo "$o" | grep -o 'free_gb=[0-9]*' | cut -d= -f2); [ "${fg:-0}" -ge "$need" ] || bad="$bad memory(${fg:-?}<$need GiB)"
       g=$(echo "$o" | grep -o 'gid=[0-9]*' | cut -d= -f2)
       nc=$(echo "$o" | grep -o 'nccl=[^ ]*' | cut -d= -f2); [ "$RUNTIME" = docker ] && nc="image ${wimg}"
-      if [ -n "$bad" ]; then echo "  rank $r $n: NG:$bad"; : > "$tmp/ng"; else echo "  rank $r $n: ok (GID $g, $fg GiB available, $nc)"; fi ) > "$tmp/$r" &
+      if [ -n "$bad" ]; then echo "  rank $r $n: NG:$bad"; : > "$tmp/ng"; else echo "  rank $r $n: ok (GID $g, $fg GiB available, $nc)"; fi
+      [[ $o == *"linger=yes"* ]] || : > "$tmp/nolinger-$r" ) > "$tmp/$r" &
   done; wait
+  nl=$(cd "$tmp" && ls nolinger-* 2>/dev/null | sed 's/nolinger-//' | sort -n | tr '\n' ' ')
   cat $(for r in $(seq 0 $LAST); do echo "$tmp/$r"; done); [ -f "$tmp/ng" ] && ng=1; rm -rf "$tmp"
   # every address is the default: the API has no key, so everyone on the network can use it (a note, not a refusal)
   if ! loopback "$HOST"; then echo "  note: the API listens on $HOST:$PORT with no key: anyone on the network can use it (HOST=127.0.0.1 keeps it to this node)"; fi
+  # where the logs are: in memory needs this user to linger on every node (logind removes them at the last logout)
+  if [ "$LOGS_IN_MEMORY" = 1 ]; then
+    if [ "${LOGS#/dev/shm/}" != "$LOGS" ] && [ -n "$nl" ]; then echo "  note: the logs are in memory ($LOGS), but this user does not linger on rank ${nl% }: logind removes them there at the last logout (sudo loginctl enable-linger $(id -un) on those nodes)"
+    elif [ "${LOGS#/dev/shm/}" = "$LOGS" ]; then echo "  note: the logs are on disk ($LOGS): to keep them in memory, sudo loginctl enable-linger $(id -un) on every node (CONFIG.md, LOGS_IN_MEMORY)"; fi
+  fi
   [ $ng -eq 0 ] && echo "check: ok" || echo "check: NG"
   return $ng
 }
@@ -468,7 +484,7 @@ cmd_launcher() {                                   # start (default), stop or st
     start) [ -n "$p" ] && { echo "launcher: running (pid $p)"; return 0; }
       [ -f "$PKG/launcher/tf_launcher.py" ] || { echo "no $PKG/launcher/tf_launcher.py"; return 1; }
       mkdir -p "$LOGS"; [ -f "$LOGS/launcher.log" ] && mv -f "$LOGS/launcher.log" "$LOGS/launcher.log.prev"
-      ( nohup python3 "$PKG/launcher/tf_launcher.py" -c "$CONF" > "$LOGS/launcher.log" 2>&1 < /dev/null & )
+      ( TF_LOGS=$LOGS nohup python3 "$PKG/launcher/tf_launcher.py" -c "$CONF" > "$LOGS/launcher.log" 2>&1 < /dev/null & )
       sleep 3; p=$(pgrep -f "$pat")
       [ -n "$p" ] && echo "launcher: started (pid $p): $(grep -m1 -o 'http://[^ ]*/panel' "$LOGS/launcher.log")" || { echo "launcher: did not start:"; tail -5 "$LOGS/launcher.log"; return 1; } ;;
     stop) [ -z "$p" ] && { echo "launcher: not running"; return 0; }; kill -TERM $p; echo "launcher: stopped (pid $p)" ;;

@@ -255,6 +255,9 @@ class Launcher:
         self.conf = os.path.abspath(a.conf)
         self.pkg_local = os.path.dirname(self.conf)
         self.pkg = a.pkg or self.pkg_local  # the lane directory on the nodes
+        # the logs: where tf-glm53 keeps them (TF_LOGS: in memory, the same path on every node), else PKG/logs
+        self.logs = os.environ.get("TF_LOGS") or os.path.join(self.pkg, "logs")
+        self.logs_local = os.environ.get("TF_LOGS") or os.path.join(self.pkg_local, "logs")
         self.dry = a.dry_run
         c = read_conf(self.conf)
         self.nodes = c["NODES"]
@@ -317,6 +320,7 @@ class Launcher:
         self.start_before = {}  # each node's MemAvailable before the current start
         self.usage_lock = threading.RLock()  # keep_usage holds it around end_run
         self.completions = None  # the engine's completion_tokens_total at the last /health
+        self.serving = False  # a request runs or waits (the last /health)
         # Expert Atlas's own directory, apart from the lane's: saved allocations in allocs/{builtin,user}
         self.atlas = c.get("ATLAS_DIR") or os.path.join(self.pkg_local, "atlas")
         self.alloc_lock = threading.Lock()  # one save, rename or delete of an allocation at a time
@@ -401,13 +405,15 @@ class Launcher:
 
     def health(self):
         """Whether the engine answers /health; its completion_tokens_total is kept (self.completions) so the usage is
-        read again soon after the engine decodes."""
+        read again once the engine has decoded, and whether a request runs or waits (self.serving)."""
         try:
             st, body = self.engine_get("/health", 2)
             if st != 200:
                 return False
             try:
-                self.completions = json.loads(body).get("completion_tokens_total", self.completions)
+                h = json.loads(body)
+                self.completions = h.get("completion_tokens_total", self.completions)
+                self.serving = bool(h.get("requests_running") or (h.get("live") or {}).get("waiting"))
             except ValueError:
                 pass
             return True
@@ -627,7 +633,7 @@ class Launcher:
 
     def watch(self):
         """Every second: the engine's health; the state follows a start or a stop made outside the launcher."""
-        last_usage, down, kept_at = time.time(), 0, None
+        down, kept_at = 0, None
         while True:
             up = self.health()
             down = 0 if up else down + 1
@@ -655,14 +661,13 @@ class Launcher:
                 snap = self.read_json("last-usage.json")
                 if snap and run_state(snap) == "running":
                     self.end_run(snap, None)  # ended without a choice (outside the launcher, a crash): pending
-            # the run's usage read again 2 s after the engine decoded anything (else every 5 minutes): a stop
-            # elsewhere or a crash, which leaves nothing to read, loses at most those seconds (10 s lost most of a short
-            # reply)
+            # the run's usage written once the engine has decoded and no request runs or waits (once a reply, not
+            # while it is written; nothing while idle): a stop elsewhere or a crash loses the reply under way at most
             moved = self.completions is not None and self.completions != kept_at
-            if up and (time.time() - last_usage > 300 or self.engine_bits is None or (moved and time.time() - last_usage >= 2)):
+            if up and (self.engine_bits is None or (moved and not self.serving)):
                 c = self.completions
                 self.keep_usage()  # also the bits of an engine the launcher did not start
-                last_usage, kept_at = time.time(), c
+                kept_at = c
             time.sleep(1)
 
     def poll_nodes(self):
@@ -1401,7 +1406,7 @@ class Launcher:
     def rank_errors(self):
         """The first `error: glm53:` line of each rank's log after a start failed (the reason the engine gave; the log's
         last lines are often the debug allocator's leak reports at exit), the distinct ones."""
-        logs = os.path.join(self.pkg, "logs")
+        logs = self.logs
         seen, out = set(), []
         for i, (rc, line) in enumerate(self.on_all(f"grep -m1 -h '^error: glm53' {logs}/rank*.log 2>/dev/null", 20)):
             line = line.strip()
@@ -1417,8 +1422,8 @@ class Launcher:
         if self.dry:
             log(f"dry run: LAUNCH_ENV={shlex.quote(env)} {' '.join(f'{k}={v}' for k, v in (extra or {}).items())} {' '.join(cmd)}")
             raise Fail("dry run: nothing was started" if what == "up" else "dry run: nothing was stopped")
-        os.makedirs(os.path.join(self.pkg_local, "logs"), exist_ok=True)
-        path = os.path.join(self.pkg_local, "logs", f"launch-{what}-{ts}.out")
+        os.makedirs(self.logs_local, exist_ok=True)
+        path = os.path.join(self.logs_local, f"launch-{what}-{ts}.out")
         lines = []
         with open(path, "w") as out:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -2032,7 +2037,7 @@ class Launcher:
         d = os.path.join(self.pkg_local, "snapshots", label)
         os.makedirs(d, exist_ok=True)
         cmd = ("echo '## nvidia-smi'; nvidia-smi; echo '## free -h'; free -h; echo '## docker ps'; docker ps 2>&1; "
-               f"echo '## log tail'; tail -n 5 {self.pkg}/logs/rank*.log 2>/dev/null")
+               f"echo '## log tail'; tail -n 5 {self.logs}/rank*.log 2>/dev/null")
         for name, (rc, out) in zip(self.names, self.on_all(cmd, 60)):
             open(os.path.join(d, f"{name}.txt"), "w").write(out)
         h = "200" if self.health() else "down"

@@ -213,9 +213,11 @@ done
 
 ## 当某个 rank 停止时
 
-`tf-glm53 up` 会留下一个监视进程，每 5 秒检查一次各 rank。如果一部分 rank 已退出而其他 rank 仍在运行（连续两次），它会停止所有 rank，因为剩下的 rank 会永远等待，并在 `logs/watch.log` 中记下已退出的 rank。请用 `tf-glm53 up` 重新启动。请只用 `tf-glm53` 启动和停止各 rank：手动启动的 rank 没有监视进程，若其中一个在启动时失败，其他 rank 会在集合通信中一直等待，直到被停止。
+`tf-glm53 up` 会留下一个监视进程，每 5 秒检查一次各 rank。如果一部分 rank 已退出而其他 rank 仍在运行（连续两次），它会停止所有 rank，因为剩下的 rank 会永远等待，并在日志目录的 `watch.log` 中记下已退出的 rank。请用 `tf-glm53 up` 重新启动。请只用 `tf-glm53` 启动和停止各 rank：手动启动的 rank 没有监视进程，若其中一个在启动时失败，其他 rank 会在集合通信中一直等待，直到被停止。
 
-启动失败时（某个 rank 停止、服务器未在 `READY_TIMEOUT` 内就绪、冒烟测试失败，或按下 Ctrl-C），`tf-glm53 up` 会在返回前停止所有 rank。每个节点将其 rank 的日志保存在 `logs/rankR.log` 中，上一次启动的日志保存在 `logs/rankR.log.prev` 中；`tf-glm53 logs R` 持续跟踪 rank R 的日志。
+启动失败时（某个 rank 停止、服务器未在 `READY_TIMEOUT` 内就绪、冒烟测试失败，或按下 Ctrl-C），`tf-glm53 up` 会在返回前停止所有 rank。每个节点将其 rank 的日志保存在日志目录的 `rankR.log` 中，上一次启动的日志保存在 `rankR.log.prev` 中；`tf-glm53 logs R` 持续跟踪 rank R 的日志。
+
+日志目录（各 rank、监视进程和启动器的日志）：当运行 `tf-glm53` 的用户处于 lingering 状态时（`sudo loginctl enable-linger USER`，每个节点一次），它在每个节点的内存中，即 `/dev/shm/tf-glm53-<uid>-p<PORT>`；否则为本目录下的 `logs/`（磁盘），`tf-glm53 check` 会说明如何移到内存。不处于 lingering 状态时，logind 会在用户最后一个会话结束时删除该用户在 `/dev/shm` 中的文件，因此这时日志留在磁盘上。内存中的日志在重启后消失。服务器不为监控或面板重复发出的请求（`/health`、`/metrics`、`/v1/experts/*`、`/v1/memory`）写访问行，因此日志保持很小。`LOGS_IN_MEMORY=0` 让日志留在磁盘上（`CONFIG.zh-CN.md`）。
 
 每个 rank 以 `oom_score_adj` 1000 运行。节点内存耗尽时，内核的 OOM killer 会结束该 rank，监视进程再停止其余 rank，节点本身继续运行。（通过 ssh 启动的 shell 会继承 sshd 的 -1000；保持该值的 rank 不会被 OOM killer 选中，节点反而会卡死。）
 
@@ -234,7 +236,7 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # 或 glm53.t4.con
 - `install` 把本发布的文件（与解开的归档相同）写到该目录。`./tf-glm53 pull` 在每个节点上执行 `docker pull IMAGE`。
 - 镜像也可以由归档构建：在刚解开的归档中执行 `docker build -f docker/Dockerfile -t glm53-tensorfold:r3.1-102 .`。只要有归档 `SHA256SUMS` 未列出的文件，构建就会失败，因此安装环境中的设置或日志不会进入镜像。用 `docker save` 和 `docker load` 复制到其他节点。
 - `tf-glm53 check` 在每个节点上检查：`IMAGE` 存在且层与第一个节点相同；容器能访问 GPU（`--gpus all`）；镜像中是与本目录相同的发布（否则为 `NG: image-not-this-release`）。
-- 每个 rank 的容器获得 GPU、`/dev/infiniband`、主机网络和 IPC、`--ulimit memlock=-1 --ulimit nofile=1048576:1048576`、`--oom-score-adj 1000`、主机用户和一个 init。以相同路径挂载：只读的 `WEIGHTS`、`DRAFTER`（DFlash2）以及该节点上 `expert-plan/banks.json` 中的每个 bank；可写的 `logs/` 和 `launch/`。容器名为 `glm53-p<PORT>-r<rank>`，停止后即删除。`tf-glm53 down`、`status`、监视进程和控制面板对它们的处理与从主机运行的 rank 相同。
+- 每个 rank 的容器获得 GPU、`/dev/infiniband`、主机网络和 IPC、`--ulimit memlock=-1 --ulimit nofile=1048576:1048576`、`--oom-score-adj 1000`、主机用户和一个 init。以相同路径挂载：只读的 `WEIGHTS`、`DRAFTER`（DFlash2）以及该节点上 `expert-plan/banks.json` 中的每个 bank；可写的 日志目录和 `launch/`。容器名为 `glm53-p<PORT>-r<rank>`，停止后即删除。`tf-glm53 down`、`status`、监视进程和控制面板对它们的处理与从主机运行的 rank 相同。
 - 四个节点上的测量（八节点检查点，上下文 131,072 个 token，MTP）：启动用了 4 分钟，与在主机上相同；冒烟测试通过；`down` 在 4 秒内停止所有 rank；强制终止一个 rank 的容器后，监视进程停止了其余 rank，43 秒后所有容器都已消失。
 - 主机上的 `systemctl daemon-reload` 可能使运行中的 GPU 容器失去 GPU（容器内 `nvidia-smi` 失败）：执行 `tf-glm53 down` 再 `up`。
 
@@ -295,7 +297,7 @@ ENDPOINT=http://FIRST-NODE:8000 ./claude-glm53      # 后面可以接 Claude Cod
 | `GPU-busy` | 另一个进程占用了 GPU（`nvidia-smi`） |
 | `memory(N<M GiB)` | 释放该节点上的内存，或调低 `STORE` |
 
-`up` 失败时会停止所有 rank 并说明原因；每个节点都保留其 rank 的日志（`logs/rankR.log`，`tf-glm53 logs R`）：
+`up` 失败时会停止所有 rank 并说明原因；每个节点都保留其 rank 的日志（日志目录的 `rankR.log`，`tf-glm53 logs R`）：
 
 - `a rank stopped (N/M running)`：其上方的行会列出停止的 rank 及其日志中最后的错误。若出现关于连接的 `NCCL WARN` 行：`NODES` 必须是 RoCE 网络上的地址，`SOCKET_IFNAME` 和 `IB_HCA` 必须是每个节点上该网络的名称，并且各节点之间必须能在该网络上通过任意端口互相访问。`cannot listen on`：该节点上的 `PORT` 已被占用。`PoolValuesDiffer`：各 rank 以不同的池设置启动，因而拒绝启动；请用 `tf-glm53` 从同一个 `glm53.conf` 启动所有 rank。
 - `not ready after N s`：检查点位于本地 NVMe 硬盘时，启动约需两分半钟；更慢的磁盘或网络存储需要更长时间：请调高 `READY_TIMEOUT`。始终无法完成的 rendezvous 也会一直等待：请确认第一个节点上的 `MASTER_PORT` 未被占用。

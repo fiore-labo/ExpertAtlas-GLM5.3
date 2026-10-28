@@ -36,8 +36,22 @@ pub fn unknown(conn: *Conn, a: Allocator) void {
     conn.sendJson(404, body);
 }
 
+/// Fiore-lab: TF_QUIET_POLLS=1 leaves the access line out for the GETs a monitor or the control panel repeats
+/// (/health, /metrics, /v1/experts/*, /v1/memory: several a second while the page is open), so a log kept in memory
+/// stays small. tf-glm53 sets it.
+fn quietPolls() bool {
+    const v = std.c.getenv("TF_QUIET_POLLS") orelse return false;
+    return std.mem.eql(u8, std.mem.span(v), "1");
+}
+
+fn polled(route: []const u8) bool {
+    for ([_][]const u8{ "", "/health", "/v1/health", "/metrics", "/v1/metrics", "/v1/memory" }) |r| if (std.mem.eql(u8, route, r)) return true;
+    return std.mem.startsWith(u8, route, "/v1/experts/");
+}
+
 fn get(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
+    if (polled(route) and quietPolls()) conn.quiet_log = true;
     if (responses.route(route)) |rid| if (rid.len > 0) return responses.get(srv, conn, a, rid);
     if (std.mem.eql(u8, route, "/metrics") or std.mem.eql(u8, route, "/v1/metrics")) return status.metrics(srv, conn, a);
     if (std.mem.eql(u8, route, "/dashboard")) return status.dashboard(srv, conn, a);
