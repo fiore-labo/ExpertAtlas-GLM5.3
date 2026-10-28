@@ -114,7 +114,7 @@
 | `down` | 全ランクを止めます（TERM、30 秒後に KILL） |
 | `status` | ランク、空きメモリ、drafter、会話のキャッシュ、サーバーの `/health` |
 | `smoke` | 答えを確かめる 3 件のリクエスト |
-| `logs [R]` | ランク R のログを追います（既定は 0）。ログは各ノードの `logs/rankR.log` |
+| `logs [R]` | ランク R のログを追います（既定は 0）。ログは各ノードの記録の場所の `rankR.log` |
 | `launcher [stop\|status]` | コントロールパネルのランチャーを起動、停止、または状態表示 |
 | `-d KIND`（コマンドの前） | この起動の drafter（`mtp`、`dflash2`、`none`） |
 | `pull` | `RUNTIME=docker` のとき、各ノードで `docker pull IMAGE` |
@@ -200,7 +200,7 @@
 | `slot cache: WARNING: no store`（`CACHE=slots`） | 起動時にあるランクで `STORE` 分のメモリが足りなかった | メモリを空けるか `STORE` を下げ、`down` と `up` |
 | ログに `PoolWriteRefused` | あるランクが、リクエスト自身のブロック以外へのプールの書き込みを拒んだ | そのリクエストの終わりで全ランクが止まります。`./tf-glm53 up` |
 
-ログ: 各ノードの `logs/rankR.log`（前回の起動の分は `.prev`）、`logs/watch.log`（監視が消えていたと判断したランク）、ランチャーのログは `logs/` に。
+ログ: 各ノードの記録の場所に、`rankR.log`（前回の起動の分は `.prev`）、`watch.log`（監視が消えていたと判断したランク）、ランチャーのログがあります。記録の場所は、ユーザーがノードで lingering（`loginctl enable-linger`）ならメモリ上の `/dev/shm/tf-glm53-<uid>-p<PORT>`、そうでなければリリースのディレクトリの `logs/` です。どちらかは `tf-glm53 check` が表示します。
 
 ## 12. 間違えやすい点
 

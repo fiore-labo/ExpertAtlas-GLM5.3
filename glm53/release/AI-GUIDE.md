@@ -156,7 +156,7 @@ details; the image can also be built from the archive (`docker/Dockerfile`).
 | `down` | stops every rank (TERM, then KILL after 30 s) |
 | `status` | the ranks, free memory, the drafter, the conversation cache, the server's `/health` |
 | `smoke` | three requests whose answers are checked |
-| `logs [R]` | follows rank R's log (default 0); logs are `logs/rankR.log` on each node |
+| `logs [R]` | follows rank R's log (default 0); logs are `rankR.log` in the logs directory on each node |
 | `launcher [stop\|status]` | starts, stops or reports the control panel's launcher |
 | `-d KIND` (before the command) | the drafter for this start (`mtp`, `dflash2`, `none`) |
 | `pull` | `RUNTIME=docker`: `docker pull IMAGE` on every node |
@@ -291,8 +291,9 @@ and its fields may change between releases.
 | `slot cache: WARNING: no store` (`CACHE=slots`) | a rank lacked the memory for `STORE` at the start | free memory or lower `STORE`, then `down` and `up` |
 | `PoolWriteRefused` in the logs | a rank refused a write to the pool outside the request's blocks | every rank stops at the end of that request; `./tf-glm53 up` |
 
-Logs: `logs/rankR.log` on each node (the start before in `.prev`), `logs/watch.log` (ranks the watcher found gone),
-the launcher's log in `logs/`.
+Logs, in the logs directory on each node: `rankR.log` (the start before in `.prev`), `watch.log` (ranks the watcher
+found gone) and the launcher's log. The directory is in memory (`/dev/shm/tf-glm53-<uid>-p<PORT>`) when the user
+lingers on the nodes (`loginctl enable-linger`), else `logs/` in the release directory; `tf-glm53 check` says which.
 
 ## 12. Easy to get wrong
 

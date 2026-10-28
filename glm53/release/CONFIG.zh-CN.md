@@ -56,6 +56,7 @@
 | `PORT` | `8000` | API 的端口。 |
 | `METRICS_LISTEN` | 空 | `HOST:PORT`：第一个节点也在该地址上以只读方式响应 `GET /metrics`（Prometheus 文本）和 `GET /health`，供另一台主机上的监控使用。为空时关闭。 |
 | `EXPERT_LIVE` | `1` | `1`：第一个节点为控制面板统计每个提示行和每个解码 token 选中的专家（实时显示、使用记录和专家优化）。`0`：不统计；面板仍显示正在运行的引擎和“停止”，但不显示选择，也没有专家优化。从面板启动时始终统计。 |
+| `LOGS_IN_MEMORY` | `1` | `1`：当用户处于 lingering 状态时（在每个节点上 `sudo loginctl enable-linger USER`），日志（各 rank、监视进程、启动器）放在每个节点的内存中，即 `/dev/shm/tf-glm53-<uid>-p<PORT>`；否则放在本目录下的 `logs/`（磁盘）。`0`：始终为 `logs/`。内存中的日志在重启后消失。 |
 
 ### 上下文、缓存与 KV
 
