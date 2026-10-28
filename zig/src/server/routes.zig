@@ -64,7 +64,7 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
 }
 
 /// Fiore-lab: the read-only listener's routes (TENSORFOLD_METRICS_LISTEN): GET /metrics and /health, and their /v1
-/// names, with no key; anything else is 404.
+/// names, and GET /v1/experts/usage (the experts' use, for a monitor that keeps it), with no key; anything else is 404.
 pub fn metricsOnly(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
     if (!std.mem.eql(u8, conn.method, "GET")) {
@@ -73,6 +73,7 @@ pub fn metricsOnly(srv: *Server, conn: *Conn, a: Allocator) void {
     }
     if (std.mem.eql(u8, route, "/metrics") or std.mem.eql(u8, route, "/v1/metrics")) return status.metrics(srv, conn, a);
     if (std.mem.eql(u8, route, "/health") or std.mem.eql(u8, route, "/v1/health")) return status.health(srv, conn, a) catch {};
+    if (std.mem.eql(u8, route, "/v1/experts/usage")) return status.usageReadOnly(srv, conn, a);
     unknown(conn, a);
 }
 

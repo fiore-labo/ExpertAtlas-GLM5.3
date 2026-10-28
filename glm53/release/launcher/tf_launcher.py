@@ -93,6 +93,7 @@ for b in a["banks"]:
     out[str(b["bits"])] = "ok" if miss == bad == 0 else "%d of %d layer files missing, %d of another size in %s" % (miss, len(layers), bad, b["dir"])
 print(json.dumps(out))
 '''
+MEMORY_ONLY = {"last-usage.json", "pending.json", "usage-base.json"}  # kept in the launcher's memory, never written
 TESTED_WORLDS = (2, 4, 8)  # the node counts the panel has run on, offered by GET /v1/launch/config (worlds)
 # the node counts this engine runs: each expert's 8 stored shares joined 8 / world a rank (2, 4, 8 nodes). Three nodes
 # (TP=3: the shares themselves as 3 / 3 / 2 units, heads 22 / 21 / 21) are planned here but need an engine that splits
@@ -255,9 +256,6 @@ class Launcher:
         self.conf = os.path.abspath(a.conf)
         self.pkg_local = os.path.dirname(self.conf)
         self.pkg = a.pkg or self.pkg_local  # the lane directory on the nodes
-        # the logs: where tf-glm53 keeps them (TF_LOGS: in memory, the same path on every node), else PKG/logs
-        self.logs = os.environ.get("TF_LOGS") or os.path.join(self.pkg, "logs")
-        self.logs_local = os.environ.get("TF_LOGS") or os.path.join(self.pkg_local, "logs")
         self.dry = a.dry_run
         c = read_conf(self.conf)
         self.nodes = c["NODES"]
@@ -269,6 +267,12 @@ class Launcher:
         self.runtime = c.get("RUNTIME") or "host"
         self.cname = f"glm53-p{port}-r"
         self.engine = ("127.0.0.1" if host in ("0.0.0.0",) or host.startswith("127.") or host == "localhost" else host, port)
+        # the logs: in memory, in the lane's log keeper on each node (tools/logkeep.py; tf-glm53 passes the command)
+        import pwd
+        self.keep = os.environ.get("TF_LOGKEEP") or f"python3 {self.pkg}/tools/logkeep.py --sock tf-glm53-{pwd.getpwuid(os.getuid()).pw_name}-p{port}"
+        # the run's usage snapshot, the pending runs and what the running start took over: in memory only (written to
+        # disk when a run is saved: usage-total.json, an allocation); a launcher started again forgets them
+        self.mem = {}
         self.kv_format = c.get("KV") or "fp8"
         self.dcp = int(c.get("DCP") or (3 if self.world == 3 else 2))  # tf-glm53's default
         # the positions CONF asks for: a request's context and the conversation store beside it; a start in a format
@@ -527,8 +531,7 @@ class Launcher:
                 log(f"usage: {pend['runs']} pending runs ({pend['rows']} rows) saved: {tot['runs']} runs, {tot['rows']} rows")
             else:
                 log(f"usage: {pend['runs']} pending runs ({pend['rows']} rows) discarded")
-            p = os.path.join(self.dir, "pending.json")
-            os.replace(p, p + time.strftime(".%Y%m%d-%H%M%S.") + ("saved" if save else "discarded"))
+            self.mem.pop("pending.json", None)
         return 200, {"pending": None, "saved": bool(save)}
 
     def usage(self):
@@ -561,6 +564,9 @@ class Launcher:
         return counts, rows, runs
 
     def write_json(self, name, obj):
+        if name in MEMORY_ONLY:
+            self.mem[name] = json.loads(json.dumps(obj))
+            return
         p = os.path.join(self.dir, name)
         tmp = f"{p}.tmp{os.getpid()}.{threading.get_ident()}"  # one a writer
         with open(tmp, "w") as f:
@@ -617,6 +623,8 @@ class Launcher:
         return 200, {"saved_unix": now}
 
     def read_json(self, name):
+        if name in MEMORY_ONLY:
+            return json.loads(json.dumps(self.mem[name])) if name in self.mem else None
         try:
             return json.load(open(os.path.join(self.dir, name)))
         except (OSError, ValueError):
@@ -1406,9 +1414,9 @@ class Launcher:
     def rank_errors(self):
         """The first `error: glm53:` line of each rank's log after a start failed (the reason the engine gave; the log's
         last lines are often the debug allocator's leak reports at exit), the distinct ones."""
-        logs = self.logs
+        ranks = " ".join(f"rank{r}" for r in range(len(self.nodes)))
         seen, out = set(), []
-        for i, (rc, line) in enumerate(self.on_all(f"grep -m1 -h '^error: glm53' {logs}/rank*.log 2>/dev/null", 20)):
+        for i, (rc, line) in enumerate(self.on_all(f"for s in {ranks}; do {self.keep} cat $s 2>/dev/null; done | grep -m1 -h '^error: glm53'", 20)):
             line = line.strip()
             if line and line not in seen:
                 seen.add(line)
@@ -1416,40 +1424,37 @@ class Launcher:
         return " / ".join(out[:3])
 
     def run_tf(self, what, env, ts, extra=None, drafter=None):
-        """tf-glm53 up / down (up with -d DRAFTER), its output to PKG/logs/launch-<what>-<ts>.out; the exit code and
-        the last lines."""
+        """tf-glm53 up / down (up with -d DRAFTER), its output into the launcher's log (in memory, the lane's keeper:
+        tf-glm53 logs launcher); the exit code and the last lines."""
         cmd = ["bash", os.path.join(self.pkg_local, "tf-glm53"), "-c", self.conf] + (["-d", drafter] if drafter else []) + [what]
         if self.dry:
             log(f"dry run: LAUNCH_ENV={shlex.quote(env)} {' '.join(f'{k}={v}' for k, v in (extra or {}).items())} {' '.join(cmd)}")
             raise Fail("dry run: nothing was started" if what == "up" else "dry run: nothing was stopped")
-        os.makedirs(self.logs_local, exist_ok=True)
-        path = os.path.join(self.logs_local, f"launch-{what}-{ts}.out")
         lines = []
-        with open(path, "w") as out:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                    env=dict(os.environ, LAUNCH_ENV=env, **(extra or {})))
-            with self.lock:
-                self.proc = proc
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                env=dict(os.environ, LAUNCH_ENV=env, **(extra or {})))
+        with self.lock:
+            self.proc = proc
 
-            def read():
-                for line in proc.stdout:
-                    out.write(line)
-                    out.flush()
-                    lines.append(line.rstrip())
-                    if what == "up" and line.startswith("started; waiting"):
-                        self.set_phase("weights")
-                    if what == "up" and line.startswith("ready after"):
-                        self.set_phase("ready")
-            t = threading.Thread(target=read, daemon=True)
-            t.start()
-            while proc.poll() is None:
-                if what == "up" and self.st["phase"] not in ("checking", "ready"):
-                    self.follow_phase()
-                time.sleep(0.25)
-            t.join()
-            rc = proc.returncode
-            with self.lock:
-                self.proc = None
+        def read():
+            for line in proc.stdout:
+                sys.stdout.write(f"[{what} {ts}] {line}")
+                sys.stdout.flush()
+                lines.append(line.rstrip())
+                if what == "up" and line.startswith("started; waiting"):
+                    self.set_phase("weights")
+                if what == "up" and line.startswith("ready after"):
+                    self.set_phase("ready")
+        t = threading.Thread(target=read, daemon=True)
+        t.start()
+        while proc.poll() is None:
+            if what == "up" and self.st["phase"] not in ("checking", "ready"):
+                self.follow_phase()
+            time.sleep(0.25)
+        t.join()
+        rc = proc.returncode
+        with self.lock:
+            self.proc = None
         keep = [x for x in lines if x and not re.fullmatch(r"\s*\d+s", x)]
         return rc, " / ".join(keep[-4:])
 
@@ -2037,7 +2042,7 @@ class Launcher:
         d = os.path.join(self.pkg_local, "snapshots", label)
         os.makedirs(d, exist_ok=True)
         cmd = ("echo '## nvidia-smi'; nvidia-smi; echo '## free -h'; free -h; echo '## docker ps'; docker ps 2>&1; "
-               f"echo '## log tail'; tail -n 5 {self.logs}/rank*.log 2>/dev/null")
+               f"echo '## log tail'; for s in {' '.join(f"rank{r}" for r in range(len(self.nodes)))}; do {self.keep} cat $s 2>/dev/null | tail -n 5; done")
         for name, (rc, out) in zip(self.names, self.on_all(cmd, 60)):
             open(os.path.join(d, f"{name}.txt"), "w").write(out)
         h = "200" if self.health() else "down"

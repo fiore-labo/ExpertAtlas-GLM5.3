@@ -1,4 +1,4 @@
-# A guide for AI assistants: full GLM-5.3 on DGX Spark (release r3.1-102)
+# A guide for AI assistants: full GLM-5.3 on DGX Spark (release r3.2-102)
 
 This page describes the whole system in one place: what it is, what each part does, how it is used, what it can do
 and what it cannot. It is written for AI assistants that help someone understand, install, run or troubleshoot this
@@ -87,7 +87,8 @@ With `RUNTIME=docker` and `IMAGE` in `glm53.conf`, `tf-glm53` starts each rank a
 its node (one container a rank, over ssh from the first node). The nodes need Docker and the NVIDIA container toolkit
 (DGX OS has both) instead of cuBLAS, libibverbs and NCCL; steps 1 and 2 below are not needed. `docker pull` the image
 on every node (or `./tf-glm53 pull`), write the release's files to a directory on the first node with
-`docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out`, then go on from step 4. The
+`mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out` (made first: a
+directory Docker makes for the mount is root's, and the install cannot write it), then go on from step 4. The
 weights and the banks stay on the hosts and are mounted read-only. `RUNTIME.md`, "Running in containers", has the
 details; the image can also be built from the archive (`docker/Dockerfile`).
 
@@ -156,7 +157,7 @@ details; the image can also be built from the archive (`docker/Dockerfile`).
 | `down` | stops every rank (TERM, then KILL after 30 s) |
 | `status` | the ranks, free memory, the drafter, the conversation cache, the server's `/health` |
 | `smoke` | three requests whose answers are checked |
-| `logs [R]` | follows rank R's log (default 0); logs are `rankR.log` in the logs directory on each node |
+| `logs [R]` | follows rank R's log (default 0; `R.prev`, `watch`, `launcher`); the logs are in memory on each node |
 | `launcher [stop\|status]` | starts, stops or reports the control panel's launcher |
 | `-d KIND` (before the command) | the drafter for this start (`mtp`, `dflash2`, `none`) |
 | `pull` | `RUNTIME=docker`: `docker pull IMAGE` on every node |
@@ -291,9 +292,9 @@ and its fields may change between releases.
 | `slot cache: WARNING: no store` (`CACHE=slots`) | a rank lacked the memory for `STORE` at the start | free memory or lower `STORE`, then `down` and `up` |
 | `PoolWriteRefused` in the logs | a rank refused a write to the pool outside the request's blocks | every rank stops at the end of that request; `./tf-glm53 up` |
 
-Logs, in the logs directory on each node: `rankR.log` (the start before in `.prev`), `watch.log` (ranks the watcher
-found gone) and the launcher's log. The directory is in memory (`/dev/shm/tf-glm53-<uid>-p<PORT>`) when the user
-lingers on the nodes (`loginctl enable-linger`), else `logs/` in the release directory; `tf-glm53 check` says which.
+Logs: in memory, in a log keeper on each node (`tools/logkeep.py`), nothing on disk: each rank's (and the start before's,
+`R.prev`), the watcher's (ranks it found gone) and the launcher's, `tf-glm53 logs R | R.prev | watch | launcher`. With
+`LOG_LISTEN` a monitor reads them over HTTP and keeps them.
 
 ## 12. Easy to get wrong
 

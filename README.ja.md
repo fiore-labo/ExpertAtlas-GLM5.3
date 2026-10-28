@@ -17,6 +17,11 @@
 - ラウンドごとにドラフトをモデルが検証します。ドラフトを作るのは、既定では GLM-5.3 自身の MTP 層、またはオプションの DFlash2 drafter です。どの場合も、応答はモデル自身が選んだものです。
 - `/metrics`（Prometheus のテキスト）と `/health` は実行中のリクエストの分も数えるので、モニタはリクエストの実行中にも prefill と decode の速さ、キャッシュのヒット、ドラフトの受理を読めます。`METRICS_LISTEN` を設定すると、別のホストのモニタ向けに、この 2 つを専用のアドレスで読み取り専用で開きます。
 
+## r3.2-102 で変わったこと
+
+- エンジンの動作中、ディスクには何も書きません。各ランク、監視プロセス、ランチャーのログは、各ノードのログ係（`tools/logkeep.py`。各ノードに `python3` が要ります。DGX OS にはあります。アーカイブでもイメージでも同じです）のメモリに、1 本ごとに直近の `LOG_KEEP_MB`（8）だけ置き、`./tf-glm53 logs R` で読みます。`RUNTIME=docker` では、コンテナもログを持ちません。r3.1-102 は、ユーザーが linger のときだけログをメモリに置きました。r3.2-102 は linger が要りません。
+- 記録は別のホストのモニタが持ちます。`LOG_LISTEN=HOST:PORT` を設定すると、各ノードのログ係が読み取り専用・キーなしでログを返し（`GET /streams`、`GET /logs`）、メトリクスの待ち受け（`METRICS_LISTEN`）は expert の使用回数も返します（`GET /v1/experts/usage`）（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「他のマシンへの提供」）。
+
 ## r3.1-102 で変わったこと
 
 - API とコントロールパネルは、既定で全アドレス（`HOST=0.0.0.0`、`LAUNCHER_HOST=0.0.0.0`）でキーなしで待ち受けます。ネットワーク上の他のマシンから直接使えます。ノードは閉じたネットワーク内に置いてください（`HOST=127.0.0.1` / `LAUNCHER_HOST=127.0.0.1` で 1 台目のノードからだけになります）。
@@ -81,11 +86,11 @@ Fiore-lab のものと形が同じで、同じように読み込まれます。
 リリースは、コンテナイメージと、同じファイルを持つアーカイブの 2 つの形で配布します。おすすめはイメージです。イメージを使う場合、各ノードに要るのは Docker と NVIDIA Container Toolkit（DGX OS には両方あります）だけで、サーバーのライブラリは要りません。
 
 ```sh
-docker pull ghcr.io/fiore-labo/expertatlas-glm5.3:r3.1-102            # 各ノードで
-mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/expertatlas-glm5.3:r3.1-102 install /out
+docker pull ghcr.io/fiore-labo/expertatlas-glm5.3:r3.2-102            # 各ノードで
+mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/expertatlas-glm5.3:r3.2-102 install /out
 ```
 
-そのあと `glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定し、以下と同じように進めます（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3.1-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。4 台でも 8 台でも、同じアーカイブと起動スクリプトを使います。`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーし、ノード、ネットワーク名、NCCL、重み、drafter を記入してから、`./tf-glm53 deploy` と `./tf-glm53 up` を実行します。サーバーは既定で全アドレス（`HOST=0.0.0.0`）で OpenAI chat API を提供します。API にキーはないので、届く人なら誰でも使えます。閉じたネットワーク内に留めるか、前段に TLS とアクセス制御を置いてください（`HOST=127.0.0.1` にすると 1 台目のノードからだけになります）。
+そのあと `glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定し、以下と同じように進めます（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3.2-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。4 台でも 8 台でも、同じアーカイブと起動スクリプトを使います。`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーし、ノード、ネットワーク名、NCCL、重み、drafter を記入してから、`./tf-glm53 deploy` と `./tf-glm53 up` を実行します。サーバーは既定で全アドレス（`HOST=0.0.0.0`）で OpenAI chat API を提供します。API にキーはないので、届く人なら誰でも使えます。閉じたネットワーク内に留めるか、前段に TLS とアクセス制御を置いてください（`HOST=127.0.0.1` にすると 1 台目のノードからだけになります）。
 
 `./tf-glm53 up` の代わりにコントロールパネルから使うときは、1 台目のノードで `./tf-glm53 launcher` を実行し、`http://FIRST-NODE:LAUNCHER_PORT/panel`（4 台の例ではポート 8010）を開きます。エンジンの起動と停止はそこで行います（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コントロールパネル」）。`glm53.conf` の全設定項目、読む側、変更が効く時期は [glm53/release/CONFIG.ja.md](glm53/release/CONFIG.ja.md) にあります。
 
@@ -126,7 +131,7 @@ Zig 0.17.0 が `PATH` 上にあり（または `build_libs.sh` には `ZIG=` で
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so
-zig build dist -Dversion=r3.1-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 

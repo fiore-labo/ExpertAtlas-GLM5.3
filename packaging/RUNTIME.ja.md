@@ -27,7 +27,8 @@
 - チェックポイント用のディスク。全ノードの同じパスに置きます（後述）。8 台では 390 GB（363 GiB）、4 台では 344.6 GB（321 GiB）です。
 - 8 台: 起動前の各ノードで、`free -g` が示す利用可能メモリが 112 GiB（DFlash2 では 115）。`CONTEXT` と `STORE` が 819,200 のとき、ランクは約 108 GiB（DFlash2 では 111）を使います。DFlash2 では、プール（既定の会話キャッシュ）は slots（`CACHE=slots`）よりランクあたり約 0.5 GiB 多く使います。`STORE` を 100,000 トークン減らすごとに、必要量は 2.7 GiB 減ります。これより少ないノードは `tf-glm53 check` が拒否します。4 ビットの KV キャッシュ（`KV=fp4`）なら、8 台で `CONTEXT` と `STORE` をどちらも 1,048,576 にでき、ランクは約 94 GiB を使いました（1,018,993 トークンのプロンプトで実測）。`tf-glm53 check` の見積もりは 8 ビットのキャッシュ向けなので、このときは `NEED_GB=100` を設定してください。
 - 4 台: メモリはこのサーバー専用として割り当てます（`T4.ja.md`）。DFlash2 で測定した空きメモリの最小値は、512K のときノードあたり約 3.2 GiB でした。
-- コントロールパネル（4 台または 8 台）: 使う expert のバンク用のディスク（後述）と、各ノードの `python3`（DGX OS にあります）。
+- 各ノードの `python3`。ログ係のためで、アーカイブでもイメージでも要ります（DGX OS にあります）。
+- コントロールパネル（4 台または 8 台）: 使う expert のバンク用のディスク（後述）。
 - コンテナで動かす場合（「コンテナで動かす」）: cuBLAS・libibverbs・NCCL の代わりに、各ノードに Docker と NVIDIA Container Toolkit。
 
 ## 初回起動の前に
@@ -213,11 +214,11 @@ done
 
 ## ランクが停止したとき
 
-`tf-glm53 up` は、5 秒ごとにランクを確認する監視プロセスを残します。一部のランクが消え、他のランクがまだ動いている状態を（2 回続けて）検出すると、残りのランクは永久に待ち続けることになるため、すべてのランクを停止し、消えていたランクを記録の場所の `watch.log` に記録します。`tf-glm53 up` で再び起動してください。ランクの起動と停止は `tf-glm53` だけで行ってください。手動で起動したランクには監視プロセスがなく、そのうち 1 つが起動中に失敗すると、他のランクは停止されるまで集団通信の中で待ち続けます。
+`tf-glm53 up` は、5 秒ごとにランクを確認する監視プロセスを残します。一部のランクが消え、他のランクがまだ動いている状態を（2 回続けて）検出すると、残りのランクは永久に待ち続けることになるため、すべてのランクを停止し、消えていたランクを自分のログに書きます（`tf-glm53 logs watch`）。`tf-glm53 up` で再び起動してください。ランクの起動と停止は `tf-glm53` だけで行ってください。手動で起動したランクには監視プロセスがなく、そのうち 1 つが起動中に失敗すると、他のランクは停止されるまで集団通信の中で待ち続けます。
 
-起動に失敗した場合（ランクが停止した、`READY_TIMEOUT` 以内にサーバーの準備ができなかった、スモークテストに失敗した、または Ctrl-C）、`tf-glm53 up` は戻る前にすべてのランクを停止します。各ノードは自分のランクのログを記録の場所の `rankR.log` に、その前の起動のログを `rankR.log.prev` に残します。`tf-glm53 logs R` でランク R のログを追えます。
+起動に失敗した場合（ランクが停止した、`READY_TIMEOUT` 以内にサーバーの準備ができなかった、スモークテストに失敗した、または Ctrl-C）、`tf-glm53 up` は戻る前にすべてのランクを停止します。各ノードは自分のランクのログと、その前の起動のログを残します。`tf-glm53 logs R` でランク R のログを追えます（`R.prev` はその前の起動の分）。
 
-記録の場所（ランク、監視プロセス、ランチャーのログ）は、`tf-glm53` を動かすユーザーが lingering のとき（`sudo loginctl enable-linger USER`、ノードごとに 1 回）、全ノードでメモリ上の `/dev/shm/tf-glm53-<uid>-p<PORT>` になります。そうでないときは、このディレクトリの `logs/`（ディスク）で、`tf-glm53 check` が移し方を表示します。lingering でないと、ユーザーの最後のセッションが終わったときに logind がそのユーザーの `/dev/shm` のファイルを消すため、その場合はディスクに置きます。メモリ上のログは再起動で消えます。サーバーは、監視やパネルが繰り返す要求（`/health`、`/metrics`、`/v1/experts/*`、`/v1/memory`）の受け付けの行を書かないので、ログは小さいままです。`LOGS_IN_MEMORY=0` にするとディスクに置きます（`CONFIG.ja.md`）。
+ログはメモリに置き、ディスクには何も書きません。`tf-glm53 up` は各ノードでログ係（`tools/logkeep.py`、標準ライブラリだけの `python3`。読み書きにはファイルを作らない abstract unix socket を使うので、ログ係にもファイルはありません）を起動し、各ランク、監視プロセス、ランチャー、`tf-glm53` 自身の出力をそこに入れます。ログは 1 本ごとに直近の `LOG_KEEP_MB`（既定 8）を持ち、古い行から消えます。再起動やログ係の停止でも消えます。ログ係は停止のあとも残るので、失敗した起動のログも読めます。次の起動のときは、1 つ前の起動の分を残します。ログ係は、自分を起動したユーザーの接続にだけ答えます（abstract socket にはファイルの権限がないので、相手の uid を確かめます）。`LOG_LISTEN` や `LOG_KEEP_MB` を変えると、次の `tf-glm53 up` がログ係を起動し直して反映します（それまでの行は消えます）。`tf-glm53 logs R | R.prev | watch | launcher` で 1 本ずつ追えます。もっと長く残すには `LOG_LISTEN=HOST:PORT` を設定します。各ノードのログ係が、読み取り専用・キーなしで `GET /streams`（持っているログ）と `GET /logs?stream=rank0&after=N`（N 行目より後の行、番号付き）にも答えるので、別のホストのモニタがそれを読みに来て保存できます（「他のマシンへの提供」）。サーバーは、監視やパネルが繰り返す要求（`/health`、`/metrics`、`/v1/experts/*`、`/v1/memory`）の受け付けの行を書かないので、ログは小さいままです。
 
 各ランクは `oom_score_adj` 1000 で動きます。ノードのメモリが尽きると、カーネルの OOM killer がそのランクを止め、監視プロセスが残りのランクを止めます。ノード自体は動き続けます（ssh から起動したシェルは sshd の -1000 を引き継ぎます。その値のままのランクは OOM killer に選ばれず、代わりにノードが固まります）。
 
@@ -226,7 +227,7 @@ done
 リリースはコンテナイメージとしても配布します。中身は、`/opt/glm53` に置いたアーカイブのファイルと、サーバーの実行に要るもの（cuBLAS 13、libibverbs とそのプロバイダー、NCCL 2.30.7）です。`glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定すると、`tf-glm53` は ssh で各ノードに入り、ランクを `IMAGE` のコンテナとして起動します。このとき各ノードに要るのは、cuBLAS・libibverbs・NCCL の代わりに Docker と NVIDIA Container Toolkit です（DGX OS には両方あります）。`tf-glm53` を動かすユーザーは、各ノードで `docker` を実行できる必要があります（`docker` グループ）。`tf-glm53`、コントロールパネルのランチャー、設定はアーカイブのときと同じく 1 台目のホストに置き、重みと expert のバンクもホストに置いたままです。
 
 ```sh
-I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.1-102
+I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.2-102
 docker pull $I                                                # 各ノードで
 mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out $I install /out
 cd glm53 && cp glm53.conf.example glm53.conf                  # または glm53.t4.conf.example。RUNTIME=docker と IMAGE=$I を設定
@@ -234,9 +235,9 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # または glm53.
 ```
 
 - `install` は、リリースのファイル（展開したアーカイブと同じもの）をそのディレクトリに書きます。`./tf-glm53 pull` は各ノードで `docker pull IMAGE` を実行します。
-- イメージはアーカイブから作ることもできます。展開したばかりのアーカイブの中で `docker build -f docker/Dockerfile -t glm53-tensorfold:r3.1-102 .` を実行します。アーカイブの `SHA256SUMS` に載っていないファイルがあるとビルドは失敗するので、インストール先の設定やログがイメージに入ることはありません。他のノードへは `docker save` と `docker load` で写します。
+- イメージはアーカイブから作ることもできます。展開したばかりのアーカイブの中で `docker build -f docker/Dockerfile -t glm53-tensorfold:r3.2-102 .` を実行します。アーカイブの `SHA256SUMS` に載っていないファイルがあるとビルドは失敗するので、インストール先の設定やログがイメージに入ることはありません。他のノードへは `docker save` と `docker load` で写します。
 - `tf-glm53 check` は各ノードで、`IMAGE` が 1 台目と同じレイヤーであること、コンテナから GPU に届くこと（`--gpus all`）、イメージがこのディレクトリと同じリリースであること（違えば `NG: image-not-this-release`）を確かめます。
-- 各ランクのコンテナには、GPU、`/dev/infiniband`、ホストのネットワークと IPC、`--ulimit memlock=-1 --ulimit nofile=1048576:1048576`、`--oom-score-adj 1000`、ホストのユーザー、init を与えます。同じパスにマウントするのは、読み取り専用の `WEIGHTS`、`DRAFTER`（DFlash2）、そのノードにある `expert-plan/banks.json` のすべてのバンクと、書き込み可能な記録の場所と `launch/` です。コンテナの名前は `glm53-p<PORT>-r<ランク>` で、止まると削除されます。`tf-glm53 down`、`status`、監視プロセス、コントロールパネルは、ホストから動かすランクと同じように扱います。
+- 各ランクのコンテナには、GPU、`/dev/infiniband`、ホストのネットワークと IPC、`--ulimit memlock=-1 --ulimit nofile=1048576:1048576`、`--oom-score-adj 1000`、ホストのユーザー、init を与えます。同じパスにマウントするのは、読み取り専用の `WEIGHTS`、`DRAFTER`（DFlash2）、そのノードにある `expert-plan/banks.json` のすべてのバンクと、書き込み可能な `launch/` です。Docker はコンテナのログを持ちません（`--log-driver none`）。出力はノードのログ係に入ります。コンテナの名前は `glm53-p<PORT>-r<ランク>` で、止まると削除されます。`tf-glm53 down`、`status`、監視プロセス、コントロールパネルは、ホストから動かすランクと同じように扱います。
 - 4 台での測定（8 台用チェックポイント、文脈 131,072 トークン、MTP）: 起動はホストのときと同じく 4 分、スモークテストは合格、`down` は 4 秒で全ランクを停止、1 つのランクのコンテナを強制終了すると、監視プロセスが残りを止め、43 秒で全コンテナがなくなりました。
 - ホストで `systemctl daemon-reload` を行うと、動いている GPU コンテナが GPU を見失うことがあります（コンテナ内で `nvidia-smi` が失敗します）。`tf-glm53 down` と `up` で戻します。
 
@@ -244,7 +245,7 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # または glm53.
 
 サーバーは既定で全アドレス（`HOST=0.0.0.0`）で待ち受けて OpenAI chat API を提供するので、ネットワーク上の他のマシンから `http://FIRST-NODE:PORT` で使えます。API にキーはないので、届く人なら誰でも使えます（`tf-glm53 check` がそう表示します）。`HOST=127.0.0.1` にすると、1 台目のノードからだけになります。サーバーは平文の HTTP で通信するので、閉じたネットワーク内に留めるか、前段に TLS とアクセス制御（リバースプロキシ）を置いてください。コントロールパネルのランチャーも全アドレスで、キーなしで待ち受けます（「コントロールパネル」）。サーバー自身のページ（`http://FIRST-NODE:PORT/panel`）は、expert の回数とメモリ（`/v1/experts/*`、`/v1/memory`）を 1 台目のノード自身からしか読めないので、他のマシンからはメッセージしか出ません。コントロールパネルのページ（`http://FIRST-NODE:LAUNCHER_PORT/panel`）を開いてください。こちらの呼び出しは、ランチャーが 1 台目のノードから行います。
 
-別のホストのモニタは、API に触れずにサーバーの状態を読めます。`METRICS_LISTEN=HOST:PORT`（例: `0.0.0.0:9894`）を設定すると、1 台目のノードがそのアドレスでも `GET /metrics`（Prometheus のテキスト）と `GET /health` に答えます。それ以外には答えず（ほかのリクエストは 404）、API は `HOST` のままです。`tf-glm53 status` がアドレスを表示します。このポートは閉じたネットワーク内に留めてください。プロンプトや応答は出しませんが、負荷とトークン数は見えます。`tensorfold_health:*_total` のカウンタは実行中のリクエストの分も含み、後戻りしないので、速さは 2 回の読み取りの差から出します: prefill の tokens/s = Δ`prefill_tokens_total` / Δ`prefill_seconds_total`、decode = Δ`completion_tokens_total` / Δ`decode_seconds_total`、キャッシュのヒット率 = Δ`cached_tokens_total` / Δ`prompt_tokens_total`、ドラフトの受理率 = Δ`accepted_total` / Δ`drafted_total`。`tensorfold:requests_prefilling` と `tensorfold:requests_decoding` は実行中のリクエストの段階、`tensorfold:prefill_tokens_remaining` はその prefill の残り、`tensorfold:pool_*` は会話のキャッシュ、`tensorfold:engine_info` は設定を示します。
+別のホストのモニタは、API に触れずにサーバーの状態を読めます。`METRICS_LISTEN=HOST:PORT`（例: `0.0.0.0:9894`）を設定すると、1 台目のノードがそのアドレスでも `GET /metrics`（Prometheus のテキスト）、`GET /health`、`GET /v1/experts/usage`（expert の使用回数。文章は含みません）に答えます。`LOG_LISTEN` を設定すると、各ノードのログ係もログを返します（「ランクが停止したとき」）。両方を読みに来るモニタが記録を持ち、ノードはディスクに何も書きません。それ以外には答えず（ほかのリクエストは 404）、API は `HOST` のままです。`tf-glm53 status` がアドレスを表示します。このポートは閉じたネットワーク内に留めてください。プロンプトや応答は出しませんが、負荷とトークン数は見えます。`tensorfold_health:*_total` のカウンタは実行中のリクエストの分も含み、後戻りしないので、速さは 2 回の読み取りの差から出します: prefill の tokens/s = Δ`prefill_tokens_total` / Δ`prefill_seconds_total`、decode = Δ`completion_tokens_total` / Δ`decode_seconds_total`、キャッシュのヒット率 = Δ`cached_tokens_total` / Δ`prompt_tokens_total`、ドラフトの受理率 = Δ`accepted_total` / Δ`drafted_total`。`tensorfold:requests_prefilling` と `tensorfold:requests_decoding` は実行中のリクエストの段階、`tensorfold:prefill_tokens_remaining` はその prefill の残り、`tensorfold:pool_*` は会話のキャッシュ、`tensorfold:engine_info` は設定を示します。
 
 ## Claude Code
 
@@ -297,7 +298,7 @@ ENDPOINT=http://FIRST-NODE:8000 ./claude-glm53      # 後ろに Claude Code 自�
 | `GPU-busy` | 別のプロセスが GPU を使っています（`nvidia-smi`） |
 | `memory(N<M GiB)` | そのノードのメモリを空けるか、`STORE` を下げます |
 
-`up` が失敗すると、すべてのランクを停止して理由を表示します。各ノードには自分のランクのログが残ります（記録の場所の `rankR.log`、`tf-glm53 logs R`）。
+`up` が失敗すると、すべてのランクを停止して理由を表示します。各ノードには自分のランクのログがメモリに残ります（`tf-glm53 logs R`）。
 
 - `a rank stopped (N/M running)`: その上の行に、停止したランクと、そのログの最後のエラーが表示されます。接続に関する `NCCL WARN` 行がある場合: `NODES` は RoCE ネットワーク上のアドレス、`SOCKET_IFNAME` と `IB_HCA` は全ノードでそのネットワークの名前でなければならず、ノード同士がそのネットワーク上で任意のポートに到達できる必要があります。`cannot listen on` の場合: そのノードで `PORT` が使用中です。`PoolValuesDiffer` の場合: ランクごとに異なるプールの設定で起動されたため、起動を拒否しています。すべてのランクを 1 つの `glm53.conf` から `tf-glm53` で起動してください。
 - `not ready after N s`: チェックポイントがローカルの NVMe ドライブにある場合、起動には約 2 分半かかります。遅いディスクやネットワークストレージではさらに時間がかかるので、`READY_TIMEOUT` を引き上げてください。ランデブーが完了しない場合も待ち続けます。1 台目のノードで `MASTER_PORT` が空いているか確認してください。

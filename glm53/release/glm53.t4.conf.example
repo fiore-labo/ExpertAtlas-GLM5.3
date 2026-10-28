@@ -18,7 +18,7 @@ NCCL_LIB=~/nccl-2.30.7/nvidia/nccl/lib/libnccl.so.2
 # node needs Docker and the NVIDIA container toolkit, and the libraries are the image's, so NCCL_LIB is not used).
 # RUNTIME.md, "Running in containers".
 #RUNTIME=docker
-#IMAGE=glm53-tensorfold:r3.1-102
+#IMAGE=glm53-tensorfold:r3.2-102
 
 # The four-node checkpoint, fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks on Hugging Face (the 3 / 4-bit expert mix, T4.md),
 # the same path on every node.
@@ -37,9 +37,11 @@ DRAFTER=
 NAME=glm-5.3
 HOST=0.0.0.0
 PORT=8000
-# A monitor on another host: rank 0 also answers GET /metrics (Prometheus text) and /health at this HOST:PORT,
-# read-only, while the API stays on HOST. Empty: off. Keep it on a closed network.
+# A monitor on another host: rank 0 also answers GET /metrics (Prometheus text), /health and /v1/experts/usage at
+# this HOST:PORT, read-only, while the API stays on HOST; with LOG_LISTEN every node's log keeper answers its logs
+# (GET /streams, /logs) there. Empty: off. Keep them on a closed network.
 #METRICS_LISTEN=0.0.0.0:9894
+#LOG_LISTEN=0.0.0.0:9895
 
 # The measured configuration: 737,280 positions a request (prompt + reply), 100,000 more kept for earlier
 # conversations (the pool holds 837,280 positions in blocks of 256 that every conversation shares), decode context

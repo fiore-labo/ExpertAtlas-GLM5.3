@@ -54,9 +54,10 @@
 | `NAME` | `glm-5.3` | API 中的模型名称：`/v1/models` 列出它，回复中带有它（请求可以指定任何模型名）。 |
 | `HOST` | `0.0.0.0` | API 监听的地址。`0.0.0.0`：所有地址。API 没有密钥，能访问到它的人都可以使用：请将节点留在封闭网络中，或在前面放置 TLS 和访问控制。`127.0.0.1`：仅本节点；其他机器通过 ssh 隧道访问。 |
 | `PORT` | `8000` | API 的端口。 |
-| `METRICS_LISTEN` | 空 | `HOST:PORT`：第一个节点也在该地址上以只读方式响应 `GET /metrics`（Prometheus 文本）和 `GET /health`，供另一台主机上的监控使用。为空时关闭。 |
+| `METRICS_LISTEN` | 空 | `HOST:PORT`：第一个节点也在该地址上以只读方式响应 `GET /metrics`（Prometheus 文本）、`GET /health` 和 `GET /v1/experts/usage`（专家的使用次数），供另一台主机上的监控使用。为空时关闭。 |
 | `EXPERT_LIVE` | `1` | `1`：第一个节点为控制面板统计每个提示行和每个解码 token 选中的专家（实时显示、使用记录和专家优化）。`0`：不统计；面板仍显示正在运行的引擎和“停止”，但不显示选择，也没有专家优化。从面板启动时始终统计。 |
-| `LOGS_IN_MEMORY` | `1` | `1`：当用户处于 lingering 状态时（在每个节点上 `sudo loginctl enable-linger USER`），日志（各 rank、监视进程、启动器）放在每个节点的内存中，即 `/dev/shm/tf-glm53-<uid>-p<PORT>`；否则放在本目录下的 `logs/`（磁盘）。`0`：始终为 `logs/`。内存中的日志在重启后消失。 |
+| `LOG_LISTEN` | 空 | `HOST:PORT`：每个节点的日志保管进程还在此以只读、无密钥的方式响应 `GET /streams` 和 `GET /logs?stream=S&after=N`，供另一台主机上保存日志的监控程序使用。为空时，日志只在每个节点的内存中（`tf-glm53 logs`）。修改在下一次 `tf-glm53 up` 时生效：届时重新启动保管进程，之前保存的行会丢失。 |
+| `LOG_KEEP_MB` | `8` | 每条日志（各 rank、监视进程、启动器）在内存中保留的 MB，较旧的行被丢弃。不向磁盘写入任何内容。修改的生效方式与 `LOG_LISTEN` 相同。 |
 
 ### 上下文、缓存与 KV
 
