@@ -236,6 +236,7 @@ ENGINE_WORLDS = (2, 4, 8)
 # CONTEXT_STEP positions, at least CONTEXT_MIN
 CONTEXT_LIMIT, CONTEXT_STEP, CONTEXT_MIN = 1048576, 16384, 65536
 ADDR = re.compile(r"[A-Za-z0-9][A-Za-z0-9.:_-]{0,252}")  # a node's address in NODES (a host name or an IP)
+EXAMPLE_ADDR = "192.0.2."  # the example conf's NODES before the first node check: a range reserved for examples (RFC 5737)
 RESERVE = 4 * GiB  # what a node keeps for the OS after the start, by default (RESERVE_GB of CONF, or a plan's reserve_gib);
 # the engine's own admission gets the same (TF_GLM53_MEM_RESERVE_GIB)
 RESERVE_MIN_GIB, RESERVE_MAX_GIB = 2, 32
@@ -808,6 +809,8 @@ class Launcher:
         self.conf_seen = self.conf_mtimes()
 
     def ssh(self, node, cmd, timeout=20):
+        if node.startswith(EXAMPLE_ADDR):  # no node is there: not 8 s of waiting on every read until the node check
+            return 255, ""
         try:
             r = subprocess.run(["ssh", "-n", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes", node, cmd],
                                capture_output=True, text=True, timeout=timeout)
