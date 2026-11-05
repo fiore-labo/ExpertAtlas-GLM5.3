@@ -4,7 +4,7 @@
 
 使用 `docker run ... IMAGE up` 时，引擎设置中的项目可以用 `-e 项目=值` 指定（`QUICKSTART.zh-CN.md`）。以下项目会以 `not an option` 停止，请写入 `~/expertatlas/glm53.conf`：`GID_INDEX`、`RUNTIME`、`NCCL_LIB`、`EXPERT_LIVE`、`LOG_LISTEN`、`CONTEXT`、`STORE`、`THINKING_FOLD_KEEP`、`NEED_GB`、`LAUNCHER_HOST`、`ATLAS_DIR`、`LAUNCH_SNAPSHOTS`。`TOPOLOGY`、`SOCKET_IFNAME` 和 `IB_HCA` 由节点检查决定。
 
-下面的默认值是 `tf-glm53` 的默认值。无论节点数多少，`docker run ... IMAGE up` 都根据 `glm53.t4.conf.example` 写入 `glm53.conf`，所以初始值为 `CONTEXT_LENGTH` 737280、`KV_SIZE` 837280、`KV` fp4、`NEED_GB` 133，启动时的 KV 大小为 `max`。
+下面的默认值是 `tf-glm53` 的默认值。无论节点数多少，`docker run ... IMAGE up` 都根据 `glm53.t4.conf.example` 写入 `glm53.conf`，所以初始值为 `CONTEXT_LENGTH` 737280、`KV_SIZE` 837280、`KV` fp4、`NEED_GB` 115，启动时的 KV 大小为 `max`。
 
 `glm53.conf` 保存一条通道（lane）的设置：节点、网络、权重、草稿模型、服务器、内存和控制面板。它是一个普通的 shell 文件，由你手工编写和编辑，放在第一个节点上 `tf-glm53` 所在的目录中。请从 `glm53.t4.conf.example`（四节点）或 `glm53.conf.example`（八节点）开始：复制为 `glm53.conf`，填写节点、网络设备和路径；其余项目在示例中已是实测值。
 
@@ -15,16 +15,16 @@
 - 控制面板的启动器在启动器自身启动时读取它；引擎停止期间文件有变化时，启动器会自行重新读取（引擎运行期间的编辑在引擎停止后读取）。`LAUNCHER_HOST` 和 `LAUNCHER_PORT` 在启动器重新启动后生效：`./tf-glm53 launcher stop`，然后 `./tf-glm53 up`。期间引擎可以继续运行：启动器会发现它正在运行。
 - 除两种情况外，没有其他程序会改写它，两者都在控制面板上。两者都只写改动的行（每个设置一行，值后面的注释保留，没有该行时追加在末尾），并把之前的文件以 `glm53.conf.bak-<时间>` 保留在旁边：
   - 启动设置中权重下的“保存”会写入 `WEIGHTS` 和 `DRAFTER`，前提是每个节点上都有它们所指的内容（专家库的目录以同样的方式写入 `expert-plan/banks.json`，并复制到每个节点），启动器会立即重新读取。
-  - 引擎设置界面（从标题栏切换进入）写入需要重启的设置：`NAME`, `CONTEXT_LENGTH`, `KV_SIZE`, `KV`, `MAX_TOKENS`, `THINKING_*`, `MULTI*`, `DRAFTER_KIND`, `MTP_K`, `DRAFT_SAVES`, `DCP`, `MASTER_PORT`, `RESERVE_GB`, `READY_TIMEOUT`, `LAUNCH_DROP_CACHES`, `HOST`, `PORT`, `METRICS_LISTEN`, `LOG_KEEP_MB`, `LAUNCHER_PORT`, `ROWS`, `SP_PARTS`, `ROCE_PROXY_CORES`, `ATLAS_GENERIC`, `EXTRA_ENV`（引擎的 `TF_GLM53_CANON_CLOSE` 和 `TF_GLM53_CANON_NEAR` 作为其中的词）；在节点检查登记节点之前还包括 `TOPOLOGY`、`SOCKET_IFNAME` 和 `IB_HCA`。每个值先按 `tf-glm53` 的规则检查；`PORT` 只能在引擎停止时修改。“保存”：从下一次启动起使用（正在运行的引擎保持启动时的设置）；但思考中运行时生效的项（`THINKING_SHARE`、`THINKING_FOLD`、`THINKING_FOLD_AT_CLOSE_SHARE`、`THINKING_FOLD_SHARE`）也会立即交给运行中的引擎，推理界面 [ THINKING ] 中的修改也写入此文件，因此两个界面显示同一个值。“保存并重启”（引擎运行时）：与“停止”一样先询问是否保留本次运行的使用记录，然后停止，再以相同的专家和保存的设置重新启动。推理界面中 GPU 分配的“下次启动也用这个值”以同样方式写入 `MULTI_DECODE_SHARE`、`MULTI_SHORT_PROMPT` 和 `MULTI_SHORT_PREEMPT`。
+  - 引擎设置界面（从标题栏切换进入）写入需要重启的设置：`NAME`, `CONTEXT_LENGTH`, `KV_SIZE`, `KV`, `MAX_TOKENS`, `THINKING_*`, `MULTI*`, `DRAFTER_KIND`, `MTP_K`, `DRAFT_SAVES`, `DCP`, `MASTER_PORT`, `RESERVE_GB`, `READY_TIMEOUT`, `LAUNCH_DROP_CACHES`, `HOST`, `PORT`, `METRICS_LISTEN`, `LOG_KEEP_MB`, `LAUNCHER_PORT`, `ROWS`, `SP_PARTS`, `ROCE_PROXY_CORES`, `ATLAS_GENERIC`, `EXTRA_ENV`（引擎的 `TF_GLM53_CANON_CLOSE` 和 `TF_GLM53_CANON_NEAR` 作为其中的词）；在节点检查登记节点之前还包括 `TOPOLOGY`、`SOCKET_IFNAME` 和 `IB_HCA`。每个值先按 `tf-glm53` 的规则检查；`PORT` 只能在引擎停止时修改。更改在发生时写入，从下一次启动起使用（正在运行的引擎保持启动时的设置）；但思考中运行时生效的项（`THINKING_SHARE`、`THINKING_FOLD`、`THINKING_FOLD_AT_CLOSE_SHARE`、`THINKING_FOLD_SHARE`）也会立即交给运行中的引擎，推理界面 [ THINKING ] 中的修改也写入此文件，因此两个界面显示同一个值。“Restart to apply”（引擎运行时）：与“停止”一样先询问是否保留本次运行的使用记录，然后停止，再以相同的专家和保存的设置重新启动。
 - 控制面板的节点检查所登记的节点写入单独的文件 `glm53.nodes.conf`（在本文件旁边）：`TOPOLOGY`、`NODES`、`SOCKET_IFNAME`、`IB_HCA`，取确认时对连接方式的判定（之前的文件以 `glm53.nodes.conf.bak-<时间>` 保留）。`tf-glm53` 和启动器在 `glm53.conf` 之后读取它，所以这四项以它为准。没有这个文件时，面板从节点检查开始；有了之后，从启动设置开始。`NODES_CONF=FILE` 读取另一个文件，`NODES_CONF=`（空）则不读取。`tf-glm53 deploy` 不复制它。
-- 启动界面为一次启动所做的选择（专家的位宽、KV 格式、上下文长度、草稿模型、每个节点为操作系统保留的内存）只对该次启动有效，不会写入 `glm53.conf`。启动器通过环境变量（`LAUNCH_*`）把这些选择交给 `tf-glm53`；它们不是本文件的设置项。它们的默认值来自本文件（`KV`、`CONTEXT_LENGTH`、`DRAFTER_KIND`、`MULTI`、`RESERVE_GB`），可在引擎设置界面中修改。
+- 在启动界面选择的内容（KV 格式、上下文长度、草稿模型、并发推理数、每个节点为操作系统保留的内存）在选择时写入本文件（`KV`、`CONTEXT_LENGTH`、`DRAFTER_KIND`、`MULTI`、`RESERVE_GB`）。启动时写入计划采用的上下文长度，因此下次打开时会选中该值。`KV_SIZE` 只在不够上下文长度时才调高。专家的位宽和计划采用的 KV 只对该次启动有效，启动器通过环境变量（`LAUNCH_*`）把它们交给 `tf-glm53`；它们不是本文件的设置项。
 - 页面自身的设置（颜色、圆的排列方式等）保存在 `launch/panel-settings.json` 中。
 - `glm53.conf` 不属于发布包的文件：`SHA256SUMS` 中没有它，因此 `tf-glm53 check` 和 `tf-glm53 deploy` 都不会核对它。大幅修改前，请保留一份可用文件的副本。
 - 使用另一个设置文件：`tf-glm53 -c FILE 命令`（启动器也一样：`./tf-glm53 -c FILE up`）。在同一组节点上运行两条通道时，`PORT`、`MASTER_PORT` 和 `LAUNCHER_PORT` 需要各不相同。
 
 ## 设置项
 
-“默认值”是某项缺失或为空时 `tf-glm53` 使用的值；“（必需）”表示没有默认值。标有 **面板** 的项可以在启动界面上为一次启动重新选择；不经启动界面选择的启动（`tf-glm53 start`、`engine-up`）使用文件中的值。
+“默认值”是某项缺失或为空时 `tf-glm53` 使用的值；“（必需）”表示没有默认值。标有 **面板** 的项也可以在启动界面上选择，选择后写入这里；不经启动界面的启动（`tf-glm53 start`、`engine-up`）使用文件中的值。
 
 ### 节点与网络
 
@@ -49,8 +49,8 @@
 
 | 设置项 | 默认值 | 含义 |
 |---|---|---|
-| `WEIGHTS` | （必需） | 检查点目录，所有节点上路径相同：四节点用 `GLM-5.3-EXL3-4x-DGX-Sparks`，八节点用 `GLM-5.3-EXL3-8x-DGX-Sparks`。可以在启动设置中指定，专家库的目录（`expert-plan/banks.json`）也一样；都在确认每个节点上都有之后才写入。 |
-| `DRAFTER_KIND` | `mtp` | **面板**。由什么起草随后由模型核对的 token：`mtp`（检查点的 MTP 层）、`dflash2`（`DRAFTER` 中的模型）或 `none`。`./tf-glm53 -d KIND start`（或 `engine-up`）可为一次启动选择另一种。 |
+| `WEIGHTS` | （必需） | Base 权重（`GLM-5.3-EXL3-Base`）的目录，所有节点上路径相同（四节点和八节点都一样）。也可以用完整检查点（`GLM-5.3-EXL3-4x-DGX-Sparks`、`GLM-5.3-EXL3-8x-DGX-Sparks`）代替。可以在启动设置中指定，专家库的目录（`expert-plan/banks.json`）也一样；都在确认每个节点上都有之后才写入。 |
+| `DRAFTER_KIND` | `mtp` | **面板**。由什么起草随后由模型核对的 token：`mtp`（`WEIGHTS` 中的 MTP 层）、`dflash2`（`DRAFTER` 中的模型）或 `none`。`./tf-glm53 -d KIND start`（或 `engine-up`）可为一次启动选择另一种。 |
 | `MTP_K` | `3` | MTP 每轮的草稿数，1 至 7。 |
 | `DRAFTER` | 空 | DFlash2 模型的目录，所有节点上路径相同。`DRAFTER_KIND=dflash2` 需要它；只有在设置了它且每个节点都有该模型时，启动界面才提供 DFlash2。不包含在发布中（RUNTIME.zh-CN.md“使用 DFlash2 的步骤”）。可以在启动设置中指定。 |
 | `DRAFT_SAVES` | `8` | 使用 DFlash2 时：在请求之间保留草稿模型状态的对话数。 |
@@ -105,7 +105,7 @@
 
 | 设置项 | 默认值 | 含义 |
 |---|---|---|
-| `NEED_GB` | `112` | 启动前每个节点必须可用的 GiB（`tf-glm53 check`）：使用 DFlash2 时多 3；`KV_SIZE` 每比 1,638,400 少 100,000 个位置，少 2.7。四节点示例设为 133，按其 `KV_SIZE` 计算后为 112。从面板启动时改用计划中的数值。 |
+| `NEED_GB` | `112` | 启动前每个节点必须可用的 GiB（`tf-glm53 check`）：使用 DFlash2 时多 3；`KV_SIZE` 每比 1,638,400 少 100,000 个位置，`KV=fp8` 时少 2.55，`KV=fp4` 时少 1.73。四节点示例设为 115，按其 `KV_SIZE` 计算后为 101。从面板启动时改用计划中的数值。 |
 | `READY_TIMEOUT` | `900` | 启动（`tf-glm53 engine-up`；从面板启动时也执行它）等待服务器的秒数。 |
 
 ### 控制面板

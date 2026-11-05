@@ -17,7 +17,7 @@
 | [PANEL-GUIDE](glm53/release/PANEL-GUIDE.zh-CN.md) | 控制面板的各个界面，逐项说明 |
 | [CONFIG](glm53/release/CONFIG.zh-CN.md) | `glm53.conf` 的全部设置项：默认值、由谁读取、修改何时生效 |
 | [RUNTIME](packaging/RUNTIME.zh-CN.md) | 从归档或手动运行：所有命令、缓存、Claude Code、故障 |
-| [T4](glm53/release/T4.zh-CN.md) | 四个节点：检查点、设置、测量结果 |
+| [T4](glm53/release/T4.zh-CN.md) | 四个节点：权重、设置、测量结果 |
 | [RING](glm53/release/RING.zh-CN.md) | 不用交换机、连成环的四个节点：连线、fenced NCCL、测量结果 |
 | [AGENT-API](glm53/release/AGENT-API.zh-CN.md) | 面向 AI 代理的控制 API，不需要仪表板 |
 | [AI-GUIDE](glm53/release/AI-GUIDE.zh-CN.md) | 用一页说明整个系统，供帮助你理解或运行它的 AI 助手使用 |
@@ -30,14 +30,14 @@
 - 长提示词按序列并行分段读入；解码步的集合通信走 RoCE。
 - 所有对话共用一个对话缓存，以 256 个 token为一块：请求会从任意对话中已缓存的最长前缀接着处理；开头相同的对话（智能体的系统提示词、其子智能体）共享的块只保存一份。
 - 每一轮由模型校验草稿：草稿默认来自 GLM-5.3 自带的 MTP 层，也可来自可选的 DFlash2 草稿模型。无论哪种情况，回复都由模型本身决定。
-- 控制思考的长度：上限按回复上限的比例设定，过长的思考可以在中途或结束时整理；既可以按请求设置，也可以在引擎运行中设置。
+- 控制思考的长度：上限按 `max_tokens`（单次回复的上限）的比例设定，过长的思考可以在中途或结束时整理；既可以按请求设置，也可以在引擎运行中设置。
 - `/metrics`（Prometheus 文本格式）和 `/health` 也统计正在运行的请求，因此监控程序在请求运行期间也能读取 prefill 与解码速度、缓存命中和草稿接受情况。设置 `METRICS_LISTEN` 后，这两个端点会在单独的地址上以只读方式开放，供其他主机上的监控程序使用。
 
 ## r3.3-102 的变化
 
 **需要你处理的变化：**
 
-- **3 bit bank 始终必需**，与检查点一起准备；没有计划的启动以 3 bit 载入所有专家。`BITS` 或已保存的分配可以选择其他位宽，此时也需要相应的 bank。
+- **需要下载的权重变了：** `fiore-lab/GLM-5.3-EXL3-Base`（21.2 GB）和 3 bit bank（277.9 GB），四节点和八节点都一样。启动时所有路由专家都从 bank 读取，因此不再需要完整检查点；如果已有，用 `WEIGHTS` 指定即可使用。没有计划的启动以 3 bit 载入所有专家。`BITS` 或已保存的分配可以选择其他位宽，此时也需要相应的 bank。
 - **设置改名：** `CONTEXT_LENGTH`（单个请求的最大长度）和 `KV_SIZE`（整个 KV 缓存）取代 `CONTEXT` 和 `STORE`。旧的 `glm53.conf` 仍可读取。
 - **回复的默认上限**从 4,096 个 token 改为上下文长度的 70 %（`MAX_TOKENS_SHARE`）。客户端的 `max_tokens` 优先。
 - **设置中的选项更少了：** `CACHE` 为 `pool`，`DCP` 为 2，`ROCE_PROXY_CORES` 为 `a725` 或 `os`。
@@ -49,7 +49,7 @@
 - **四个节点连成环**，不需要交换机（[RING](glm53/release/RING.zh-CN.md)）。
 - **镜像包含带 AArch64 fence 的 NCCL：** 交换机和环都使用。这是 NVIDIA/nccl#2393 的修复，NCCL 的正式版本尚未包含。没有它时，Arm 上的代理线程可能在没有任何错误的情况下挂起（[RING](glm53/release/RING.zh-CN.md) 的“fenced NCCL”）。
 - **节点检查**根据连线找到环或交换机上的节点，检查并登记（`glm53.nodes.conf`），因此不必填写 `TOPOLOGY`、`SOCKET_IFNAME` 和 `IB_HCA`。
-- **Reasoning Control：** 思考的上限（回复上限的比例）、中途整理和思考结束时的整理，可以在引擎运行中通过面板或 `POST /v1/thinking` 更改（[CONFIG](glm53/release/CONFIG.zh-CN.md)）。
+- **Reasoning Control：** 思考的上限（`max_tokens` 的比例）、中途整理和思考结束时的整理，可以在引擎运行中通过面板或 `POST /v1/thinking` 更改（[CONFIG](glm53/release/CONFIG.zh-CN.md)）。
 - **同时处理多个对话：** `MULTI`（1 至 4）现在也可以与 MTP 层一起使用。运行中可以通过面板或 `POST /v1/schedule` 设置 GPU 在 prefill 和解码之间的分配，短提示词也可以优先处理。
 - **Byte Resume**（默认开启）：模型切分文本的位置与分词器不同时，下一轮提示词中相同的字节会对应其他 token id；现在缓存会越过该位置继续，不再重新计算其余部分。
 - **面板：** 引擎设置界面、权重的位置及其检查（[ WEIGHTS ]）、启动流程、圆上的 KV 池、各节点的温度。
@@ -83,20 +83,21 @@ GLM-5.3 为每个 token 在每层 256 个路由专家中选出 8 个，而不同
 
 | 内容 | 仓库 | 大小 | 用途 |
 |---|---|---|---|
-| 八节点检查点：全部权重（路由专家为 4 位） | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | **八节点时必需**。四节点时也可代替四节点检查点，并同时作为 4 位专家 bank |
-| 四节点检查点：使用最少的一半路由专家为 3 位 | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | **四节点时必需**（使用八节点检查点时除外） |
+| Base 权重：路由专家以外的全部 | [fiore-lab/GLM-5.3-EXL3-Base](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Base) | 21.2 GB | **每次启动都必需**（四节点和八节点都一样） |
 | 专家 bank，2 位 | [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit) | 187.3 GB | 可选：使用 2 位专家时 |
 | 专家 bank，3 位 | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | **每次启动都必需** |
 | 专家 bank，4 位 | [fiore-lab/GLM-5.3-EXL3-Experts-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) | 368.5 GB | 可选：使用 4 位专家时（有八节点检查点时不需要） |
 | 专家 bank，5 位 | [fiore-lab/GLM-5.3-EXL3-Experts-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit) | 459.1 GB | 可选：使用 5 位专家时 |
+| 八节点检查点：全部权重（路由专家为 4 位） | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | 可选：启动不需要。用 `WEIGHTS` 指定即可直接使用，并可作为 4 位专家 bank |
+| 四节点检查点：全部权重（使用最少的一半路由专家为 3 位） | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | 可选：启动不需要。用 `WEIGHTS` 指定即可直接使用 |
 
 专家 bank 是把 19,200 个路由专家统一为一种位宽的权重；引擎为每个专家从其计划位宽的 bank 中加载。
-**每次启动都需要与节点数相符的检查点和 3 bit bank；其他 bank 只需下载你想用的位宽**（面板只提供每个节点都具备的位宽）。
-四个节点时即四节点检查点和 3 bit bank，共 622.5 GB。每个节点都需要在相同路径下放置相同的文件。在一台机器上下载后复制到其他节点（`python3 -m venv` 需要 `python3-venv` 软件包），例如：
+**每次启动都需要 Base 权重和 3 bit bank，四节点和八节点都是共 299.1 GB；其他 bank 只需下载你想用的位宽**（面板只提供每个节点都具备的位宽）。
+每个节点都需要在相同路径下放置相同的文件。在一台机器上下载后复制到其他节点（`python3 -m venv` 需要 `python3-venv` 软件包），例如：
 
 ```sh
 python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
-~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks --local-dir ~/models/GLM-5.3-EXL3-4x-DGX-Sparks
+~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-Base --local-dir ~/models/GLM-5.3-EXL3-Base
 ~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-Experts-3bit --local-dir ~/models/GLM-5.3-EXL3-Experts-3bit
 ```
 
@@ -105,7 +106,7 @@ python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
 ## 自己制作权重
 
 权重不能像代码那样阅读：被改动过、在某些情况下表现不同的权重，看起来与其他权重没有区别，因此你可能不愿依赖无法核实其制作过程的
-权重。你不必依赖 Fiore-lab 的权重。本方案加载的每个权重文件（八节点和四节点检查点，以及 2、3、4、5 位的专家 bank）都可以用
+权重。你不必依赖 Fiore-lab 的权重。本方案加载的每个权重文件（Base 权重、八节点和四节点检查点，以及 2、3、4、5 位的专家 bank）都可以用
 [glm53/weights](glm53/weights/README.zh-CN.md) 中的工具，从 Z.AI 官方的 BF16 检查点（[zai-org/GLM-5.3-BF16](https://huggingface.co/zai-org/GLM-5.3-BF16)）
 制作；步骤、硬件和实测时间都在那里。制作出的文件与 Fiore-lab 的布局相同，加载方式也相同。
 
@@ -115,7 +116,7 @@ python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
 - 使用镜像时：每个节点上有 NVIDIA 驱动 580 或更高版本（镜像使用主机的驱动）、Docker 和 NVIDIA Container Toolkit（DGX OS 两者都有）以及 `python3`，并且启动前每个节点约有 115 GiB 空闲内存。
 - 改用归档时：DGX OS（Ubuntu 24.04），NVIDIA 驱动 580 或更高版本，以及 cuBLAS 13；每个节点上都有 NCCL 2.30.7：即 NVIDIA 的 `nvidia-nccl-cu13` wheel，由 pip 解包（见 `packaging/RUNTIME.zh-CN.md`）。
 - 使用归档时，带 AArch64 fence 的 NCCL 在交换机上推荐使用，在环上必须使用；NVIDIA 的 wheel 没有这个 fence（[RING](glm53/release/RING.zh-CN.md)）。镜像已包含它。
-- 与节点数相符的 Fiore-lab EXL3 检查点（Hugging Face），在每个节点上放在相同路径下：八个节点用 [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks)（390 GB），四个节点用 [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks)（344.6 GB）。四节点检查点中，第 3 至 77 层的路由专家里使用最少的一半为 3 bit，其余为 4 bit；其他部分与八节点检查点相同。
+- Fiore-lab 的 EXL3 Base 权重（Hugging Face），在每个节点上放在相同路径下：[fiore-lab/GLM-5.3-EXL3-Base](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Base)（21.2 GB），四节点和八节点都一样。也可以用完整检查点代替，即 [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks)（390 GB）或 [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks)（344.6 GB）；启动时不读取其路由专家。
 - 所有权重文件也都可以不使用 Fiore-lab 的任何文件，从 Z.AI 官方的 BF16 检查点自行制作（[glm53/weights](glm53/weights/README.zh-CN.md)）。
 - 3 bit bank（277.9 GB），在每个节点上放在相同路径下：每次启动都需要它。其他 bank 只需要用到的位宽（八节点检查点可以作为 4 bit bank；只有 4 bit 时上下文长度会更短）。
 - 各节点上的 `python3`，供启动器和日志保管进程使用。
@@ -136,11 +137,11 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-la
 
 ## 草稿模型
 
-- `mtp`（默认）：检查点自带的 MTP 层，属于 GLM-5.3 权重的一部分。解码速度约为不使用草稿时的两倍，预填充（prefill）速度相同。
+- `mtp`（默认）：权重中的 MTP 层，属于 GLM-5.3 权重的一部分。解码速度约为不使用草稿时的两倍，预填充（prefill）速度相同。
 - `dflash2`：incoai/GLM-5.3-DFlash2。**由于其许可证，本仓库和归档均不包含它**：其模型卡注明的许可证为 CC BY-NC-ND 4.0（非商业性使用，禁止演绎），用于研究和评估；商业许可由 Inco AI 提供。如果你的使用在该许可证允许的范围内，请按照 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md#使用-dflash2-的步骤) 中的“使用 DFlash2 的步骤”操作：以固定的 revision 下载一次，复制到每个节点的相同路径并核对副本，然后设置 `DRAFTER_KIND=dflash2` 和 `DRAFTER`。引擎在启动时于内存中将其量化为 4 bit，不向磁盘写入任何内容。解码会更快（见“速度”）。
 - `none`：不使用草稿。
 
-由 `glm53.conf` 中的 `DRAFTER_KIND` 选择；启动界面或 `./tf-glm53 -d KIND start`（或 `engine-up`）只为这一次启动选择。
+由 `glm53.conf` 中的 `DRAFTER_KIND` 选择；在启动界面上选择会写入那里；`./tf-glm53 -d KIND start`（或 `engine-up`）只为这一次启动选择。
 
 ## 速度
 

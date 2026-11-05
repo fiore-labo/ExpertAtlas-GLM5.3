@@ -3,7 +3,7 @@ English | [日本語](RING.ja.md) | [简体中文](RING.zh-CN.md)
 # Four DGX Sparks in a ring, without a switch
 
 The four-node form (`T4.md`) also runs on four NVIDIA DGX Spark systems cabled to each other as a ring of direct
-200 Gb/s links, with no switch. The engine, the checkpoint, the banks and the control panel are the same; only how the
+200 Gb/s links, with no switch. The engine, the weights, the banks and the control panel are the same; only how the
 ranks reach each other changes. It is Fiore-lab's unofficial derivative of TensorFold 1.0.2, not a release of the
 TensorFold project.
 

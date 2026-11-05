@@ -11,7 +11,7 @@
 | 決めること | 選択肢 | 既定 | オプション |
 |---|---|---|---|
 | 動かすノード | スイッチの 4 台か 8 台、またはリングの 4 台 (2 台と 3 台はテスト中) | 自動で探す。スイッチで空きが余るときだけ選ぶ | `NODES` |
-| チェックポイントの場所 (必須) | 4 台用 344.6 GB、8 台用 389.9 GB | `~/models/GLM-5.3-EXL3-4x-DGX-Sparks` (8 台は `-8x-`) | `WEIGHTS` |
+| Base の重みの場所 (必須) | 21.2 GB。完全なチェックポイント (4x か 8x) でも使えます | `~/models/GLM-5.3-EXL3-Base` | `WEIGHTS` |
 | 3 bit バンクの場所 (必須) | 277.9 GB | `~/models/GLM-5.3-EXL3-Experts-3bit` | `BANK_3` |
 | ほかの幅のバンク | 2 bit 187.3 GB、4 bit 368.5 GB、5 bit 459.1 GB。使う幅だけ | `~/models/GLM-5.3-EXL3-Experts-<N>bit` | `BANK_2`、`BANK_4`、`BANK_5` |
 | DFlash2 のモデル | 使うときだけ。許諾は別 | なし | `DRAFTER` |
@@ -37,7 +37,7 @@ API にもパネルにもキーはありません。ノードは閉じたネッ�
 | 同時に decode する会話数 | `MULTI` | 0〜4 | 0 (1 件ずつ) | 同時に使う人数で決める |
 | 待ち時間 | `MULTI_WAIT` | 秒数 | 600 秒 | `MULTI` のとき、超えた要求は混雑として断る |
 | OS に残すメモリ | `RESERVE_GB` | 2〜32 GiB | 4 GiB | 同じノードで他のものを動かすなら上げる |
-| 応答の上限の既定 | `MAX_TOKENS_SHARE` | `CONTEXT_LENGTH` の 1〜100 % | 70% | 要求が `max_tokens` を指定しないときの値。クライアントの指定が優先 |
+| `max_tokens`（1 回の応答の上限）の既定 | `MAX_TOKENS_SHARE` | `CONTEXT_LENGTH` の 1〜100 % | 70% | 要求が `max_tokens` を指定しないときの値。クライアントの指定が優先 |
 | Byte Resume | `TF_GLM53_BYTE_RESUME` | `on`、`log`、`off` | `on` | 切り方のズレでキャッシュが外れるのを防ぐ。通常は `on` |
 | API でのモデル名 | `NAME` | 文字列 | `glm-5.3` | クライアントの設定に合わせる |
 
@@ -73,14 +73,14 @@ Reasoning Control (思考の上限と中間整理) と GPU の配分は、動作
 
 ```sh
 docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
-  -e WEIGHTS=/data/models/checkpoint \
+  -e WEIGHTS=/data/models/base \
   -e BANK_3=/data/models/3bit \
   -e CONTEXT_LENGTH=131072 \
   IMAGE up
 ```
 
 - **`docker run` の指定:** `~/expertatlas/glm53.conf` に保存され、次の起動でも使われます。`KV_SIZE` と `BITS` だけは、その起動限りです。起動画面で選んだ幅は残りません。`BITS` も `ALLOC` もなければ、すべての expert を 3 ビットで起動します。前回の計画で起動するのは `./tf-glm53 start` です。
-- **起動画面の選択:** その起動の間だけ有効で、保存されません。既定値を変えるのはエンジン設定の画面です。
+- **起動画面の選択:** KV の形式、context length、drafter、同時推論の数、OS に残すメモリは、選んだ時点で `glm53.conf` に保存され、次の起動でも使われます。expert の幅はここには保存されません。
 - **動いているエンジン:** オプションは効きません。止めてから、もう一度同じ行を実行します。
 - **名前の間違い:** 知らない名前は STOP になり、近い名前を案内します。
 

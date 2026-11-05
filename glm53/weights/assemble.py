@@ -11,6 +11,9 @@
       quantization_config, the tensor index and SHA256SUMS
   mix --base CKPT --bank3 BANK3 --selection q3-selection.json --out OUT [--copy]
       the four-node checkpoint: CKPT with the experts the selection lists ({"layer": [expert, ...]}) at 3 bits
+  base --checkpoint CKPT --out OUT [--copy]
+      the Base weights: what a start reads beside the banks, CKPT (either checkpoint) without the routed experts of
+      layers 3-77, config.json and the index saying so, and SHA256SUMS
   check DIR
       a checkpoint's index against its files, and the widths and codebooks of its quantized linears
 
@@ -450,6 +453,39 @@ def finish(d, official=None, same_as=None):
     log(f"DONE {d}")
 
 
+BASE_FILES = ["nonexperts-5bit.safetensors", "unquantized-bf16.safetensors", "mtp-layer-78-experts-4bit.safetensors",
+              "mtp-layer-78-linears-5bit.safetensors", "mtp-layer-78-unquantized-bf16.safetensors"] + OFFICIAL_SMALL
+BASE_EXPERTS = {"layers 3-77": "not in this repository: an Expert Atlas bank holds them, at the width chosen expert by expert "
+                               "(fiore-lab/GLM-5.3-EXL3-Experts-2bit, -3bit, -4bit, -5bit)",
+                "layer 78 (MTP)": {"bits": 4, "codebook": "mcg", "calibrated": False}}
+
+
+def base_meta(ckpt, out):
+    """config.json saying where the routed experts are, and the index without them."""
+    with open(os.path.join(ckpt, "config.json")) as f:
+        c = json.load(f)
+    c["quantization_config"]["routed_experts"] = BASE_EXPERTS
+    with open(os.path.join(out, "config.json"), "w") as f:
+        json.dump(c, f, indent=2)
+        f.write("\n")
+    with open(os.path.join(ckpt, "model.safetensors.index.json")) as f:
+        wm = {k: v for k, v in json.load(f)["weight_map"].items() if not v.startswith("experts-layer-")}
+    total = sum(os.path.getsize(os.path.join(out, x)) for x in set(wm.values()))
+    with open(os.path.join(out, "model.safetensors.index.json"), "w") as f:
+        json.dump({"metadata": {"total_size": total}, "weight_map": wm}, f, indent=1)
+    return wm, total
+
+
+def cmd_base(a):
+    os.makedirs(a.out, exist_ok=True)
+    for f in BASE_FILES:
+        place(os.path.join(a.checkpoint, f), os.path.join(a.out, f), a.copy)
+    wm, total = base_meta(a.checkpoint, a.out)
+    log(f"index: {len(wm)} tensors, {total / 1e9:.2f} GB")
+    log(f"SHA256SUMS: {write_sums(a.out)} files")
+    log(f"DONE {a.out}")
+
+
 def mix_layer(base, bank3, sel, L, dst):
     """One layer of the four-node checkpoint: the selection's experts from the 3-bit bank, the rest from the base."""
     f = f"experts-layer-{L:03d}.safetensors"
@@ -530,6 +566,10 @@ def main():
     for x in ("--base", "--bank3", "--selection", "--out"):
         m.add_argument(x, required=True)
     m.add_argument("--copy", action="store_true", help="copy the base's files (default: hard links)")
+    s = sub.add_parser("base")
+    for x in ("--checkpoint", "--out"):
+        s.add_argument(x, required=True)
+    s.add_argument("--copy", action="store_true", help="copy the checkpoint's files (default: hard links)")
     k = sub.add_parser("check")
     k.add_argument("dir")
     a = p.parse_args()
@@ -537,6 +577,8 @@ def main():
         cmd_bank(a)
     elif a.cmd == "checkpoint":
         cmd_checkpoint(a)
+    elif a.cmd == "base":
+        cmd_base(a)
     elif a.cmd == "mix":
         cmd_mix(a)
     else:

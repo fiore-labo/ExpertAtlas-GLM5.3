@@ -11,7 +11,7 @@
 | 决定事项 | 可选项 | 默认值 | 选项 |
 |---|---|---|---|
 | 运行的节点 | 交换机上的 4 台或 8 台，或环上的 4 台（2 台和 3 台正在测试中） | 自动查找。只有交换机上空闲节点多于所需时才选择 | `NODES` |
-| 检查点的位置（必需） | 4 节点 344.6 GB，或 8 节点 389.9 GB | `~/models/GLM-5.3-EXL3-4x-DGX-Sparks`（8 节点为 `-8x-`） | `WEIGHTS` |
+| Base 权重的位置（必需） | 21.2 GB。也可以用完整检查点（4x 或 8x）代替 | `~/models/GLM-5.3-EXL3-Base` | `WEIGHTS` |
 | 3 bit bank 的位置（必需） | 277.9 GB | `~/models/GLM-5.3-EXL3-Experts-3bit` | `BANK_3` |
 | 其他位宽的 bank | 2 bit 187.3 GB，4 bit 368.5 GB，5 bit 459.1 GB。只需要用到的位宽 | `~/models/GLM-5.3-EXL3-Experts-<N>bit` | `BANK_2`、`BANK_4`、`BANK_5` |
 | DFlash2 的模型 | 仅在使用时需要。另有许可证 | 无 | `DRAFTER` |
@@ -37,7 +37,7 @@ API 和仪表板都没有密钥。请把节点放在封闭的网络中。
 | 同时解码的对话数 | `MULTI` | 0 至 4 | 0（逐个处理） | 按同时使用的人数决定 |
 | 等待时间 | `MULTI_WAIT` | 秒数 | 600 秒 | 使用 `MULTI` 时，超时的请求因繁忙被拒绝 |
 | 留给系统的内存 | `RESERVE_GB` | 2 至 32 GiB | 4 GiB | 节点上还运行其他程序时调高 |
-| 回复上限的默认值 | `MAX_TOKENS_SHARE` | `CONTEXT_LENGTH` 的 1 至 100% | 70% | 请求未指定 `max_tokens` 时使用。客户端的值优先 |
+| `max_tokens`（单次回复的上限）的默认值 | `MAX_TOKENS_SHARE` | `CONTEXT_LENGTH` 的 1 至 100% | 70% | 请求未指定 `max_tokens` 时使用。客户端的值优先 |
 | Byte Resume | `TF_GLM53_BYTE_RESUME` | `on`、`log`、`off` | `on` | 防止切分差异导致缓存失效。通常用 `on` |
 | API 中的模型名称 | `NAME` | 文本 | `glm-5.3` | 与客户端的设置保持一致 |
 
@@ -73,14 +73,14 @@ Reasoning Control（思考的上限和中途整理）和 GPU 的分配可以在�
 
 ```sh
 docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
-  -e WEIGHTS=/data/models/checkpoint \
+  -e WEIGHTS=/data/models/base \
   -e BANK_3=/data/models/3bit \
   -e CONTEXT_LENGTH=131072 \
   IMAGE up
 ```
 
 - **`docker run` 的指定：** 保存在 `~/expertatlas/glm53.conf` 中，之后的启动也会使用。只有 `KV_SIZE` 和 `BITS` 仅对那次启动有效。启动界面选择的位宽不会保留：没有 `BITS` 或 `ALLOC` 时，以 3 bit 启动所有专家。按上一次启动的计划启动请用 `./tf-glm53 start`。
-- **启动界面的选择：** 只在那次启动期间有效，不会保存。更改默认值请使用引擎设置界面。
+- **启动界面的选择：** KV 格式、上下文长度、草稿模型、并发推理数和为操作系统保留的内存在选择时保存到 `glm53.conf`，之后的启动也会使用。专家的位宽不保存在这里。
 - **正在运行的引擎：** 选项不起作用。请先停止，再运行同一行。
 - **名称写错：** 不认识的名称会导致 `STOP`，并提示最接近的名称。
 

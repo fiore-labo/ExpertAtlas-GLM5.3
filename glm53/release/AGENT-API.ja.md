@@ -237,8 +237,8 @@ s, r = call(LP, "POST", "/v1/launch/settings", {"values": {"THINKING_SHARE": "90
 
 | `when` | 意味 |
 |---|---|
-| `live` | すぐ効く。動いているエンジンにも届く |
-| `start` | 次の起動から。動作中に変えると `pending` に載る |
+| `live` | 即時反映。動いているエンジンにも届く |
+| `start` | 次回起動時反映。動作中に変えると `pending` に載る |
 | `stopped` | 止まっている時だけ変更できる (`PORT`) |
 | `launcher` | ランチャーの再起動後 (`LAUNCHER_PORT`) |
 | `readonly` | ここでは変えられない。ノードは 3.1、重みは 3.2 |
@@ -272,7 +272,7 @@ s, r = call(LP, "POST", "/v1/launch/settings", {"values": {"THINKING_SHARE": "90
 | `THINKING_FOLD_AT_CLOSE_SHARE` | 0 | live | モデルが閉じた時に整理する思考の最小量 (思考の上限の %)。0 はオフ |
 | `THINKING_CLOSE_PROMPT` | org の文 | live | モデルが閉じた時の整理で求める文 |
 | `THINKING_FOLD` | off | live | 中間整理。off、checkpoint、recent、branch |
-| `THINKING_FOLD_SHARE` | 100 | live | 中間整理の間隔。応答の上限の %。100 は上限まで整理しない |
+| `THINKING_FOLD_SHARE` | 100 | live | 中間整理の間隔。`max_tokens` の %。100 は上限まで整理しない |
 | `THINKING_FOLD_MAX` | 0 | live | 1 回の応答の中間整理の回数の上限。0 は制限なし |
 | `THINKING_FOLD_CAP_SHARE` | 70 | start | 整理の大きさの上限。整理する思考の %。10〜100 |
 | `TF_GLM53_BYTE_RESUME` | on | start | 切り方のずれを越えてキャッシュから再開する (9.3)。on、log、off |

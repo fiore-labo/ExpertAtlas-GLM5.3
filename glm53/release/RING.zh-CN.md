@@ -2,7 +2,7 @@
 
 # 不用交换机，把四台 DGX Spark 连成环
 
-四节点配置（`T4.zh-CN.md`）也能在四台 NVIDIA DGX Spark 系统上运行：它们不用交换机，而是以 200 Gb/s 直连链路互相连成环。引擎、检查点、bank 和控制面板都相同，变化的只是 rank 之间的通信方式。它是 Fiore-lab 基于 TensorFold 1.0.2 制作的非官方衍生版本，并非 TensorFold 项目的发布版本。
+四节点配置（`T4.zh-CN.md`）也能在四台 NVIDIA DGX Spark 系统上运行：它们不用交换机，而是以 200 Gb/s 直连链路互相连成环。引擎、权重、bank 和控制面板都相同，变化的只是 rank 之间的通信方式。它是 Fiore-lab 基于 TensorFold 1.0.2 制作的非官方衍生版本，并非 TensorFold 项目的发布版本。
 
 ## 运行方式
 

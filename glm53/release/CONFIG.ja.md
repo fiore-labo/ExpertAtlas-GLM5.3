@@ -4,7 +4,7 @@
 
 `docker run ... IMAGE up` では、エンジン設定の項目を `-e 項目=値` で指定できます (`QUICKSTART.ja.md`)。次の項目は `not an option` で止まるので、`~/expertatlas/glm53.conf` に書きます: `GID_INDEX`、`RUNTIME`、`NCCL_LIB`、`EXPERT_LIVE`、`LOG_LISTEN`、`CONTEXT`、`STORE`、`THINKING_FOLD_KEEP`、`NEED_GB`、`LAUNCHER_HOST`、`ATLAS_DIR`、`LAUNCH_SNAPSHOTS`。`TOPOLOGY`、`SOCKET_IFNAME`、`IB_HCA` はノード確認が決めます。
 
-下の既定は `tf-glm53` の既定です。`docker run ... IMAGE up` は台数によらず `glm53.t4.conf.example` から `glm53.conf` を書くので、`CONTEXT_LENGTH` 737280、`KV_SIZE` 837280、`KV` fp4、`NEED_GB` 133 で始まり、起動の KV サイズは `max` です。
+下の既定は `tf-glm53` の既定です。`docker run ... IMAGE up` は台数によらず `glm53.t4.conf.example` から `glm53.conf` を書くので、`CONTEXT_LENGTH` 737280、`KV_SIZE` 837280、`KV` fp4、`NEED_GB` 115 で始まり、起動の KV サイズは `max` です。
 
 `glm53.conf` には、レーンの設定（ノード、ネットワーク、重み、drafter、サーバー、メモリ、コントロールパネル）を書きます。シェルのファイルで、1 台目のノードの `tf-glm53` と同じディレクトリに置き、手で書いて編集します。`glm53.t4.conf.example`（4 台）か `glm53.conf.example`（8 台）を `glm53.conf` にコピーし、ノード、ネットワークのデバイス、パスを書き入れてください。それ以外の項目は、例に実測した値が入っています。
 
@@ -15,16 +15,16 @@
 - コントロールパネルのランチャーは、ランチャーを起動したときに読みます。エンジンが止まっている間にファイルが変わると、ランチャーが自分で読み直します（エンジンが動いている間の編集は、止まったときに読みます）。`LAUNCHER_HOST` と `LAUNCHER_PORT` は、ランチャーを起動し直したときに効きます: `./tf-glm53 launcher stop` のあと `./tf-glm53 up`。その間エンジンは動いたままでかまいません。ランチャーは動いているエンジンを見つけます。
 - ほかに書き換えるものはありません。例外は 2 つで、どちらもコントロールパネルです。どちらも変えた行だけを書き（1 項目 1 行。値の後ろのコメントは残し、行が無ければ末尾に足す）、前のファイルを `glm53.conf.bak-<時刻>` として横に残します。
   - 起動設定で、ウェイトの「保存」を押すと `WEIGHTS` と `DRAFTER` を書きます。書くのは、指す場所が全ノードにあると確かめてからです（expert のバンクのディレクトリは同じように `expert-plan/banks.json` に書き、全ノードに配ります）。ランチャーはそれをすぐに読み直します。
-  - エンジン設定の画面（見出しの切り替えで開く）は、再起動が必要な設定を書きます: `NAME`, `CONTEXT_LENGTH`, `KV_SIZE`, `KV`, `MAX_TOKENS`, `THINKING_*`, `MULTI*`, `DRAFTER_KIND`, `MTP_K`, `DRAFT_SAVES`, `DCP`, `MASTER_PORT`, `RESERVE_GB`, `READY_TIMEOUT`, `LAUNCH_DROP_CACHES`, `HOST`, `PORT`, `METRICS_LISTEN`, `LOG_KEEP_MB`, `LAUNCHER_PORT`, `ROWS`, `SP_PARTS`, `ROCE_PROXY_CORES`, `ATLAS_GENERIC`, `EXTRA_ENV`（エンジンの `TF_GLM53_CANON_CLOSE` と `TF_GLM53_CANON_NEAR` はその中の 1 語として）。ノード確認でノードを登録するまでは `TOPOLOGY`、`SOCKET_IFNAME`、`IB_HCA` も。値は先に `tf-glm53` と同じ規則で確かめます。`PORT` はエンジンが止まっている間だけ。「保存」: 次の起動から使います（動いているエンジンは起動したときの設定のまま）。ただし思考の動作中に効く項目（`THINKING_SHARE`、`THINKING_FOLD`、`THINKING_FOLD_AT_CLOSE_SHARE`、`THINKING_FOLD_SHARE`）は、動いているエンジンにもすぐ渡し、推論画面の [ THINKING ] で変えた値もここに書くので、両方の画面が同じ値になります。「保存して再起動」（エンジンが動いているとき）: 「停止」と同じく、この稼働の利用記録を残すかを聞いてから止め、同じ expert のまま、保存した設定で起動し直します。推論画面の GPU の配分の「次の起動もこの値で」は、`MULTI_DECODE_SHARE`、`MULTI_SHORT_PROMPT`、`MULTI_SHORT_PREEMPT` を同じように書きます。
+  - エンジン設定の画面（見出しの切り替えで開く）は、再起動が必要な設定を書きます: `NAME`, `CONTEXT_LENGTH`, `KV_SIZE`, `KV`, `MAX_TOKENS`, `THINKING_*`, `MULTI*`, `DRAFTER_KIND`, `MTP_K`, `DRAFT_SAVES`, `DCP`, `MASTER_PORT`, `RESERVE_GB`, `READY_TIMEOUT`, `LAUNCH_DROP_CACHES`, `HOST`, `PORT`, `METRICS_LISTEN`, `LOG_KEEP_MB`, `LAUNCHER_PORT`, `ROWS`, `SP_PARTS`, `ROCE_PROXY_CORES`, `ATLAS_GENERIC`, `EXTRA_ENV`（エンジンの `TF_GLM53_CANON_CLOSE` と `TF_GLM53_CANON_NEAR` はその中の 1 語として）。ノード確認でノードを登録するまでは `TOPOLOGY`、`SOCKET_IFNAME`、`IB_HCA` も。値は先に `tf-glm53` と同じ規則で確かめます。`PORT` はエンジンが止まっている間だけ。変更はその時点で書き、次の起動から使います（動いているエンジンは起動したときの設定のまま）。ただし思考の動作中に効く項目（`THINKING_SHARE`、`THINKING_FOLD`、`THINKING_FOLD_AT_CLOSE_SHARE`、`THINKING_FOLD_SHARE`）は、動いているエンジンにもすぐ渡し、推論画面の [ THINKING ] で変えた値もここに書くので、両方の画面が同じ値になります。「再起動して反映」（エンジンが動いているとき）: 「停止」と同じく、この稼働の利用記録を残すかを聞いてから止め、同じ expert のまま、保存した設定で起動し直します。
 - コントロールパネルのノード確認で登録したノードは、別のファイル `glm53.nodes.conf`（このファイルの横）に書きます。中身は `TOPOLOGY`、`NODES`、`SOCKET_IFNAME`、`IB_HCA` で、確認で配線を判定したとおりの値です（前のファイルは `glm53.nodes.conf.bak-<時刻>` として残ります）。`tf-glm53` とランチャーは `glm53.conf` のあとに読むので、この 4 項目はそちらが優先します。このファイルがない間、パネルはノード確認から開きます。できたあとは起動設定から開きます。`NODES_CONF=FILE` で別のファイルを、`NODES_CONF=`（空）でどれも読みません。`tf-glm53 deploy` はこのファイルを配りません。
-- 起動画面で起動ごとに選ぶもの（expert の幅、KV の形式、context length、drafter、各ノードが OS に残す量）は、その起動の間だけのもので、`glm53.conf` には書きません。ランチャーはこれらを環境変数（`LAUNCH_*`）で `tf-glm53` に渡します。このファイルの設定項目ではありません。その既定値はこのファイルの値（`KV`、`CONTEXT_LENGTH`、`DRAFTER_KIND`、`MULTI`、`RESERVE_GB`）で、エンジン設定の画面で変えられます。
+- 起動画面で選ぶもの（KV の形式、context length、drafter、同時推論の数、各ノードが OS に残す量）は、選んだ時点でこのファイルに書きます（`KV`、`CONTEXT_LENGTH`、`DRAFTER_KIND`、`MULTI`、`RESERVE_GB`）。起動のときは計画が取った context length を書くので、次に開くとその値が選ばれています。`KV_SIZE` は context length に足りないときだけ上げます。expert の幅と計画が取る KV はその起動だけのもので、ランチャーが環境変数（`LAUNCH_*`）で `tf-glm53` に渡します。このファイルの設定項目ではありません。
 - ページ自身の設定（色、円の並べ方など）は `launch/panel-settings.json` に残ります。
 - `glm53.conf` はリリースのファイルではありません。`SHA256SUMS` に載っていないので、`tf-glm53 check` も `tf-glm53 deploy` も照合しません。大きく変える前に、動いているファイルの控えを取ってください。
 - 別の設定ファイル: `tf-glm53 -c FILE コマンド`（ランチャーも `./tf-glm53 -c FILE up`）。同じノードで 2 つのレーンを動かすなら、`PORT`、`MASTER_PORT`、`LAUNCHER_PORT` をそれぞれ別にします。
 
 ## 設定項目
 
-「既定」は、項目が無いか空のときに `tf-glm53` が使う値です。「（必須）」には既定がありません。**パネル** と書いた項目は、起動画面で起動ごとに選び直せます。ファイルの値は、起動画面で選ばない起動（`tf-glm53 start`、`engine-up`）が使います。
+「既定」は、項目が無いか空のときに `tf-glm53` が使う値です。「（必須）」には既定がありません。**パネル** と書いた項目は起動画面でも選べ、選ぶとここに書きます。起動画面を通らない起動（`tf-glm53 start`、`engine-up`）はファイルの値を使います。
 
 ### ノードとネットワーク
 
@@ -49,8 +49,8 @@
 
 | 項目 | 既定 | 意味 |
 |---|---|---|
-| `WEIGHTS` | （必須） | チェックポイントのディレクトリ。全ノードで同じパスにします。4 台は `GLM-5.3-EXL3-4x-DGX-Sparks`、8 台は `GLM-5.3-EXL3-8x-DGX-Sparks`。起動設定で指定できます。expert のバンクのディレクトリ（`expert-plan/banks.json`）も同じ画面で指定できます。どちらも全ノードにあることを確かめてから書きます。 |
-| `DRAFTER_KIND` | `mtp` | **パネル**。モデルが確かめるトークンを何が下書きするか: `mtp`（チェックポイントの MTP 層）、`dflash2`（`DRAFTER` のモデル）、`none`。`./tf-glm53 -d KIND start`（または `engine-up`）でその起動だけ別のものにできます。 |
+| `WEIGHTS` | （必須） | Base の重み (`GLM-5.3-EXL3-Base`) のディレクトリ。全ノードで同じパスにします (4 台でも 8 台でも)。完全なチェックポイント (`GLM-5.3-EXL3-4x-DGX-Sparks`、`GLM-5.3-EXL3-8x-DGX-Sparks`) でも使えます。起動設定で指定できます。expert のバンクのディレクトリ（`expert-plan/banks.json`）も同じ画面で指定できます。どちらも全ノードにあることを確かめてから書きます。 |
+| `DRAFTER_KIND` | `mtp` | **パネル**。モデルが確かめるトークンを何が下書きするか: `mtp`（`WEIGHTS` の MTP 層）、`dflash2`（`DRAFTER` のモデル）、`none`。`./tf-glm53 -d KIND start`（または `engine-up`）でその起動だけ別のものにできます。 |
 | `MTP_K` | `3` | MTP の 1 ラウンドの下書きの数。1〜7。 |
 | `DRAFTER` | 空 | DFlash2 のモデルのディレクトリ。全ノードで同じパスにします。`DRAFTER_KIND=dflash2` にはこれが要ります。起動画面が DFlash2 を選ばせるのも、これが設定され、全ノードにモデルがあるときだけです。リリースには含まれません（RUNTIME.ja.md「DFlash2 を使う手順」）。起動設定で指定できます。 |
 | `DRAFT_SAVES` | `8` | DFlash2 のとき、リクエストの間で drafter の状態を残す会話の数。 |
@@ -105,7 +105,7 @@
 
 | 項目 | 既定 | 意味 |
 |---|---|---|
-| `NEED_GB` | `112` | 起動の前に各ノードで使えなければならない GiB（`tf-glm53 check`）。DFlash2 では 3 多く、`KV_SIZE` が 1,638,400 より 100,000 位置少ないごとに 2.7 少なくなります。4 台の例は 133 で、その `KV_SIZE` で 112 になります。パネルからの起動は、計画の値を代わりに使います。 |
+| `NEED_GB` | `112` | 起動の前に各ノードで使えなければならない GiB（`tf-glm53 check`）。DFlash2 では 3 多く、`KV_SIZE` が 1,638,400 より 100,000 位置少ないごとに、`KV=fp8` で 2.55、`KV=fp4` で 1.73 少なくなります。4 台の例は 115 で、その `KV_SIZE` で 101 になります。パネルからの起動は、計画の値を代わりに使います。 |
 | `READY_TIMEOUT` | `900` | 起動（`tf-glm53 engine-up`。パネルからの起動もこれを実行します）がサーバーを待つ秒数。 |
 
 ### コントロールパネル

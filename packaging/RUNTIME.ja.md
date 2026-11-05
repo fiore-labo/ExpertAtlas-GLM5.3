@@ -2,7 +2,7 @@
 
 # このアーカイブでフルサイズの GLM-5.3 を動かす
 
-初めてなら、`QUICKSTART.ja.md` の 1 行でイメージからエンジン起動まで進めます。チェックポイントと 3 ビットのバンクは常に必要で、指定がなければすべての expert を 3 ビットで読み込みます。
+初めてなら、`QUICKSTART.ja.md` の 1 行でイメージからエンジン起動まで進めます。Base の重みと 3 ビットのバンクは常に必要で、指定がなければすべての expert を 3 ビットで読み込みます。
 
 このアーカイブは、フルサイズの GLM-5.3（`glm_moe_dsa`、755B）を NVIDIA DGX Spark 4 台または 8 台で、GB10 1 基につき 1 ランク、テンソル並列 4 または 8 で動かします。サーバーには Python、コンパイラ、ソースのチェックアウトは不要です。コントロールパネルのランチャーとログ係は、システムの `python3` を標準ライブラリだけで使います。これは TensorFold 1.0.2 から Fiore-lab が作った非公式の派生物であり、TensorFold プロジェクトのリリースではありません。このページは 4 台と 8 台の両方を扱います。4 台で異なる点とその測定結果は `T4.ja.md` に、スイッチなしでリングにつないだ 4 台は `RING.ja.md` に記載しています。
 
@@ -26,8 +26,8 @@
 - ローダーのパス上にある cuBLAS 13（`libcublas.so.13`、`libcublasLt.so.13`）。DGX OS では CUDA 13 と一緒にインストールされます（`libcublas-13-0`）。
 - 全ノードの同じパスにある NCCL 2.30.7（後述）。
 - `libibverbs.so.1` と、各システムをつなぐ 1 つの RoCE v2 ネットワーク（4 台なら、各ノードに 100 Gb/s のポートが 1 つあれば足ります）、またはリングにつないだ 4 台（`RING.ja.md`）。1 台目自身を含むすべてのノードに、1 台目から `NODES` に書いたアドレスでパスワードなしの ssh で接続でき、host key を登録してあること (`QUICKSTART.ja.md` の 1 章)。
-- ディスク。全ノードの同じパスに置きます（後述）。チェックポイントは、8 台では 390 GB（363 GiB）、4 台では 344.6 GB（321 GiB）です。3 ビットの expert バンクは 277.9 GB で、どの起動にも必要です。
-- 8 台: 起動前の各ノードで、`free -g` が示す利用可能メモリが 112 GiB（DFlash2 では 115）。`CONTEXT_LENGTH` が 819,200、`KV_SIZE` が 1,638,400 のとき、ランクは約 108 GiB（DFlash2 では 111）を使います。`KV_SIZE` を 100,000 トークン減らすごとに、必要量は 2.7 GiB 減ります。これより少ないノードは `tf-glm53 check` が拒否します。4 ビットの KV キャッシュ（`KV=fp4`）なら、8 台で `CONTEXT_LENGTH` を 1,048,576、`KV_SIZE` を 2,097,152 にでき、ランクは約 94 GiB を使いました（1,018,993 トークンのプロンプトで実測）。`tf-glm53 check` の見積もりは 8 ビットのキャッシュ向けなので、このときは `NEED_GB=100` を設定してください。
+- ディスク。全ノードの同じパスに置きます（後述）。Base の重みは 21.2 GB（19.8 GiB）、3 ビットの expert バンクは 277.9 GB で、合わせて 299.1 GB です（4 台でも 8 台でも）。どの起動にも必要です。
+- 8 台: 起動前の各ノードで、`free -g` が示す利用可能メモリが 112 GiB（DFlash2 では 115）。`CONTEXT_LENGTH` が 819,200、`KV_SIZE` が 1,638,400 のとき、ランクは約 108 GiB（DFlash2 では 111）を使います。`KV_SIZE` を 100,000 トークン減らすごとに、必要量は 2.55 GiB 減ります（4 ビットの KV キャッシュでは 1.73）。これより少ないノードは `tf-glm53 check` が拒否します。4 ビットの KV キャッシュ（`KV=fp4`）なら、8 台で `CONTEXT_LENGTH` を 1,048,576、`KV_SIZE` を 2,097,152 にでき、ランクは約 94 GiB を使いました（1,018,993 トークンのプロンプトで実測）。`tf-glm53 check` の見積もりは 8 ビットのキャッシュ向けなので、このときは `NEED_GB=100` を設定してください。
 - 4 台: メモリはこのサーバー専用として割り当てます（`T4.ja.md`）。DFlash2 で測定した空きメモリの最小値は、512K のときノードあたり約 3.2 GiB でした（`ROWS` 16,384 のとき。今の既定は 8,192）。
 - 各ノードの `python3`。ログ係のためで、アーカイブでもイメージでも要ります（DGX OS にあります）。
 - ほかの幅: 使う expert のバンク用のディスク（後述の「コントロールパネル」）。
@@ -43,22 +43,24 @@ pip3 install --no-deps --target ~/nccl-2.30.7 nvidia-nccl-cu13==2.30.7
 
 `glm53.conf` の `NCCL_LIB` は、既定で `~/nccl-2.30.7/nvidia/nccl/lib/libnccl.so.2` を指しています。ソースからビルドした NCCL 2.30.7（NVIDIA の DGX Spark playbook「NCCL for Two Sparks」、<https://build.nvidia.com/spark/nccl>）でも動きます。その場合は `NCCL_LIB` にそれを指定してください。スイッチでは wheel でも動きますが、AArch64 の fence を入れたビルドを推奨します。fence がないと、Arm の通信スレッドがエラーなしで止まることがあります（`RING.ja.md`「fence 入りの NCCL」）。リングではそのビルドが必須です。
 
-チェックポイントと 3 ビットのバンクは、どちらも必要です。バンクは後述の「コントロールパネル」にあります。チェックポイント: Hugging Face 上の、ノード数に合った Fiore-lab の EXL3 チェックポイントです。8 台では `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`、4 台では `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks` を使います。Hugging Face CLI で一度だけダウンロードし（`python3 -m venv` には `python3-venv` パッケージが必要です）、RoCE ネットワーク経由で残りのノードにコピーします。8 台の場合は次のとおりです。
+Base の重みと 3 ビットのバンクは、どちらも必要です。バンクは後述の「コントロールパネル」にあります。Base の重み: Hugging Face 上の `fiore-lab/GLM-5.3-EXL3-Base` です。4 台でも 8 台でも同じで、routed expert 以外の全部です。routed expert は起動のときにバンクから読みます。Hugging Face CLI で一度だけダウンロードし（`python3 -m venv` には `python3-venv` パッケージが必要です）、RoCE ネットワーク経由で残りのノードにコピーします。8 台の場合は次のとおりです。
 
 ```sh
 python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
-D=~/models/GLM-5.3-EXL3-8x-DGX-Sparks
-~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks --local-dir $D
+D=~/models/GLM-5.3-EXL3-Base
+~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-Base --local-dir $D
 for n in NODE2 NODE3 NODE4 NODE5 NODE6 NODE7 NODE8; do    # the other seven addresses in NODES
   rsync -a --mkpath -e "ssh -c aes128-gcm@openssh.com" $D/ $n:$D/ &
 done; wait
 ```
 
-4 台の場合は、4 台用のチェックポイントと残りの 3 台を使う同じコマンドを `T4.ja.md` に記載しています。
+4 台の場合は、残りの 3 台に同じコマンドを使います（`T4.ja.md`）。
 
-コピーを確認するには、全ノードで `cd ~/models/GLM-5.3-EXL3-8x-DGX-Sparks && sha256sum -c --quiet SHA256SUMS` を実行します。1 台あたり数分かかり、すべてのファイルが一致すれば何も出力しません（このディレクトリを配置した後なら、`./tf-glm53 verify` で全ノードを一度に確認できます）。`glm53.conf` の `WEIGHTS` にこのディレクトリ（ここでは `~/models/GLM-5.3-EXL3-8x-DGX-Sparks`）を指定します。
+コピーを確認するには、全ノードで `cd ~/models/GLM-5.3-EXL3-Base && sha256sum -c --quiet SHA256SUMS` を実行します。1 台あたり数分かかり、すべてのファイルが一致すれば何も出力しません（このディレクトリを配置した後なら、`./tf-glm53 verify` で全ノードを一度に確認できます）。`glm53.conf` の `WEIGHTS` にこのディレクトリ（ここでは `~/models/GLM-5.3-EXL3-Base`）を指定します。
 
-重みのファイル（チェックポイントと expert バンク）はどれも、Fiore-lab のファイルを使わずに、Z.AI の公式 BF16 チェックポイントから GPU のあるホストで作ることもできます。手順はソースリポジトリの `glm53/weights/README.ja.md` にあります（<https://github.com/fiore-labo/ExpertAtlas-GLM5.3/blob/main/glm53/weights/README.ja.md>。アーカイブにはこのディレクトリは入っていません）。
+完全なチェックポイント、`fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`（390 GB、363 GiB）と `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`（344.6 GB、321 GiB）には routed expert も入っていますが、起動では読みません。持っていれば `WEIGHTS` に指定すると、そのまま使えます。
+
+重みのファイル（Base の重み、チェックポイント、expert バンク）はどれも、Fiore-lab のファイルを使わずに、Z.AI の公式 BF16 チェックポイントから GPU のあるホストで作ることもできます。手順はソースリポジトリの `glm53/weights/README.ja.md` にあります（<https://github.com/fiore-labo/ExpertAtlas-GLM5.3/blob/main/glm53/weights/README.ja.md>。アーカイブにはこのディレクトリは入っていません）。
 
 ## 起動
 
@@ -85,7 +87,7 @@ cp glm53.conf.example glm53.conf    # nodes, network names, NCCL, weights, draft
 | 設定 | `glm53.conf.example`（8 台） | `glm53.t4.conf.example`（4 台） |
 |---|---|---|
 | `NODES` | 8 つのアドレス（rank 0 が先頭） | 4 つのアドレス（rank 0 が先頭） |
-| `WEIGHTS` | `~/models/GLM-5.3-EXL3-8x-DGX-Sparks` | `~/models/GLM-5.3-EXL3-4x-DGX-Sparks` |
+| `WEIGHTS` | `~/models/GLM-5.3-EXL3-Base` | `~/models/GLM-5.3-EXL3-Base` |
 | `KV` | `fp8`（既定） | `fp4` |
 | `CONTEXT_LENGTH` | 819200 | 737280 |
 | `KV_SIZE` | 1638400 | 837280 |
@@ -110,16 +112,16 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/
 
 ## Drafter
 
-エンジンはラウンドごとに数トークンのドラフトを作り、モデルがそれを検証します。どの場合も、応答はモデル自身が選んだものです。ドラフトを作るものは `glm53.conf` の `DRAFTER_KIND` で選びます。パネルの起動画面では起動ごとに選べます。`start` か `engine-up` の前に `-d KIND` を付けると、ファイルを書き換えずにその起動だけ選べます（`./tf-glm53 -d dflash2 start`、`./tf-glm53 -d mtp engine-up`）。直前の起動で使ったものは `./tf-glm53 status` が表示します。
+エンジンはラウンドごとに数トークンのドラフトを作り、モデルがそれを検証します。どの場合も、応答はモデル自身が選んだものです。ドラフトを作るものは `glm53.conf` の `DRAFTER_KIND` で選びます。パネルの起動画面でも選べ、選ぶとそこに書きます。`start` か `engine-up` の前に `-d KIND` を付けると、ファイルを書き換えずにその起動だけ選べます（`./tf-glm53 -d dflash2 start`、`./tf-glm53 -d mtp engine-up`）。直前の起動で使ったものは `./tf-glm53 status` が表示します。
 
-- `mtp`（既定）: チェックポイント自身の MTP 層です。GLM-5.3 の重みの一部であり、重みと同じライセンスに従います。この層を含むチェックポイントが必要で、含まないものは `tf-glm53 check` が拒否します。1 ラウンドあたりのドラフト数は最大 `MTP_K` で、既定は 3 です（4 にしても 3 より速くなりませんでした）。1 ラウンドのドラフトは、確率の積が `TF_GLM53_MTP_CONF`（既定は 0.7、0 でオフ）を下回るところで止まります。
+- `mtp`（既定）: `WEIGHTS` の中の MTP 層です。GLM-5.3 の重みの一部であり、重みと同じライセンスに従います。この層を含む重みが必要で、含まないものは `tf-glm53 check` が拒否します。1 ラウンドあたりのドラフト数は最大 `MTP_K` で、既定は 3 です（4 にしても 3 より速くなりませんでした）。1 ラウンドのドラフトは、確率の積が `TF_GLM53_MTP_CONF`（既定は 0.7、0 でオフ）を下回るところで止まります。
 - `dflash2`: incoai/GLM-5.3-DFlash2。置き場所は `DRAFTER` で指定します。**ライセンス上の理由で、このアーカイブにもリポジトリにも同梱していません**。モデルカードには CC BY-NC-ND 4.0（非営利利用のみ、改変禁止）、研究と評価のため、と記載されています。商用ライセンスは Inco AI が提供しています。その利用がこのライセンスの範囲内であれば、下の「DFlash2 を使う手順」で設定してください。decode はさらに速くなります（「速度」）。
 - `none`: ドラフトなし。
 
 ### DFlash2 を使う手順
 
 1. モデルカード（<https://huggingface.co/incoai/GLM-5.3-DFlash2>）のライセンスを読み、ご自身の利用がその範囲内かを確認してください。エンジンは公開されているファイルをそのまま読みます。起動時に各ランクが drafter の重みのうち自分の担当分を取り出し、メモリ上で 4 ビットに量子化します。事前の変換はなく、ディスクにも何も書き出しません。
-2. チェックポイント用に用意した Hugging Face CLI で、先頭のノードで一度だけダウンロードします。版は、このアーカイブで確認した revision に固定します。アカウントもトークンも不要です。重みは `model.safetensors` の 1 ファイル（4,918,859,112 バイト）です。Hugging Face のキャッシュではなく専用のディレクトリ（`--local-dir`）を使ってください。`DRAFTER` に指定するディレクトリには、`config.json` と `model.safetensors` そのものが必要です。
+2. 重み用に用意した Hugging Face CLI で、先頭のノードで一度だけダウンロードします。版は、このアーカイブで確認した revision に固定します。アカウントもトークンも不要です。重みは `model.safetensors` の 1 ファイル（4,918,859,112 バイト）です。Hugging Face のキャッシュではなく専用のディレクトリ（`--local-dir`）を使ってください。`DRAFTER` に指定するディレクトリには、`config.json` と `model.safetensors` そのものが必要です。
 
    ```sh
    R=~/models/GLM-5.3-DFlash2
@@ -153,11 +155,11 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/
    DRAFTER=~/models/GLM-5.3-DFlash2
    ```
 
-   `DRAFTER` を設定して `DRAFTER_KIND` を `mtp` のままにしておけば、起動画面か `./tf-glm53 -d dflash2 start` でその起動だけ DFlash2 を使えます。エンジンの停止中は、ランチャーが編集を自分で読み込みます。DFlash2 では `MTP_K` は使いません。8 台では、起動前に各ノードで使えるメモリが 112 GiB ではなく 115 GiB 必要です（「各ノードに必要なもの」）。`tf-glm53 check` がこれを確認します。最近の会話の drafter の状態も保持します（`DRAFT_SAVES`。「リクエスト間で保持する会話」）。
+   `DRAFTER` を設定して `DRAFTER_KIND` を `mtp` のままにしておけば、起動画面で DFlash2 を選ぶと `DRAFTER_KIND` に書きます。その起動だけなら `./tf-glm53 -d dflash2 start` です。エンジンの停止中は、ランチャーが編集を自分で読み込みます。DFlash2 では `MTP_K` は使いません。8 台では、起動前に各ノードで使えるメモリが 112 GiB ではなく 115 GiB 必要です（「各ノードに必要なもの」）。`tf-glm53 check` がこれを確認します。最近の会話の drafter の状態も保持します（`DRAFT_SAVES`。「リクエスト間で保持する会話」）。
 6. いつもどおり起動します。動いていれば先に `./tf-glm53 down`、その後パネルから（または `./tf-glm53 start` で）起動します。`tf-glm53 check` は `drafter: dflash2 (PATH)` と表示します。起動でも、同じ表示が `tf-glm53 logs launcher` に出ます。エンジン自身の起動時の行は、drafter に関係なく `drafts: on` と表示します。
 7. ドラフトが効いているかは、`curl -s http://127.0.0.1:8000/health` の `completion_tokens_total` と `rounds_total` をリクエストの前後で読んで確かめます。前者の増分を後者の増分で割ると、そのリクエストで 1 ラウンドあたりに確定したトークン数になります。1 ならドラフトは 1 つも採用されていません。「速度」と同じようなコーディング用のプロンプトでは、DFlash2 で 4.3〜5.0 でした。
 
-MTP 層に戻すには、`DRAFTER_KIND=mtp` にして、`./tf-glm53 down` のあと起動し直します。その起動だけなら、起動画面で MTP を選ぶか `./tf-glm53 -d mtp start` です。
+MTP 層に戻すには、起動画面で MTP を選ぶか、`DRAFTER_KIND=mtp` にして `./tf-glm53 down` のあと起動し直します。その起動だけなら `./tf-glm53 -d mtp start` です。
 
 ## リクエスト間で保持する会話
 
@@ -221,13 +223,13 @@ done
 
 `up` が表示するアドレス `http://FIRST-NODE:LAUNCHER_PORT/panel` を開きます。`glm53.t4.conf.example` ではポート 8010 です（`LAUNCHER_PORT` が無ければ `PORT` + 10）。ランチャーは既定で全アドレス（`LAUNCHER_HOST=0.0.0.0`）で待ち受け、キーはないので、届く人なら誰でもエンジンの起動・停止・入れ替えができます。閉じたネットワーク内に留めるか、`LAUNCHER_HOST=127.0.0.1` にして他のマシンからは ssh トンネルで開いてください（`ssh -L 8010:127.0.0.1:8010 FIRST-NODE` のあと `http://127.0.0.1:8010/panel`）。ページのそれ以外の呼び出しはランチャーを通ってエンジンに届くので、エンジンが動いていてもいなくても、ページのアドレスは 1 つです。ランチャーが（既定の全アドレスで）動いている間に起動したエンジンは、エンジン自身の `/panel`（`PORT`）を開いたブラウザをランチャーのパネルへ送ります。パネルを使う間は、エンジンの起動と停止はパネルから行ってください。画面の説明は `PANEL-GUIDE.ja.md` にあります。ページは英語か日本語で表示します（ブラウザの言語、または Display > Language）。
 
-- **起動**（パネルから）: ランチャーは全ノードを確かめ（つながること、エンジンや他の GPU プロセスが無いこと、計画がメモリに収まること）、幅を expert の計画（`launch/plan-<時刻>.json`）に書き、全ノードにコピーして、それを使って `tf-glm53 engine-up` を実行します（`tf-glm53 start` は直前の起動の計画で同じ起動をします）。ページには各層の読み込みが表示されます。routed expert はすべてバンクから、それ以外の重みはチェックポイントから読みます。
-- **drafter** は、起動画面で KV の形式と並べて起動ごとに選びます: MTP（チェックポイントの層）、DFlash2（`glm53.conf` の `DRAFTER` に全ノードでモデルがあるときだけ。上の「DFlash2 を使う手順」）、なし。既定は `DRAFTER_KIND` です。メモリはそれぞれ違い、DFlash2 は MTP より 1 台あたり約 4 GiB 少なく残すので、選んだ drafter で計画し直します。
-- **Context length** も起動画面で起動ごとに選びます: 128K、256K、512K、`CONTEXT_LENGTH`、入る最長（最大 1,048,576 トークン）。計画のメモリに入らない長さは、入る長さまで縮めます。
+- **起動**（パネルから）: ランチャーは全ノードを確かめ（つながること、エンジンや他の GPU プロセスが無いこと、計画がメモリに収まること）、幅を expert の計画（`launch/plan-<時刻>.json`）に書き、全ノードにコピーして、それを使って `tf-glm53 engine-up` を実行します（`tf-glm53 start` は直前の起動の計画で同じ起動をします）。ページには各層の読み込みが表示されます。routed expert はすべてバンクから、それ以外の重みは `WEIGHTS` から読みます。
+- **drafter** は、起動画面で KV の形式と並べて選びます: MTP（`WEIGHTS` の層）、DFlash2（`glm53.conf` の `DRAFTER` に全ノードでモデルがあるときだけ。上の「DFlash2 を使う手順」）、なし。選ぶと `DRAFTER_KIND` に書きます。メモリはそれぞれ違い、DFlash2 は MTP より 1 台あたり約 4 GiB 少なく残すので、選んだ drafter で計画し直します。
+- **Context length** も起動画面で選びます: 128K、256K、512K、`CONTEXT_LENGTH`、入る最長（最大 1,048,576 トークン）。計画のメモリに入らない長さは、入る長さまで縮めます。選んだ値は `glm53.conf` に書き（起動のときは計画が取った数字）、次に開くとその値が選ばれています。パネルが書くまでは最長で開きます。
 - **各ノードが OS に残す量**（`RESERVE_GB`。既定 4 GiB、2〜32）もそこで選びます。パネルは KV サイズを聞きません。KV キャッシュは計画が残す空きを全部使い（1 件のリクエストに context length、残りは以前の会話のため）、起動画面の KV の行（KV FP4 / KV FP8）がそのトークン数を示します。`tf-glm53 start` は context length と KV サイズを `glm53.conf` から取ります。`docker run` の行の `-e KV_SIZE=N` は、その起動の KV サイズを決めます。計画は各ノードが OS に残す量で KV キャッシュのサイズを決め、起動時のエンジン自身のメモリ検査も同じ量を残します。KV キャッシュは起動時に確保し、稼働中には増えません。
 - **ノード**: エンジンの停止中は、起動画面で worker のアドレスを変えられます。1 台目はそのままです。「確認」はこのディレクトリをそれらに写し（`tf-glm53 deploy`）、その一覧で `tf-glm53 check` を実行します。「保存」は、その一覧が確認に通ったときだけ `glm53.nodes.conf` を書き、前のファイルを横に残します。`glm53.conf` には触れません。
-- **重み**: 起動画面の [ WEIGHTS ] で、チェックポイント、バンク、DFlash2 のモデルの場所を指定します。「確認して保存」は、指定したものが全ノードにそろってから書き込みます（`glm53.conf` の `WEIGHTS` と `DRAFTER`、`expert-plan/banks.json` のバンクのディレクトリ）。
-- **エンジン設定の画面**（右上の切り替え）: 再起動が必要な設定を変えます。「保存して再起動」もあります（`PANEL-GUIDE.ja.md`）。
+- **重み**: 起動画面の [ WEIGHTS ] で、重み（`WEIGHTS`）、バンク、DFlash2 のモデルの場所を指定します。「確認して保存」は、指定したものが全ノードにそろってから書き込みます（`glm53.conf` の `WEIGHTS` と `DRAFTER`、`expert-plan/banks.json` のバンクのディレクトリ）。
+- **エンジン設定の画面**（右上の切り替え）: 再起動が必要な設定を変えるとその時点で書きます。「再起動して反映」もあります（`PANEL-GUIDE.ja.md`）。
 - **割り当てと利用記録**: エンジンは、プロンプトの各行と decode の各トークンが選ぶ expert を数えます（`glm53.conf` の `EXPERT_LIVE=1`、既定。パネルからの起動はいつも数えます）。回数なしで起動したエンジン（`EXPERT_LIVE=0`）でも稼働パネルと「停止」は出ますが、選択の表示とエキスパート最適化はありません。計画の幅は、割り当てとして `ATLAS_DIR/allocs/user/<名前>.json`（既定はこのディレクトリの `atlas/`）に保存します。保存元の稼働の利用記録（稼働が始めに持っていた記録 + その稼働の選択）も一緒です。自動では何も保存しません。停止時の「保存して停止」か、稼働中の「保存」で名前を付けます。既定の名前は稼働の元になった割り当てで、上書きします（前の版は `ATLAS_DIR/allocs/trash/` へ移します）。起動画面は前回の稼働の割合の新しい計画で開きます（稼働が 1 つも無いときはすべて 3 ビット）。「開く」で前回の稼働の割り当てか保存した割り当てをビット単位でそのまま戻し、そこからの起動は、そのビットと保存時のバンクを使います。計画は、元になった割り当ての利用記録で expert を並べ、よく使われるものほど広い幅になります。記録の無い計画は、ページが同梱している回数で並べます。これは Fiore-lab が 12 種類の作業（コーディング、エージェント、日本語と英語の文章、Linux の運用、セキュリティ）で測ったものです。
 - **エキスパート最適化**: エンジンの稼働中に、稼働の利用記録で読み込み済みの expert を並べ替えます。幅ごとの expert の個数はそのままで、同じメモリで、選ばれる expert の平均の幅が上がります。並べる回数はパネルの「利用記録」で選びます（decode、prefill、または両方。両方は expert の decode の割合を 0.7、prefill の割合を 0.3 で重みづけします。モデルが書く文章の精度を最も保った重みです。`ATLAS-TESTS.ja.md`）。変更は、実行中や待機中のリクエストが無くなってから始まり（それまでページが試し直します）、エンジンは全ランクで層をその場で変え、保持している会話を捨て（古い expert で計算した KV のため）、また応答を始めます。その間に届いたリクエストは待ちます。75 層全部の変更は 4 台で 83〜90 秒でした。幅が減る層を先に、増える層を後に入れ替え、各ノードには、それより前の層で増えた分の上に最大の層の新しい写しと 2 GiB（`TF_GLM53_SWAP_MARGIN_GIB`）の空きが要ります。見積もりがノードごとに足りるかを示し、足りないノードがあればページはそのノードと量を示して変更を断ります（次の起動で OS に残す量を増やせば空きができます。KV は計画が残す空きを全部使うためです。パネルを使わず glm53.conf だけで起動するときは `KV_SIZE` を小さくします）。`TF_GLM53_SWAP_DEADLINE_S`（既定 600 秒）を過ぎて止まったランクはプロセスを終え、`tf-glm53` の監視が全ランクを止めます。結果は自動では保存しません。「保存」で残します。起動は渡された幅を読むだけで、並べ替えはしません。
 - `MULTI` を設定していると（`glm53.conf`）、エンジンは稼働中に幅を変えません。エキスパート最適化は見積もりの幅に名前（`opt-<時刻>`）を付けて保存するので、停止してそれで起動します。
@@ -314,7 +316,7 @@ ENDPOINT=http://FIRST-NODE:8000 ./claude-glm53      # 後ろに Claude Code 自�
 | `NG:` | 対処 |
 |---|---|
 | `files` | `tf-glm53 deploy` をやり直します |
-| `weights` | `WEIGHTS` にチェックポイントがないか、ファイル名、サイズ、`config.json` のいずれかが 1 台目のものと異なっています。内容は `tf-glm53 verify` で確認できます |
+| `weights` | `WEIGHTS` に重みがないか、ファイル名、サイズ、`config.json` のいずれかが 1 台目のものと異なっています。内容は `tf-glm53 verify` で確認できます |
 | `NCCL(...)` | そのノードの `NCCL_LIB` に NCCL がありません（「初回起動の前に」を参照） |
 | `cuBLAS-13` | CUDA 13 の cuBLAS（`libcublas-13-0`）をインストールします |
 | `libibverbs` | `libibverbs1` と `ibverbs-providers` をインストールします |
@@ -337,7 +339,7 @@ ENDPOINT=http://FIRST-NODE:8000 ./claude-glm53      # 後ろに Claude Code 自�
 起動が失敗すると、すべてのランクを停止して理由を表示します（パネルからの起動と `tf-glm53 start` では `tf-glm53 logs launcher` にも出ます）。各ノードには自分のランクのログがメモリに残ります（`tf-glm53 logs R`）。
 
 - `a rank stopped (N/M running)`: その上の行に、停止したランクと、そのログの最後のエラーが表示されます。接続に関する `NCCL WARN` 行がある場合: スイッチでは、`NODES` は RoCE ネットワーク上のアドレス、`SOCKET_IFNAME` と `IB_HCA` は全ノードでそのネットワークの名前でなければならず、ノード同士がそのネットワーク上で任意のポートに到達できる必要があります（リングは `RING.ja.md`）。`cannot listen on` の場合: そのノードで `PORT` が使用中です。`PoolValuesDiffer` の場合: ランクごとに異なるプールの設定で起動されたため、起動を拒否しています。すべてのランクを 1 つの `glm53.conf` から `tf-glm53` で起動してください。
-- `not ready after N s`: チェックポイントがローカルの NVMe ドライブにある場合、起動には約 2 分半かかります。遅いディスクやネットワークストレージではさらに時間がかかるので、`READY_TIMEOUT` を引き上げてください。ランデブーが完了しない場合も待ち続けます。1 台目のノードで `MASTER_PORT` が空いているか確認してください。
+- `not ready after N s`: 重みがローカルの NVMe ドライブにある場合、起動には約 2 分半かかります。遅いディスクやネットワークストレージではさらに時間がかかるので、`READY_TIMEOUT` を引き上げてください。ランデブーが完了しない場合も待ち続けます。1 台目のノードで `MASTER_PORT` が空いているか確認してください。
 - `the smoke test failed`: 失敗した質問と、それに対して返ってきた応答が表示されます。リクエストは rank 0 のログで確認できます。
 
 稼働中は、`tf-glm53 status` で全ランク、各ランクの空きメモリ、直前の起動で使った drafter、会話キャッシュ、サーバーの `/health` を確認できます。すべてのランクが動いているのにサーバーが応答しなくなった場合は、`tf-glm53 down` と `tf-glm53 start` を実行してください。監視プロセスがランクを停止するのは、一部のランクが消えたときだけです。あるランクが、プールのうちそのリクエストに割り当てたブロックの外への書き込みを拒否した場合（ログに `PoolWriteRefused`）、そのリクエストの終わりにすべてのランクが一緒に停止します。パネルから、または `tf-glm53 start` で再び起動してください。

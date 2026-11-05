@@ -27,7 +27,7 @@ closed network (section 4 has how to keep them to the first node).
 | ssh | From the first node to every node, and to itself, with a key that has no passphrase and host keys it already knows (below) |
 | Docker access | Your user can run `docker` on every node (the `docker` group) |
 | Memory | About 115 GiB free on each node before the start, with nothing else on the GPU |
-| Disk | For the two required downloads, on each node: at least 622.5 GB on four nodes, 667.8 GB on eight |
+| Disk | For the two required downloads, on each node: at least 299.1 GB, on four nodes and on eight |
 
 The release's image holds NCCL with the AArch64 fence, and reads it on a switch and on a ring (`RING.md`, "The fenced NCCL").
 
@@ -83,24 +83,27 @@ settings by hand (`RING.md`, "Settings").
 
 ## 2. Download the weights
 
-**Two downloads are required: the checkpoint and the 3-bit bank.** The engine does not start without them, even if you
+**Two downloads are required: the Base weights and the 3-bit bank.** The engine does not start without them, even if you
 plan to use another width. Every path must be the same on every node.
 
 | What | Hugging Face repository | Size | Default directory | Option |
 |---|---|---|---|---|
-| Checkpoint, 4 nodes (**required**) | `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks` | 344.6 GB | `~/models/GLM-5.3-EXL3-4x-DGX-Sparks` | `WEIGHTS` |
-| Checkpoint, 8 nodes (**required**) | `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks` | 389.9 GB | `~/models/GLM-5.3-EXL3-8x-DGX-Sparks` | `WEIGHTS` |
+| Base weights (**required**) | `fiore-lab/GLM-5.3-EXL3-Base` | 21.2 GB | `~/models/GLM-5.3-EXL3-Base` | `WEIGHTS` |
 | 3-bit bank (**required**) | `fiore-lab/GLM-5.3-EXL3-Experts-3bit` | 277.9 GB | `~/models/GLM-5.3-EXL3-Experts-3bit` | `BANK_3` |
 | 2-bit bank (optional) | `fiore-lab/GLM-5.3-EXL3-Experts-2bit` | 187.3 GB | `~/models/GLM-5.3-EXL3-Experts-2bit` | `BANK_2` |
 | 4-bit bank (optional) | `fiore-lab/GLM-5.3-EXL3-Experts-4bit` | 368.5 GB | `~/models/GLM-5.3-EXL3-Experts-4bit` | `BANK_4` |
 | 5-bit bank (optional) | `fiore-lab/GLM-5.3-EXL3-Experts-5bit` | 459.1 GB | `~/models/GLM-5.3-EXL3-Experts-5bit` | `BANK_5` |
+| Full checkpoint, 4 nodes (optional) | `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks` | 344.6 GB | none | `WEIGHTS` |
+| Full checkpoint, 8 nodes (optional) | `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks` | 389.9 GB | none | `WEIGHTS` |
 | DFlash2 (optional, separate licence) | `incoai/GLM-5.3-DFlash2` (`RUNTIME.md`, "Using DFlash2") | | none | `DRAFTER` |
+
+The Base weights are everything but the routed experts, which a start reads from the banks. The full checkpoints hold those experts as well, and a start does not need them. If you already have one, name it with `WEIGHTS` and it works as it is. The 8-node one also serves as the 4-bit bank (`RUNTIME.md`, "The control panel").
 
 Download once, then copy to the other nodes. If `python3 -m venv` fails, install the `python3-venv` package. For four nodes:
 
 ```sh
 python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
-for r in EXL3-4x-DGX-Sparks EXL3-Experts-3bit; do
+for r in EXL3-Base EXL3-Experts-3bit; do
   D=~/models/GLM-5.3-$r
   ~/hf-cli/bin/hf download fiore-lab/GLM-5.3-$r --local-dir $D
   for n in NODE2 NODE3 NODE4; do    # the other three nodes
@@ -161,7 +164,7 @@ does not know stops the line, so a typo cannot pass unnoticed.
 
 ```sh
 docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
-  -e WEIGHTS=/data/models/checkpoint \
+  -e WEIGHTS=/data/models/base \
   -e BANK_3=/data/models/3bit \
   -e BANK_4=/data/models/4bit \
   -e BITS=4 -e CONTEXT_LENGTH=131072 \
@@ -172,7 +175,7 @@ Where the files are (the same path on every node):
 
 | Option | Default | Meaning |
 |---|---|---|
-| `WEIGHTS` | `~/models/GLM-5.3-EXL3-4x-DGX-Sparks` (8 nodes: `-8x-`) | The checkpoint. Required |
+| `WEIGHTS` | `~/models/GLM-5.3-EXL3-Base` | The Base weights, or a full checkpoint. Required |
 | `BANK_3` | `~/models/GLM-5.3-EXL3-Experts-3bit` | The 3-bit bank. Required |
 | `BANK_2`, `BANK_4`, `BANK_5` | `~/models/GLM-5.3-EXL3-Experts-<N>bit` | The other banks. Optional |
 | `DRAFTER` | empty | DFlash2's model, used with `DRAFTER_KIND=dflash2` |

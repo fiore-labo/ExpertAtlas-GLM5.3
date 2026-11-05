@@ -10,12 +10,12 @@
 
 | 項目 | 値 |
 |---|---|
-| モデル | フルサイズの GLM-5.3。Fiore-lab が Hugging Face で公開している EXL3 量子化チェックポイント |
+| モデル | フルサイズの GLM-5.3。Fiore-lab が Hugging Face で公開している EXL3 量子化の重み |
 | ノード | DGX Spark（GB10）4 台または 8 台を 1 つの RoCE v2 ネットワークに、またはスイッチなしのリングで 4 台。2 台と 3 台の構成はテスト中で、それ以外には対応しません |
 | Context length | 8 台でも 4 台でも最大 1,048,576 トークン。8 台: 4 ビット KV（`KV=fp4`、`NEED_GB=100`）なら `KV_SIZE` 2,097,152 で、8 ビットなら 1,638,400。4 台: コントロールパネルで routed expert の 70 % を 3 ビット、30 % を 4 ビットにして（4 ビット KV、`KV_SIZE` 1,049,088）。既定の起動（routed expert をすべて 3 ビット）は 737,280。8 台の 4 ビット KV と、4 台のコントロールパネルからの起動は、それぞれ約 1,019,000 トークンのプロンプト 1 本で実測。4 ビット KV は精度が少し下がります（KL 0.0190、8 ビットでは 0.0156、`T4.ja.md`）。設定例は 819,200 と 737,280 です |
 | API | OpenAI 互換の chat API（`/v1/chat/completions`）と Anthropic の Messages API（`/v1/messages`）。既定は全アドレスの 8000 番（`0.0.0.0:8000`） |
 | リクエスト | 既定では同時に実行するのは 1 件で、さらに 32 件まで待ち行列で待ちます。`MULTI` を設定すると最大 4 つの会話をまとめて decode します |
-| drafter | MTP（チェックポイント自身の層。既定）、DFlash2（任意。同梱せず、別のライセンス）、なし |
+| drafter | MTP（重みの中の層。既定）、DFlash2（任意。同梱せず、別のライセンス）、なし |
 | コントロールパネル | 「Expert Atlas」: expert ごとの bit 幅（2/3/4/5 ビット）を決める Web ページ。4 台または 8 台 |
 | 配布の形 | コンテナイメージ（おすすめ）と、同じファイルのアーカイブ。どちらも Linux aarch64 用 |
 | ライセンス | コードは Apache-2.0。重みは GLM-5.3 License のまま。DFlash2 は独自のライセンス（CC BY-NC-ND 4.0）のまま |
@@ -52,7 +52,7 @@
 - **prefill と decode。** プロンプトはチャンクに分けて読み（prefill）、応答は 1 トークンずつ生成します（decode）。prefill の速さは計算で、decode の速さはメモリ帯域で決まります。
 - **ドラフト。** decode の各ラウンドで drafter が数トークンを提案し、モデルが 1 ステップでそれを確かめます。モデル自身が選ぶトークンだけを残すので、どちらでも応答はモデル自身のものです。
 - **会話のキャッシュ。** KV キャッシュは `KV_SIZE` 位置（KV サイズ）を 256 位置ずつのブロックに分けた 1 つのプールで、すべての会話で共有します。1 件のリクエストが届くのは最大 `CONTEXT_LENGTH` 位置（context length）で、以前の会話は空いているブロックに残ります。リクエストは、どの会話のものであってもキャッシュにある最も長い先頭部分から再開し、同じように始まる会話（同じシステムプロンプト）は共通のブロックを 1 回だけ保持します。キャッシュにあるブロックは再利用の前にリクエストのトークンと照合し、少しでも疑わしければすべての会話を捨ててリクエストを最初から計算します（「cold」）。ブロックを誤って再利用することはありません。
-- **expert。** GLM-5.3 は層 3〜77 のそれぞれに 256 個の routed expert（合計 19,200 個）を持ち、トークンごとに層あたり 8 個を選びます。チェックポイントはこれを量子化して持ちます: 8 台用はすべて 4 ビット、4 台用は半分（使われる回数の少ない方）を 3 ビット、残りの半分を 4 ビット。起動では expert ごとに別の幅でバンクから読むことができ、計画がなければすべての expert を 3 ビットで読みます。
+- **expert。** GLM-5.3 は層 3〜77 のそれぞれに 256 個の routed expert（合計 19,200 個）を持ち、トークンごとに層あたり 8 個を選びます。起動では expert ごとに別の幅でバンクから読み、計画がなければすべての expert を 3 ビットで読みます。それ以外の重みは `fiore-lab/GLM-5.3-EXL3-Base` にあります。完全なチェックポイントは expert も量子化して持ちます（8 台用はすべて 4 ビット、4 台用は半分（使われる回数の少ない方）を 3 ビット、残りの半分を 4 ビット）が、起動では読みません。
 - **Byte Resume。** モデルがテキストをトークナイザーと違う切り方にすることがあり、そのとき次のターンのプロンプトは同じバイトを別のトークン ID で持ちます。最初に違う ID より先は、プロンプトを保持している会話とバイトで比べ、キャッシュはその箇所を越えて再開します（`TF_GLM53_BYTE_RESUME`、既定で有効）。
 - **思考。** `max_tokens` は思考も数えます。既定では、思考が持てるのは、プロンプトが残した context length か、それより小さければ `max_tokens` の 90 %（`THINKING_SHARE`）までです。この上限が近づくとモデルは思考を書き直し、書き直したものが context の中で元の思考に置き換わります。上限に達するとエンジンが思考を閉じます。上限は context が持っている量に対するものなので、1 つの応答がそれより多くの思考を書くことはあります。これらの設定はエンジンの動作中に変えられます（`POST /v1/thinking`、パネルの [ REASONING CONTROL ]）。
 - **同時推論。** `MULTI` を設定すると、その数（最大 4）までの会話をまとめて decode します。その間は `POST /v1/schedule` かパネルで prefill と decode の GPU の配分を決められ、短いプロンプトを先に通せます。
@@ -63,7 +63,7 @@
 |---|---|---|
 | ノード | 4 台または 8 台。ノード確認が見つける | 4 台または 8 台。ノード確認が登録する（`glm53.nodes.conf`） |
 | expert の幅 | すべて 3 ビット（別の幅は `BITS`。`start` は直前の起動の計画） | バンク（2、3、4、5 ビット）から expert ごとに選ぶ |
-| 必要なもの | チェックポイントと 3 ビットのバンク（常に） | チェックポイント（expert 以外の重み）、3 ビットのバンク、使う幅のバンク |
+| 必要なもの | Base の重みと 3 ビットのバンク（常に） | Base の重み、3 ビットのバンク、使う幅のバンク |
 | 操作 | コマンドライン | Web ページ（起動、停止、計画、稼働中の表示、エキスパート最適化）。`./tf-glm53 start` は直前の起動の計画で起動し直します |
 
 どちらも同じ `glm53.conf`、同じサーバー、同じ API を使います。`./tf-glm53 up` はパネルのランチャーを起動してパネルのアドレスを表示し、エンジンはそこで起動します。`./tf-glm53 down` はどちらの起動でもエンジンを止めます。
@@ -88,7 +88,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 
 1. 全ノード: DGX OS（Ubuntu 24.04）、NVIDIA ドライバ 580 以降、cuBLAS 13（`libcublas-13-0`）、`libibverbs`。ノードは 1 つの RoCE v2 ネットワークにつなぎ、1 台目から全ノードにパスワードなしの ssh が通り、host key を登録してあること (`QUICKSTART.ja.md` の 1 章)。
 2. 全ノードに NCCL 2.30.7: `pip3 install --no-deps --target ~/nccl-2.30.7 nvidia-nccl-cu13==2.30.7`（pip はライブラリを展開するだけで、Python は何も実行しません）。スイッチではこれで動きますが、AArch64 の fence を入れたビルドを推奨します。リングではそのビルドが必須です（`RING.ja.md`）。
-3. チェックポイントを全ノードの同じパスに: `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`（390 GB、8 台）または `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`（344.6 GB、4 台）。Hugging Face の CLI で 1 回ダウンロードし、`rsync` で他のノードにコピーし、`./tf-glm53 verify` で確認します。チェックポイントは公式の BF16 チェックポイントから作ることもできます（2 節、`glm53/weights/`）。
+3. Base の重みと 3 ビットのバンクを全ノードの同じパスに: `fiore-lab/GLM-5.3-EXL3-Base`（21.2 GB）と `fiore-lab/GLM-5.3-EXL3-Experts-3bit`（277.9 GB）。4 台でも 8 台でも同じです。Hugging Face の CLI で 1 回ダウンロードし、`rsync` で他のノードにコピーし、`./tf-glm53 verify` で確認します。Base の重みの代わりに完全なチェックポイント（`fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`、390 GB、または `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`、344.6 GB）も使えます。どれも公式の BF16 チェックポイントから作ることもできます（2 節、`glm53/weights/`）。
 4. 1 台目のノードでアーカイブを展開し、`sha256sum -c SHA256SUMS`、合う方の設定例を `glm53.conf` にコピーして、`NODES`、`SOCKET_IFNAME`、`IB_HCA`、`NCCL_LIB`、`WEIGHTS` を設定します。
 5. `./tf-glm53 deploy`（このディレクトリを他のノードにコピー）、続いてページを使わないなら `./tf-glm53 start`（すべての expert を 3 ビットで。全ノードを確認し、ランクを起動し、サーバーを待ち、スモークテストを実行）、パネルを使うなら `./tf-glm53 up`（下）。ローカルの NVMe ドライブからの起動は約 2 分半です。
 6. `./tf-glm53 down` でエンジン（ランチャーが動いていればランチャーを通して）と全ランクを止めます。
@@ -107,7 +107,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 | `TOPOLOGY` | `full`（スイッチ）、`ring4`、または `auto`（`check` と `./tf-glm53 up` のたびに配線から判定。既知の不具合は `CONFIG.ja.md`） | `full` |
 | `SOCKET_IFNAME`、`IB_HCA`、`GID_INDEX` | 全ノードでのそのネットワークのインターフェースと RDMA デバイス、GID の番号（空なら自動選択） | 同じ |
 | `NCCL_LIB` | NCCL 2.30.7 の `libnccl.so.2`。全ノードで同じパス | 同じ |
-| `WEIGHTS` | チェックポイントのディレクトリ。全ノードで同じパス | 8x / 4x のチェックポイント |
+| `WEIGHTS` | Base の重みか完全なチェックポイントのディレクトリ。全ノードで同じパス | `~/models/GLM-5.3-EXL3-Base` |
 | `DRAFTER_KIND`、`MTP_K`、`DRAFTER` | drafter（`mtp`、`dflash2`、`none`）、MTP の 1 ラウンドのドラフト数（3）、DFlash2 のディレクトリ | `mtp`、3、空 |
 | `NAME`、`HOST`、`PORT` | API でのモデル名、待ち受けのアドレスとポート | `glm-5.3`、`0.0.0.0`、8000 |
 | `METRICS_LISTEN` | `/metrics`、`/health`、`/v1/experts/usage` だけに答える、読み取り専用の追加のアドレス | 無効 |
@@ -116,12 +116,12 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 | `KV_SIZE` | KV サイズ: KV キャッシュ全体の位置の数。すべての会話で共有する 1 つのプールで、リクエストが使わない分に以前の会話が残ります（`CONTEXT_LENGTH` + 512 以上） | 1,638,400 / 837,280 |
 | `KV` | KV キャッシュの形式、`fp8` または `fp4` | `fp8` / `fp4` |
 | `DCP`、`ROWS`、`SP_PARTS` | decode の context 並列、プロンプトのチャンクの行数、チャンクを分けるシーケンス並列の数 | 2、8,192、4 |
-| `NEED_GB` | 起動前に各ノードで使えるべきメモリ（KV サイズに応じて変わり、DFlash2 では 3 増。計算は `CONFIG.ja.md`） | 112（既定）/ 133（112 GiB を要求） |
+| `NEED_GB` | 起動前に各ノードで使えるべきメモリ（KV サイズに応じて変わり、DFlash2 では 3 増。計算は `CONFIG.ja.md`） | 112（既定）/ 115（101 GiB を要求） |
 | `MASTER_PORT`、`READY_TIMEOUT` | ランクが落ち合うポート、サーバーを待つ秒数 | 29551、900 |
 | `RUNTIME`、`IMAGE` | ランクの動かし方: `host`（既定。このディレクトリから）か `docker`（それぞれ `IMAGE` のコンテナで） | `host`、空 |
 | `MULTI`、`MULTI_WAIT` | まとめて decode する会話の数（1〜4）、リクエストがその横の空きを待てる秒数 | `0`（1 件ずつ）、600 |
 | `MULTI_DECODE_SHARE`、`MULTI_SHORT_PROMPT`、`MULTI_SHORT_PREEMPT` | `MULTI` のとき: prefill の横で decode に回す GPU の時間の割合（%）、先に通す短いプロンプトの長さ、それが実行中の prefill を追い越すかどうか | 30、8192、0 |
-| `MAX_TOKENS_SHARE`、`MAX_TOKENS` | 応答の上限（リクエストが `max_tokens` を指定しないときの値）: `CONTEXT_LENGTH` に対する割合（%）、またはそれより優先するトークン数 | 70、空 |
+| `MAX_TOKENS_SHARE`、`MAX_TOKENS` | 既定の `max_tokens`（リクエストが指定しないときの、1 回の応答の上限）: `CONTEXT_LENGTH` に対する割合（%）、またはそれより優先するトークン数 | 70、空 |
 | `THINKING_SHARE`、`THINKING_BUDGET` | 思考の上限: 割合（%）、またはそれより優先するトークン数 | 90、0 |
 | `THINKING_FOLD`、`THINKING_FOLD_SHARE`、`THINKING_FOLD_MAX` | 中間整理: 方法（`off`、`recent`、`checkpoint`、`branch`）、間隔、回数 | `off`、100、0 |
 | `THINKING_FOLD_AT_BUDGET`、`THINKING_FOLD_MARGIN` | 予算の手前の整理: するかどうかと、上限のどれだけ手前で行うか | 1、10 |
@@ -227,7 +227,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 
 | 症状 | 考えられる原因 | 対処 |
 |---|---|---|
-| `check` が `NG: files` / `weights` を出す | あるノードでディレクトリかチェックポイントが違う | `./tf-glm53 deploy`、`./tf-glm53 verify` |
+| `check` が `NG: files` / `weights` を出す | あるノードでディレクトリか重みが違う | `./tf-glm53 deploy`、`./tf-glm53 verify` |
 | `NG: NCCL(...)`、`cuBLAS-13`、`libibverbs` | そのノードにライブラリが無い | 入れる（`RUNTIME.ja.md`「問題が起きたとき」） |
 | `NG: RoCE-v2-GID` または RDMA デバイス | ポートに IPv4 の RoCE v2 のエントリが無い、または `IB_HCA` が違う | ポートにアドレスを付けるか `GID_INDEX` を設定。`rdma link`、`ibdev2netdev` |
 | `NG: GPU-busy` | 別のプロセスが GPU を使っている | それを止める（`nvidia-smi`） |
@@ -249,7 +249,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 
 - `max_tokens` は推論のトークンも数えます。指定しないリクエストには `CONTEXT_LENGTH` の 70 % が使われます。思考の上限が残りを答えのために取っておくので、`max_tokens` が小さいと答えが短くなります。`THINKING_SHARE=0` では、応答が推論の途中で終わることがあります。
 - エンジンの起動時の行は、drafter にかかわらず `drafts: on` と表示します。使っている drafter は `tf-glm53 status` が示します。
-- どの起動にもチェックポイントと 3 ビットのバンクが要ります。コントロールパネルでは、どちらのチェックポイントでもバンクと一緒に使えます。
+- どの起動にも Base の重み（または完全なチェックポイント）と 3 ビットのバンクが要ります。
 - 並べ替えの測定は、BF16 モデルではなく、すべて 4 ビットのモデルに対するものです。`ATLAS-TESTS.ja.md` にどちらかを書いています。
 - chat template の user のターンの中では、モデルは利用者自身の文章をうまく予測しません。これはプロンプトに対する KL ダイバージェンスのように利用者の文章を予測するときの話で、応答の話ではありません。`ATLAS-TESTS.ja.md` の測定は、プロンプトのトークンを template の冒頭を除いて採点しています（「測り方」）。
 - プールの会話のキャッシュには、`CONTEXT_LENGTH` + 512 以上の `KV_SIZE` が必要です。

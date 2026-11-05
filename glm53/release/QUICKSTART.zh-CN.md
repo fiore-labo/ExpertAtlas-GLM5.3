@@ -23,7 +23,7 @@
 | ssh | 从第一个节点到每个节点，包括它自己，使用没有口令的密钥，并预先登记 host key（见下文） |
 | Docker 权限 | 该用户能在每个节点上运行 `docker`（`docker` 组） |
 | 内存 | 启动前每个节点约有 115 GiB 空闲，GPU 上没有其他程序 |
-| 磁盘 | 两项必需的下载，每个节点：4 台时至少 622.5 GB，8 台时至少 667.8 GB |
+| 磁盘 | 两项必需的下载，每个节点至少 299.1 GB（4 台和 8 台相同） |
 
 发布的镜像包含带 AArch64 fence 的 NCCL，在交换机和环上都读取它（`RING.zh-CN.md` 的“fenced NCCL”）。
 
@@ -72,23 +72,26 @@ done
 
 ## 2. 下载权重
 
-**必需的有两项：检查点和 3 bit bank。** 即使打算使用其他位宽，没有这两项引擎也不会启动。每个节点上的路径必须相同。
+**必需的有两项：Base 权重和 3 bit bank。** 即使打算使用其他位宽，没有这两项引擎也不会启动。每个节点上的路径必须相同。
 
 | 内容 | Hugging Face 仓库 | 大小 | 默认目录 | 选项 |
 |---|---|---|---|---|
-| 检查点，4 节点（**必需**） | `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks` | 344.6 GB | `~/models/GLM-5.3-EXL3-4x-DGX-Sparks` | `WEIGHTS` |
-| 检查点，8 节点（**必需**） | `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks` | 389.9 GB | `~/models/GLM-5.3-EXL3-8x-DGX-Sparks` | `WEIGHTS` |
+| Base 权重（**必需**） | `fiore-lab/GLM-5.3-EXL3-Base` | 21.2 GB | `~/models/GLM-5.3-EXL3-Base` | `WEIGHTS` |
 | 3 bit bank（**必需**） | `fiore-lab/GLM-5.3-EXL3-Experts-3bit` | 277.9 GB | `~/models/GLM-5.3-EXL3-Experts-3bit` | `BANK_3` |
 | 2 bit bank（可选） | `fiore-lab/GLM-5.3-EXL3-Experts-2bit` | 187.3 GB | `~/models/GLM-5.3-EXL3-Experts-2bit` | `BANK_2` |
 | 4 bit bank（可选） | `fiore-lab/GLM-5.3-EXL3-Experts-4bit` | 368.5 GB | `~/models/GLM-5.3-EXL3-Experts-4bit` | `BANK_4` |
 | 5 bit bank（可选） | `fiore-lab/GLM-5.3-EXL3-Experts-5bit` | 459.1 GB | `~/models/GLM-5.3-EXL3-Experts-5bit` | `BANK_5` |
+| 完整检查点，4 节点（可选） | `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks` | 344.6 GB | 无 | `WEIGHTS` |
+| 完整检查点，8 节点（可选） | `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks` | 389.9 GB | 无 | `WEIGHTS` |
 | DFlash2（可选，另有许可证） | `incoai/GLM-5.3-DFlash2`（`RUNTIME.zh-CN.md` 中 DFlash2 一节） | | 无 | `DRAFTER` |
+
+Base 权重是路由专家以外的全部权重，路由专家在启动时从 bank 读取。完整检查点还包含这些专家，但启动并不需要它们。如果已有完整检查点，用 `WEIGHTS` 指定即可直接使用。8 节点检查点还可以兼作 4 bit bank（`RUNTIME.zh-CN.md` 的“控制面板”）。
 
 下载一次，再复制到其他节点。如果 `python3 -m venv` 失败，请安装 `python3-venv` 软件包。四个节点时：
 
 ```sh
 python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
-for r in EXL3-4x-DGX-Sparks EXL3-Experts-3bit; do
+for r in EXL3-Base EXL3-Experts-3bit; do
   D=~/models/GLM-5.3-$r
   ~/hf-cli/bin/hf download fiore-lab/GLM-5.3-$r --local-dir $D
   for n in NODE2 NODE3 NODE4; do    # 其他三个节点
@@ -143,7 +146,7 @@ THEN: docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 
 ```sh
 docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
-  -e WEIGHTS=/data/models/checkpoint \
+  -e WEIGHTS=/data/models/base \
   -e BANK_3=/data/models/3bit \
   -e BANK_4=/data/models/4bit \
   -e BITS=4 -e CONTEXT_LENGTH=131072 \
@@ -154,7 +157,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
 
 | 选项 | 默认值 | 含义 |
 |---|---|---|
-| `WEIGHTS` | `~/models/GLM-5.3-EXL3-4x-DGX-Sparks`（8 节点为 `-8x-`） | 检查点。必需 |
+| `WEIGHTS` | `~/models/GLM-5.3-EXL3-Base` | Base 权重或完整检查点。必需 |
 | `BANK_3` | `~/models/GLM-5.3-EXL3-Experts-3bit` | 3 bit bank。必需 |
 | `BANK_2`、`BANK_4`、`BANK_5` | `~/models/GLM-5.3-EXL3-Experts-<N>bit` | 其他 bank。可选 |
 | `DRAFTER` | 空 | DFlash2 的模型，与 `DRAFTER_KIND=dflash2` 一起使用 |

@@ -472,7 +472,7 @@ node_items() {
     elif [ "$TOPOLOGY" = ring4 ] && [[ $o != *"ncclsha=$NCCL_SHA256"* ]]; then item "$r" nccl fail "$nc, not the fenced build" "NCCL_LIB and NCCL_SHA256: the fenced NCCL (RING.md)"
     else item "$r" nccl ok "$nc" ""; fi
   fi
-  if [ -n "$nohead" ]; then item "$r" weights fail "no weights at $WEIGHTS on the head" "WEIGHTS: the control panel's launch settings, or glm53.conf"
+  if [ -n "$nohead" ]; then item "$r" weights fail "no weights at $WEIGHTS on the head" "WEIGHTS: the control panel's launch settings, or the settings file"
   elif [[ $o == *"weights=$wsum"* ]]; then item "$r" weights ok "as the head" ""; else item "$r" weights fail "differs from the head" "the files at $WEIGHTS as on the head"; fi
   if [[ $o == *"files=$sums"* ]]; then item "$r" package ok "SHA256SUMS" ""; else item "$r" package fail "differs" "tf-glm53 deploy"; fi
   echo "$o" | grep -o 'ver=[^ ]*' | cut -d= -f2 > "$tmp/v$r"
@@ -482,11 +482,12 @@ cmd_check() {
   local tmp ng=0 n need; tmp=$(mktemp -d)
   local sums; sums=$(cd "$PKG" && eval "$PKGSUM") || { echo "  SHA256SUMS does not match here"; rm -rf "$tmp"; echo "check: NG"; return 1; }
   # GiB a node must have available before the start (measured with CONTEXT_LENGTH 819,200 and KV_SIZE 1,638,400: the
-  # ranks use about 108 with MTP or no drafts, 111 with DFlash2), 4 to spare; 2.7 less for each 100,000 positions
-  # KV_SIZE is below 1,638,400 (the KV's memory follows all its positions: a shorter CONTEXT_LENGTH with the same KV_SIZE
-  # needs no more)
+  # ranks use about 108 with MTP or no drafts, 111 with DFlash2), 4 to spare; less what the positions KV_SIZE is below
+  # 1,638,400 hold in this KV format (fp8 2.55 GiB each 100,000, fp4 1.73: the KV's memory follows all its positions, so a
+  # shorter CONTEXT_LENGTH with the same KV_SIZE needs no more)
   need=${NEED_GB:-112}; [ "$DRAFTER_KIND" = dflash2 ] && need=$((need + 3))
-  need=$(( need - (1638400 - CONTEXT - STORE) * 27 / 1000000 ))
+  local kvrow=27424; [ "$KV" = fp4 ] && kvrow=18576
+  need=$(( need - (1638400 - CONTEXT - STORE) * kvrow / 1073741824 ))
   # 2 and 3 nodes: NEED_GB as CONF gives it, for its CONTEXT_LENGTH and KV_SIZE
   case $WORLD in 2|3) need=${NEED_GB:-$need} ;; esac
   # MULTI: 1 GiB more for the conversations decoded together (CONCURRENT.md §15.6, at idle; the panel's plan below counts
@@ -501,7 +502,7 @@ cmd_check() {
   # no weights on the head: NG, every other item checked all the same (a lane whose WEIGHTS is set later, in the
   # control panel's launch settings, registers its nodes first)
   local wsum nohead=""; wsum=$(cd "$WEIGHTS" 2>/dev/null && { find . -maxdepth 1 -type f -printf '%f %s\n' | LC_ALL=C sort | sha256sum; sha256sum config.json; } | sha256sum | cut -c1-64) \
-    || { echo "  no weights at $WEIGHTS on the head (WEIGHTS: the control panel's launch settings, or $CONF)"; wsum=""; nohead=1; ng=1; }
+    || { echo "  no weights at $WEIGHTS on the head (WEIGHTS: the control panel's launch settings, or the settings file)"; wsum=""; nohead=1; ng=1; }
   if [ -z "$nohead" ] && [ "$DRAFTER_KIND" = mtp ] && ! grep -q '\.eh_proj\.weight"' "$WEIGHTS/model.safetensors.index.json" 2>/dev/null; then
     echo "  the checkpoint at $WEIGHTS has no MTP layer (eh_proj): use one that has it, or set DRAFTER_KIND=none"; ng=1
   fi

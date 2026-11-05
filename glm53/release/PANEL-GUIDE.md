@@ -48,13 +48,13 @@ The circle shows the 19,200 routed experts: layers 3 to 77 run from the inside o
   its manifest. A width whose bank is missing on any node shows No data with the node and what it lacks. It cannot be
   planned: its row in the table shows No data and takes no share.
 - **Memory** ([ NODE ]): each node's memory for the plan (expert, Other weights, KV, Work, Margin) and the verdict:
-  Fits, Tight or Does not fit. KV FP4 / FP8 shows the KV size each format would allocate (tokens, and GiB a node); press
+  Can start, Can start (little room) or Not enough memory. KV FP4 / FP8 shows the KV size each format would allocate (tokens, and GiB a node); press
   one to choose it. The KV always takes all the room the plan leaves: Context length for one conversation, the rest for
   earlier conversations. Keep for the OS sets how much each node keeps free.
 - **Context length**: the longest request (prompt and reply) the start allows, in tokens: 131K, 262K, 524K, glm53.conf's
   CONTEXT_LENGTH, or Max (the most the plan leaves room for in the chosen KV format, less what the engine needs beyond it: it
   is never the whole KV size, the pool cache keeping at least 512 tokens). A size that does not fit is greyed; a
-  context the launcher had to cut is shown under the row. Max is the default. The launcher finds Max from the memory a
+  context the launcher had to cut is shown under the row. Max is the default until the panel has written one: every choice on this screen goes into glm53.conf as it is made (Max as its number, at the start), and the next page opens on it. The launcher finds Max from the memory a
   start with that drafter took on this lane (measured each start, a drafter at a time); until then it plans on built-in
   sizes with 2 GiB more kept, so Max is shorter (est.); the KV rows say est. or Measured to the left of their size. The measurement is taken just after the start, with nothing
   running, so at Max a node can dip a little under what it keeps for the OS while requests run. The i beside the name
@@ -127,15 +127,15 @@ The circle shows the 19,200 routed experts: layers 3 to 77 run from the inside o
   without the launcher (no [ NODE ] card) shows the same in a card of its own, [ GPU SPLIT ], with Concurrent in its
   head.
 - **[ REASONING CONTROL ]** (under [ NODE ], as the GPU split; the thinking's settings that change while the engine runs; the API and the settings keep their names, `/v1/thinking` and `THINKING_*`):
-  Thinking limit, a slider from 5% to 100% (No limit) of each reply's limit: at it the engine has the model close
+  Thinking limit, a slider from 5% to 100% (No limit) of max_tokens: at it the engine has the model close
   its thinking and answer in the rest, so a short reply (a harness's max_tokens) keeps room for its answer too; the
-  split of the server's reply limit shows under it, the start value as a dot. Organize midway Yes (checkpoint) / No;
-  Organize every, a slider from 10% to 100% of the reply's limit (1,024 tokens at least; the right end 100%, the default: no
+  start value shows as a dot. Organize midway Yes (checkpoint) / No;
+  Organize every, a slider from 10% to 100% of max_tokens (1,024 tokens at least; the right end 100%, the default: no
   organizing until the limit), greyed without organizing midway and otherwise below the thinking limit; Organize at the close Yes (the share of the
   thinking limit it had, else glm53.conf's, else 100%) / No. Each takes the requests that start after it (Applying…, then Applied;
   refused: back, the reason in red) and is written to glm53.conf by the launcher, so the next start keeps it; a
   request's own thinking budget or summaries come first. On the launch screen (the engine stopped), or with an engine
-  that cannot change them while running, the same card writes glm53.conf's start values at once (From the next
+  that cannot change them while running, the same card saves the values for the next start at once, in glm53.conf (From the next
   start). The engine settings screen sets the same four; either shows the other's change.
 - **[ BIT ALLOC ]**: the bits loaded, with the allocation the start used in the head (New · unsaved for a new plan).
   Save keeps them under a name.
@@ -167,8 +167,7 @@ The circle shows the 19,200 routed experts: layers 3 to 77 run from the inside o
 
 The switch at the top right, Inference (Launch while stopped) | Engine settings, opens the settings that need a restart,
 in glm53.conf (a launcher without them shows no switch). The settings that change while running stay on the inference
-screen: the GPU split (with Use these at the next start too, which writes the values in use as glm53.conf's start
-values without a restart), [ REASONING CONTROL ] (its changes written to glm53.conf as they apply) and Optimise experts.
+screen: the GPU split, [ REASONING CONTROL ] (its changes written to glm53.conf as they apply) and Optimise experts.
 
 - Each row has its name, an (i) that opens what it acts on, what is set, why, an example and what it goes with (and the
   default), Changed while it differs from glm53.conf, and the key. A value against its rule (the same checks as
@@ -176,22 +175,24 @@ values without a restart), [ REASONING CONTROL ] (its changes written to glm53.c
 - **KV and context length**: Context length (CONTEXT_LENGTH: one request's longest) and KV size (KV_SIZE: the whole
   KV cache, one pool every conversation shares; a start from the panel always takes all the room the plan leaves, so
   this is for `tf-glm53 up`) and the KV format.
-- **Thinking and answer sizes**: a reply's limit (MAX_TOKENS_SHARE, a slider: a share of the context length, 70% by default,
+- **Thinking and answer sizes**: max_tokens, one reply's limit (MAX_TOKENS_SHARE, a slider: a share of the context length, 70% by default,
   for a request that names no max_tokens; the client's own max_tokens comes first, and an older glm53.conf's MAX_TOKENS
   until the slider is saved, which clears it) and the
   thinking's limit as a share of it (THINKING_SHARE; saving it clears an older THINKING_BUDGET). The thinking's limit,
-  Organize midway, Organize every (THINKING_FOLD_SHARE) and organizing at the close are tagged At once: while the
+  Organize midway, Organize every (THINKING_FOLD_SHARE) and organizing at the close are tagged Applied at once: while the
   engine runs a save applies them at once (the message says which), and the inference screen's [ REASONING CONTROL ] sets the
   same values. With organizing midway the limits are tagged Virtual: they count the
   tokens written, and the thinking that takes out of the KV still counts, so they may pass the context length. The (i) beside the group's name draws a reply's split from the values set, as shares: the sizes change with each
   prompt. Organize midway (THINKING_FOLD, and the size target as a share of the thinking it organizes, 70% by default, midway and at the close) and organizing at the close (Yes or No, No by default; with Yes, organize after a thinking of N% of the thinking limit or more, counted since the last organizing, 100% to start from: THINKING_FOLD_AT_CLOSE_SHARE, 0 for No) are their own groups. Notice of what is left is Yes or No too (with Yes, every how many thinking tokens, 5,000 to start from: THINKING_NOTICE, 0 for No).
-- While the engine runs, the drafter, concurrent inference, KV format, context length, KV size and memory kept show what it took; when glm53.conf has another value, Next start: X beside them says so. Only a row you change is saved; while stopped they show glm53.conf.
+- While the engine runs, the drafter, concurrent inference, KV format, context length, KV size and memory kept show what it took; a row saved since the start has Next start: X beside it. Only a row you change is saved; while stopped they show glm53.conf.
 - The weights, the DFlash2 model and the nodes are shown here and changed where they are checked: the launch screen's
   [ WEIGHTS ] (Check and save: saved once every node passes; a failed row says why and nothing is saved) and the node check. The API port changes only while the engine is stopped; the panel's port once the
   launcher starts again. Advanced (development) holds the prompt chunk, SP, the token fixes and
   EXTRA_ENV.
-- **Save** writes the changed keys (glm53.conf copied aside first as glm53.conf.bak-<time>). While the engine runs it
-  keeps its values: the rows saved say Saved · next start. **Save and restart** asks once, then the stop's own question
+- A change is written as it is made: a choice at once, a box when you leave it or press Enter, a slider when you let go
+  (in glm53.conf, with a copy beside it as glm53.conf.bak-<time> at most every ten minutes). A value a rule refuses is not written and says why. Rows a rule joins
+  (concurrent inference with DFlash2 and its saved states, for one) are written together once they fit; Revert takes back what is waiting. While the engine runs it
+  keeps its values: the rows say Saved · next start. **Restart to apply** asks once, then the stop's own question
   (save this run's usage under a name or not), and the launcher stops the engine and starts it again with the saved
   settings and the same bits.
 
