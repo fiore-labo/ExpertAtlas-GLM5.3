@@ -329,7 +329,7 @@ SETTINGS = {
     "LAUNCH_DROP_CACHES": ("0", SET_BOOL, "start"),
     "HOST": ("0.0.0.0", SET_TEXT(SET_IPV4, 15), "start"),
     "PORT": ("8000", SET_INT(1, 65535), "stopped"),
-    "METRICS_LISTEN": ("", SET_TEXT(r"^(?:(?:\[[0-9A-Fa-f:.]+\]|[^\]:\[\s]+):[0-9]{1,5})?$", 64), "start"),
+    "METRICS_LISTEN": ("", SET_TEXT(r"^(?:(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+):[0-9]{1,5})?$", 64), "start"),
     "LOG_KEEP_MB": ("8", SET_INT(1, 1024), "start"),
     "LAUNCHER_PORT": ("8010", SET_INT(1, 65535), "launcher"),
     "ROWS": ("8192", SET_INT(256, 65536, step=256), "start"),
@@ -489,9 +489,15 @@ def nodes_file_of(conf):
     return (conf[:-5] if conf.endswith(".conf") else conf) + ".nodes.conf"
 
 
+# what glm53.conf, a shell script every command sources, holds as plain text: nothing a shell would run or expand
+SET_LINE_VALUE = re.compile(r'[A-Za-z0-9_.:/,=+@%~\[\]-]*|"[A-Za-z0-9_.:/,=+@%~ -]*"')
+
+
 def set_line(text, key, value):
     """glm53.conf's text with KEY=value: its one KEY= line replaced (a comment after the value kept), or appended when
     it has none."""
+    if not SET_LINE_VALUE.fullmatch(str(value)):
+        raise Fail(f"{key}: not a value glm53.conf can hold as plain text")
     pat = re.compile(rf"^{key}=(?:[^#\n]*?)(\s+#.*)?$", re.M)
     n = len(pat.findall(text))
     if n > 1:

@@ -409,7 +409,9 @@ cmd_deploy() {
   local n tmp want; tmp=$(mktemp -d)
   want=$(cd "$PKG" && eval "$PKGSUM") || { echo "SHA256SUMS does not match here"; return 1; }
   for n in "${NODES[@]:1}"; do
-    ( on "$n" "mkdir -p $PKG" && rsync -a --exclude logs --exclude glm53.conf --exclude '*.nodes.conf' "$PKG/" "$n:$PKG/" \
+    # launch/ and atlas/ are the lane's own data (usage, panel settings, allocations): a node once a head keeps its own.
+    # Nothing there ships, and a start copies its plan to every node itself
+    ( on "$n" "mkdir -p $PKG" && rsync -a --exclude logs --exclude glm53.conf --exclude '*.nodes.conf' --exclude /launch/ --exclude /atlas/ "$PKG/" "$n:$PKG/" \
       && [ "$(on "$n" "cd $PKG && $PKGSUM")" = "$want" ] \
       && echo "  ok $n" || { echo "  FAIL $n"; : > "$tmp/fail"; } ) &
   done; wait
