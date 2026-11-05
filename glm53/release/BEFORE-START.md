@@ -87,7 +87,8 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
 ```
 
 - **On the `docker run` line:** values are saved in `~/expertatlas/glm53.conf` and used by later starts. `KV_SIZE` and `BITS`
-  count for that start only.
+  count for that start only. The line does not keep the widths chosen on the start screen: without `BITS` or `ALLOC` it starts every
+  expert at 3 bits. `./tf-glm53 start` starts with the last start's plan.
 - **On the start screen:** choices count for that start only and are not saved. The engine settings screen changes the defaults.
 - **A running engine:** options do not change it. Stop it, then run the line again.
 - **A wrong name:** a name it does not know gives a `STOP`, which suggests the nearest name.

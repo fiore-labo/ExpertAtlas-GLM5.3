@@ -78,7 +78,8 @@ done
 
 `NODE1` and the others are the addresses the launcher uses. On a switch, each node's ConnectX-7 address on the `enp1s0f…`
 half (`172.16.88.N` above): the first node finds the others by trying ssh's port on that /24. On a ring, each node's LAN
-address.
+address, the LAN being the interface of its default route. If your management network is another interface, write the node
+settings by hand (`RING.md`, "Settings").
 
 ## 2. Download the weights
 
@@ -191,7 +192,8 @@ The start:
 | `RESERVE_GB` | `4` | The memory each node keeps for the system |
 
 Every other key of the engine settings works the same way, for example `MAX_TOKENS`, `THINKING_SHARE`, `THINKING_FOLD_PROMPT`,
-`NAME` or `HOST`. `CONFIG.md` gives each key's meaning and default.
+`NAME` or `HOST`. `CONFIG.md` gives each key's meaning and the keys that are not options. Its defaults are `tf-glm53`'s: for this line, the
+tables here come first.
 
 This install:
 
@@ -205,7 +207,8 @@ This install:
 Good to know:
 
 - Values you give are saved in `~/expertatlas/glm53.conf` and stay until you give another value. `KV_SIZE` and `BITS` count
-  for that start only.
+  for that start only. Widths are not kept: without `BITS` or `ALLOC`, the line starts every expert at 3 bits, whatever the
+  dashboard chose.
 - `TOPOLOGY`, `SOCKET_IFNAME` and `IB_HCA` are not options: the node check decides them from the cabling.
 - Options do not change a running engine. Stop it first, then run the line. The output says so when it ignored any.
 - To keep the API to the first node, add `-e HOST=127.0.0.1`. `LAUNCHER_HOST`, for the dashboard and the control API, is not
@@ -234,7 +237,9 @@ cd ~/expertatlas
 ./tf-glm53 launcher stop     # stops the launcher too, if you want
 ```
 
-To start again, run the same `docker run` line. The nodes, the weights' locations and your settings are remembered.
+To start again, run the same `docker run` line. The nodes, the weights' locations and your settings are remembered, but not
+the widths chosen in the dashboard: the line starts every expert at `BITS`, 3 by default. To start with the last start's plan,
+run `./tf-glm53 start` instead, or give a saved allocation with `-e ALLOC=NAME`.
 
 ## 7. Common STOP messages
 
@@ -247,7 +252,8 @@ To start again, run the same `docker run` line. The nodes, the weights' location
 | `no other node answers over ConnectX-7` | Check the cables and the addresses (section 1) |
 | `its host key is not known here`, `it refuses this node's ssh key` | Do the ssh steps of section 1 for that address |
 | `N free worker nodes found` | Choose them with `-e NODES="ADDR ADDR ADDR"` |
-| `the ring is none` | Every node needs `lldpd` (section 1). Check the cables and ssh too |
+| `no ring found`, `the ring is open` | Every node needs `lldpd` (section 1). Check the cables and ssh too |
+| `its LAN address is not known here` | From the first node, ping that node's LAN address, then run the line again. If it still stops, write the node settings by hand (`RING.md`, "Settings") |
 | `port N answers another lane's launcher` | Stop that launcher, or add `-e PORT=N` |
 | `does not fit with context length N` | Add a smaller `CONTEXT_LENGTH` or a narrower `BITS`, or free the nodes' memory |
 | `not an option` | Check the spelling. The message suggests the nearest name |

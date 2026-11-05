@@ -2,7 +2,9 @@
 
 # glm53.conf 的设置项
 
-使用 `docker run ... IMAGE up` 时，这里的每一项都可以用 `-e 项目=值` 指定（`QUICKSTART.zh-CN.md`）。
+使用 `docker run ... IMAGE up` 时，引擎设置中的项目可以用 `-e 项目=值` 指定（`QUICKSTART.zh-CN.md`）。以下项目会以 `not an option` 停止，请写入 `~/expertatlas/glm53.conf`：`GID_INDEX`、`RUNTIME`、`NCCL_LIB`、`EXPERT_LIVE`、`LOG_LISTEN`、`CONTEXT`、`STORE`、`THINKING_FOLD_KEEP`、`NEED_GB`、`LAUNCHER_HOST`、`ATLAS_DIR`、`LAUNCH_SNAPSHOTS`。`TOPOLOGY`、`SOCKET_IFNAME` 和 `IB_HCA` 由节点检查决定。
+
+下面的默认值是 `tf-glm53` 的默认值。无论节点数多少，`docker run ... IMAGE up` 都根据 `glm53.t4.conf.example` 写入 `glm53.conf`，所以初始值为 `CONTEXT_LENGTH` 737280、`KV_SIZE` 837280、`KV` fp4、`ROWS` 16384、`NEED_GB` 133，启动时的 KV 大小为 `max`。
 
 `glm53.conf` 保存一条通道（lane）的设置：节点、网络、权重、草稿模型、服务器、内存和控制面板。它是一个普通的 shell 文件，由你手工编写和编辑，放在第一个节点上 `tf-glm53` 所在的目录中。请从 `glm53.t4.conf.example`（四节点）或 `glm53.conf.example`（八节点）开始：复制为 `glm53.conf`，填写节点、网络设备和路径；其余项目在示例中已是实测值。
 

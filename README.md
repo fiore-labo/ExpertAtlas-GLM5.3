@@ -38,9 +38,9 @@ sit together at the top level.
   `CONTEXT_LENGTH=1048576` with `KV_SIZE=2097152` on the 4-bit KV cache (`KV=fp4`, `NEED_GB=100`; about 23 GiB a node
   to spare), or `KV_SIZE=1638400` on the 8-bit one. Four nodes: `CONTEXT_LENGTH=1048576` from the control panel with
   3 bits for 70 % of the routed experts and 4 bits for the rest (`KV=fp4`, `KV_SIZE=1049088`: the context length and
-  512 more, the least the pool takes; about 7.5 GiB a node to spare, enough for a live re-sort); the four-node
-  checkpoint alone takes `CONTEXT_LENGTH=819200` `KV_SIZE=837280`. Each was measured with one prompt of about
-  1,019,000 tokens. The 4-bit KV cache costs some accuracy (KL 0.0190 against 0.0156 with the 8-bit cache, same
+  512 more, the least the pool takes; about 7.5 GiB a node to spare, enough for a live re-sort); a default
+  start, every routed expert at 3 bits, takes `CONTEXT_LENGTH=737280`. Eight nodes on the 4-bit KV cache and four nodes from
+  the control panel were each measured with one prompt of about 1,019,000 tokens. The 4-bit KV cache costs some accuracy (KL 0.0190 against 0.0156 with the 8-bit cache, same
   weights: [glm53/release/T4.md](glm53/release/T4.md)); the speeds below are with the 8-bit cache on eight nodes. The
   conf examples ship with context lengths of 819,200 and 737,280 and KV sizes of 1,638,400 and 837,280 (the KV size is
   the whole KV cache, one pool every conversation shares: a request takes up to the context length, and the rest keeps
@@ -75,7 +75,7 @@ sit together at the top level.
 
 - **One line to a running engine:** `docker run ... IMAGE up` writes the release to the first node, finds the nodes,
   looks for the weights, starts the engine and sends one request. It ends in `READY` with the addresses, or in `STOP`,
-  `FIX` and `THEN`, which say what to do next. Every setting is a `-e NAME=VALUE` option
+  `FIX` and `THEN`, which say what to do next. Every setting of the engine settings screen is a `-e NAME=VALUE` option
   ([QUICKSTART](glm53/release/QUICKSTART.md)).
 - **Four nodes as a ring**, with no switch ([RING](glm53/release/RING.md)).
 - **NCCL with the AArch64 fence** in the image, on a switch and on a ring: NVIDIA/nccl#2393, which no NCCL release has
@@ -250,7 +250,7 @@ for a single start.
 **Measured with release r2-102, with the GPU clock capped at 2.1 GHz (2,100 MHz) on every node.** The engine has changed
 since, and these numbers have not been measured again for this release. One request at a time with a coding prompt not
 yet cached (reasoning effort low, up to 4,000 reply tokens), the settings of `glm53.conf.example` (eight nodes, FP8 KV
-cache) and `glm53.t4.conf.example` (four nodes, 4-bit KV cache), and Fiore-lab's published checkpoints. Speeds differ with the environment (the checkpoint, the prompt, the clocks): take these numbers as a guide. `packaging/RUNTIME.md` gives the conditions in full.
+cache) and `glm53.t4.conf.example` (four nodes, 4-bit KV cache), and Fiore-lab's published checkpoints with their own widths: every routed expert at 4 bits on eight nodes, half at 3 and half at 4 bits on four. A default start loads every expert at 3 bits, which these rows did not measure. Speeds differ with the environment (the checkpoint, the prompt, the clocks): take these numbers as a guide. `packaging/RUNTIME.md` gives the conditions in full.
 
 | Nodes | Prompt | MTP (k=3): time to first token / decode | DFlash2: time to first token / decode |
 |---|---|---|---|
@@ -266,16 +266,17 @@ cache) and `glm53.t4.conf.example` (four nodes, 4-bit KV cache), and Fiore-lab's
 KL divergence of this recipe's output distributions from the original BF16 model's (the official BF16 weights run by
 the official implementation, computed in FP32), with this recipe's serving configurations:
 
-- Eight nodes (FP8 KV cache, DCP 2; measured on the same weights with an earlier build of this engine): four 2,048-token texts (dialogue,
+- Eight nodes (the eight-node checkpoint, every routed expert at 4 bits, FP8 KV cache, DCP 2; measured on the same weights with an earlier build of this engine): four 2,048-token texts (dialogue,
   legal, prose, reasoning), the last 1,023 positions each, five runs: mean 0.0133 (0.0128 to 0.0146); the top-1 token
   agrees at about 96%.
 - Eight nodes, four 8,192-token texts (two English, two code), by position range: 0.012 (positions 1,024 to 2,047),
   0.018, 0.019 and 0.013 (6,144 to 8,190). For scale, the official BF16 weights computed in BF16 instead of FP32 differ
   from the same reference by 0.007 to 0.010 over the same ranges.
-- Four nodes (the four-node checkpoint, 4-bit KV cache, DCP 2), four 8,192-token texts by the same position ranges:
+- Four nodes (the four-node checkpoint's own widths, half at 3 and half at 4 bits, 4-bit KV cache, DCP 2), four 8,192-token texts by the same position ranges:
   0.019 (positions 1,024 to 2,047), 0.032, 0.029 and 0.019 (6,144 to 8,190).
 - Expert Atlas's widths, every routed expert at one width with the other weights as above, the same four texts,
   positions 6,144 to 8,190: 2 bits 0.0517, 3 bits 0.0203, 4 bits 0.0127 (four nodes), 5 bits 0.0114 (eight nodes).
+  A default start loads every expert at 3 bits.
   At the same memory, a mix with 2-bit experts was 13 to 30 % further from the reference than one without, and 5-bit
   experts paid for by moving others down to 3 bits gained nothing measurable.
 

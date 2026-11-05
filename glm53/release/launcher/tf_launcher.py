@@ -3642,8 +3642,8 @@ class Servers:
         return default_route()[0] or self.ifname
 
     def lan(self):
-        """The head's address on the LAN interface (lan_ifname) and its network: the LAN the hosts are read at (at
-        most a /22)."""
+        """The head's address on the LAN interface (lan_ifname) and its network: the LAN the hosts are read at. The
+        network only says which addresses are on the LAN: nothing sweeps it, whatever its size."""
         ifn = self.lan_ifname()
         if not ifn:
             raise Fail("no LAN interface: SOCKET_IFNAME is not set and there is no default route")
@@ -3655,8 +3655,6 @@ class Servers:
             f = line.split()
             if "inet" in f:
                 i = ipaddress.ip_interface(f[f.index("inet") + 1])
-                if i.network.num_addresses > 1024:
-                    raise Fail(f"{ifn}: {i.network} is larger than a /22")
                 return str(i.ip), i.network
         raise Fail(f"{ifn}: no IPv4 address on this node")
 

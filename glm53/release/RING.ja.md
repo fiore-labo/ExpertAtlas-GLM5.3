@@ -104,6 +104,8 @@ NCCL_LIB=$HOME/nccl-fenced/libnccl.so.2.30.7                          # fence �
 NCCL_SHA256=<その sha256>
 ```
 
+`docker run ... IMAGE up` がリングを見つけられないときは、`TOPOLOGY`、`NODES`、`SOCKET_IFNAME`、`IB_HCA` の 4 行を `~/expertatlas/glm53.nodes.conf` に書いて (ディレクトリは最初の実行で作られます)、もう一度実行します。イメージには fence 入りの NCCL が入っているので、`NCCL_LIB` と `NCCL_SHA256` は要りません。
+
 `./tf-glm53 check` がリングを確かめます: ノードがリングの順に並ぶこと、線ごとにサブネットが 2 つあること、向かいの
 ノードとサブネットを共有しないこと、どのデバイスにも IPv4 の RoCE v2 の番地があること。向かいのノードへ直接届く
 設定は断ります。

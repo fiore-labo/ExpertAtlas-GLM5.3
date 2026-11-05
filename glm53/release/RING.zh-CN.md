@@ -87,6 +87,8 @@ NCCL_LIB=$HOME/nccl-fenced/libnccl.so.2.30.7                          # fenced N
 NCCL_SHA256=<its sha256>
 ```
 
+`docker run ... IMAGE up` 找不到环时，把 `TOPOLOGY`、`NODES`、`SOCKET_IFNAME` 和 `IB_HCA` 这四行写入 `~/expertatlas/glm53.nodes.conf`（该目录在第一次运行时创建），再运行一次。镜像包含 fenced NCCL，因此不需要 `NCCL_LIB` 和 `NCCL_SHA256`。
+
 `./tf-glm53 check` 会确认环：节点按环的顺序排列，每条链路两个子网，不与对面节点共享子网，每个设备都有 IPv4 RoCE v2 地址。它拒绝会直接连到对面节点的设置。
 
 用 `TOPOLOGY=auto` 代替 `ring4` 时，每次 `check` 和启动都会判定连线（`./tf-glm53 topology` 或 `--json` 显示判定结果）：连成环的四个节点取 `ring4`，NODES 排成环的顺序（rank 0 不变），`IB_HCA` 使用四个 RDMA 设备，`SOCKET_IFNAME` 使用 rank 0 地址所在的接口，因此这两项可以不写。相同设置接在交换机上时取 `full`。两者都不是的连线（线缆拔出、一个半边断开、一个节点的两根线缆接反、一对对面节点在同一个 /24 上）会被拒绝，并指出要修正的地方，不会自动退回到别的方式。

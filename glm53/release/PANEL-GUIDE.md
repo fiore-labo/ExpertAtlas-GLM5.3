@@ -70,8 +70,8 @@ The circle shows the 19,200 routed experts: layers 3 to 77 run from the inside o
   every count's ticks); the workers the lane uses now are always there and are deleted once unticked and saved. Node count (4 or 8, when the launcher offers both) picks the count. Check copies the package
   to the head and the ticked workers (tf-glm53 deploy), then runs tf-glm53 check on them (ssh, network, memory, NCCL,
   the files; ✓ or ✗ a node, with the reason); it takes a while. Save, once every node of that list passed, writes
-  NODES to glm53.conf for the next start (a copy of the old file kept beside it); saving another count moves the lane
-  to it. Beside a greyed Save the editor says why. The addresses are the ConnectX-7 ports' (the ones NCCL uses), and
+  the nodes to glm53.nodes.conf for the next start, and leaves glm53.conf as it is (a copy of the old node file kept beside it); saving another count moves the lane
+  to it. Beside a greyed Save the editor says why. The addresses are the ConnectX-7 ports' on a switch (the ones NCCL uses) and the LAN's on a ring, and
   every bank must be on every node. Until a start on a new count has been measured, the plans are estimates.
 - **Start**: press it twice (Start, then Confirm within 8 s). The circle lights each layer as it loads (real: the engine's load
   progress), then the page turns into the live panel.

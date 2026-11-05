@@ -22,7 +22,7 @@ CHECKPOINT_REPO = {4: "fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks", 8: "fiore-lab/GLM-
 BANK_OPTIONS = {f"BANK_{w}": w for w in (2, 3, 4, 5)}
 # this script's own options; the rest are the settings' keys
 OWN_OPTIONS = ("WEIGHTS", "DRAFTER", "BITS", "ALLOC", "NODES", *BANK_OPTIONS)
-ACCESS_WHY = {"hostkey": "its host key is not known here", "nokey": "it refuses this node's ssh key", "noanswer": "no answer on ssh"}
+ACCESS_WHY = {"hostkey": "its host key is not known here", "nokey": "it refuses this node's ssh key", "noanswer": "no answer on ssh", "noaddr": "its LAN address is not known here"}
 # what the node check decides and writes (glm53.nodes.conf); no option sets them
 NODE_CHECK_KEYS = ("TOPOLOGY", "SOCKET_IFNAME", "IB_HCA")
 
@@ -208,10 +208,18 @@ class Quick:
             raise Stop(f"the ring trace was refused ({code}): {self.why(r)}", self.log_fix(), self.again)
         t = self.wait("/v1/launch/ring", lambda x: x.get("state") == "done", "the ring trace")
         if t.get("ring") != "closed" or len(t.get("nodes", [])) != 4 or not all(t["nodes"]):
-            bad = [f"  {p.get('name') or p.get('addr') or '?'}: {ACCESS_WHY.get(p.get('what'), p.get('what'))}" + (f": {p['detail']}" if p.get("detail") else "") for p in t.get("problems", [])]
-            raise Stop(f"the ring is {t.get('ring')}, nodes {' '.join(t.get('names', []))}:\n" + "\n".join(bad or ["  (no problem named)"]),
-                       f"a ring is four nodes, each node's port 0 cabled to the next one's port 1 (RING.md); this node must ssh to itself and to the others without a question ({GUIDE[0]}, section 1)"
-                       + ("; every node needs lldpd running, which finds the neighbours (lldpctl shows them)" if any(p.get("what") == "open" for p in t.get("problems", [])) else ""), self.again)
+            ps, names = t.get("problems", []), " ".join(t.get("names", []))
+            # a problem naming no node is the trace's own: this node's LAN
+            bad = [f"  {p.get('name') or p.get('addr')}: {ACCESS_WHY.get(p.get('what'), p.get('what'))}" + (f": {p['detail']}" if p.get("detail") and p.get("what") != "noaddr" else "")
+                   if p.get("name") or p.get("addr") else f"  {p.get('detail') or p.get('what')}" for p in ps]
+            fix = f"a ring is four nodes, each node's port 0 cabled to the next one's port 1 (RING.md); this node must ssh to itself and to the others without a question ({GUIDE[0]}, section 1)"
+            if any(p.get("what") == "open" for p in ps) or not ps:
+                fix += "; every node needs lldpd running, which finds the neighbours (lldpctl shows them)"
+            if any(p.get("what") == "noaddr" for p in ps):
+                fix = f"from this node, ping each other node's LAN address, which puts it in this node's ARP table. If it still stops: {fix}"
+            if any(not (p.get("name") or p.get("addr")) for p in ps):
+                fix = "this node's LAN is the interface of its default route, which needs an IPv4 address; or write glm53.nodes.conf by hand (RING.md, Settings)"
+            raise Stop(("no ring found" if t.get("ring") == "none" else f"the ring is {t.get('ring')}") + (f", nodes {names}" if names else "") + ":\n" + "\n".join(bad or ["  (no problem named)"]), fix, self.again)
         say(f"      ring: {' '.join(t['names'])}")
         return t["nodes"][1:]
 

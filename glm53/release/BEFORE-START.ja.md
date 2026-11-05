@@ -79,7 +79,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
   IMAGE up
 ```
 
-- **`docker run` の指定:** `~/expertatlas/glm53.conf` に保存され、次の起動でも使われます。`KV_SIZE` と `BITS` だけは、その起動限りです。
+- **`docker run` の指定:** `~/expertatlas/glm53.conf` に保存され、次の起動でも使われます。`KV_SIZE` と `BITS` だけは、その起動限りです。起動画面で選んだ幅は残りません。`BITS` も `ALLOC` もなければ、すべての expert を 3 ビットで起動します。前回の計画で起動するのは `./tf-glm53 start` です。
 - **起動画面の選択:** その起動の間だけ有効で、保存されません。既定値を変えるのはエンジン設定の画面です。
 - **動いているエンジン:** オプションは効きません。止めてから、もう一度同じ行を実行します。
 - **名前の間違い:** 知らない名前は STOP になり、近い名前を案内します。
