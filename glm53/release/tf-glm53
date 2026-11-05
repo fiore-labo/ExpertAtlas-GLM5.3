@@ -110,6 +110,7 @@ MULTI_DECODE_SHARE=${MULTI_DECODE_SHARE:-30}  # with MULTI: the decode's % of th
 MULTI_SHORT_PROMPT=${MULTI_SHORT_PROMPT:-8192}  # with MULTI: a prompt with at most this many tokens to compute past the cache goes first, not held by the share (0: none; POST /v1/schedule changes it)
 MULTI_SHORT_PREEMPT=${MULTI_SHORT_PREEMPT:-0}  # with MULTI: 1: a longer prefill running gives way to a short prompt too, resuming afterwards (POST /v1/schedule changes it)
 ROCE_PROXY_CORES=${ROCE_PROXY_CORES:-a725}  # the cores the RoCE proxy threads poll on: a725 (GB10's 0 and 10), x925 (5 and 15), os (the scheduler's)
+ENGINE_CORES=${ENGINE_CORES:-all}  # the cores every rank runs on: all, or a725 (each node's Cortex-A725 cores, none of the X925)
 MAX_TOKENS=${MAX_TOKENS:-}          # a reply's max_tokens when the request names none, as a count (empty: MAX_TOKENS_SHARE decides)
 MAX_TOKENS_SHARE=${MAX_TOKENS_SHARE:-70}  # the same as a percent of CONTEXT_LENGTH, 1 to 100
 THINKING_SHARE=${THINKING_SHARE:-90}   # the % of a reply's max_tokens (at most what the prompt leaves of CONTEXT_LENGTH) its thinking may use, the rest the answer's; there, at a line break, a closing sentence and </think> are written and the answer follows (0: no limit; a request's thinking_budget comes first). With THINKING_FOLD the thinking goes on past it (its budget max_tokens less the answer's part) and folds when it fills that % of the context
@@ -245,6 +246,8 @@ esac
 [[ $MULTI_SHORT_PROMPT =~ ^[0-9]+$ ]] && [ "$MULTI_SHORT_PROMPT" -le 1048576 ] || { echo "MULTI_SHORT_PROMPT must be 0 .. 1048576 (tokens; 0: none)"; exit 2; }
 [[ $MULTI_SHORT_PREEMPT =~ ^[01]$ ]] || { echo "MULTI_SHORT_PREEMPT must be 0 or 1"; exit 2; }
 [[ $ROCE_PROXY_CORES =~ ^(a725|x925|os)$ ]] || { echo "ROCE_PROXY_CORES must be a725, x925 or os"; exit 2; }
+[[ $ENGINE_CORES =~ ^(all|a725)$ ]] || { echo "ENGINE_CORES must be all or a725"; exit 2; }
+if [ "$ENGINE_CORES" = a725 ] && [ "$ROCE_PROXY_CORES" = x925 ]; then echo "ENGINE_CORES=a725 keeps every thread off the X925 cores: ROCE_PROXY_CORES=x925 cannot go with it"; exit 2; fi
 [ -z "$MAX_TOKENS" ] || [[ $MAX_TOKENS =~ ^[1-9][0-9]*$ ]] || { echo "MAX_TOKENS must be a token count (or empty: MAX_TOKENS_SHARE decides)"; exit 2; }
 [[ $MAX_TOKENS_SHARE =~ ^[1-9][0-9]*$ ]] && [ "$MAX_TOKENS_SHARE" -le 100 ] || { echo "MAX_TOKENS_SHARE must be a percent from 1 to 100"; exit 2; }
 REPLY_LIMIT=${MAX_TOKENS:-$(( CONTEXT * MAX_TOKENS_SHARE / 100 ))}   # the context length this start really has (LAUNCH_CONTEXT) decides
@@ -390,12 +393,18 @@ for b in json.load(open(sys.argv[1]))["banks"]:
 # rank R's container: the GPU, the RDMA devices and the host network, the locked-memory and open-file limits NCCL and
 # the RDMA proxy need, oom_score_adj 1000 (out of memory the kernel takes the rank, not the node), the host user, an
 # init that passes TERM on; its output (serve - ARGS: to stdout, Docker's own log off) into the node's log keeper
+# ENGINE_CORES=a725: a node's Cortex-A725 cores as a list, from its /proc/cpuinfo's CPU part (as roce.zig reads them)
+A725_CORES="\$(awk '/^processor/{p=\$3} /^CPU part/ && \$NF==\"0xd87\"{s=s (s==\"\" ? \"\" : \",\") p} END{print s}' /proc/cpuinfo)"
+
 docker_rank() {
   local r=$1 gid=$2 a=$3 m=$4 env="" kv d ro=""
   for kv in $(rank_env "$r" "$gid") $m; do env="$env -e $kv"; done
   for d in $(mount_dirs | sort -u); do ro="$ro $d"; done
-  echo "docker rm -f $CN$r >/dev/null 2>&1; M=; for d in $ro; do [ -d \$d ] && M=\"\$M -v \$d:\$d:ro\"; done;" \
-    "nohup docker run --rm --init --log-driver none --name $CN$r --user \$(id -u):\$(id -g) --gpus all --network host --ipc host" \
+  # an empty --cpuset-cpus would mean every core: a node without A725 cores does not start
+  local cs="" cores=""
+  if [ "$ENGINE_CORES" = a725 ]; then cs="CS=$A725_CORES; [ -n \"\$CS\" ] || { echo 'ENGINE_CORES=a725: no Cortex-A725 core on this node'; exit 1; };"; cores="--cpuset-cpus \$CS"; fi
+  echo "$cs docker rm -f $CN$r >/dev/null 2>&1; M=; for d in $ro; do [ -d \$d ] && M=\"\$M -v \$d:\$d:ro\"; done;" \
+    "nohup docker run --rm --init --log-driver none --name $CN$r --user \$(id -u):\$(id -g) --gpus all --network host --ipc host $cores" \
     "--device /dev/infiniband --cap-add IPC_LOCK --ulimit memlock=-1 --ulimit nofile=1048576:1048576 --oom-score-adj 1000" \
     "-w /opt/glm53 \$M -v $PKG/launch:$PKG/launch$env $IMAGE serve - $WEIGHTS $a < /dev/null 2>&1 | nohup $KEEP send rank$r > /dev/null 2>&1 &" \
     "for i in \$(seq 30); do [ -n \"\$(docker ps -q -f name='^/$CN$r\$')\" ] && break; sleep 1; done; [ -n \"\$(docker ps -q -f name='^/$CN$r\$')\" ]"
@@ -499,9 +508,10 @@ cmd_check() {
   # to the largest one's need in whole GiB failed by less than a GiB (11-01); compared in MiB, without rounding. Without
   # it every rank needs the GiB above
   local -a needmb=(); read -r -a needmb <<< "${LAUNCH_NEED_MIB:-}"
+  # the weights' mark: the model's files and their sizes, not the model card: a node downloaded after the card changed is the same model
   # no weights on the head: NG, every other item checked all the same (a lane whose WEIGHTS is set later, in the
   # control panel's launch settings, registers its nodes first)
-  local wsum nohead=""; wsum=$(cd "$WEIGHTS" 2>/dev/null && { find . -maxdepth 1 -type f -printf '%f %s\n' | LC_ALL=C sort | sha256sum; sha256sum config.json; } | sha256sum | cut -c1-64) \
+  local wsum nohead=""; wsum=$(cd "$WEIGHTS" 2>/dev/null && { find . -maxdepth 1 -type f ! -name 'README*' ! -name .gitattributes -printf '%f %s\n' | LC_ALL=C sort | sha256sum; sha256sum config.json; } | sha256sum | cut -c1-64) \
     || { echo "  no weights at $WEIGHTS on the head (WEIGHTS: the control panel's launch settings, or the settings file)"; wsum=""; nohead=1; ng=1; }
   if [ -z "$nohead" ] && [ "$DRAFTER_KIND" = mtp ] && ! grep -q '\.eh_proj\.weight"' "$WEIGHTS/model.safetensors.index.json" 2>/dev/null; then
     echo "  the checkpoint at $WEIGHTS has no MTP layer (eh_proj): use one that has it, or set DRAFTER_KIND=none"; ng=1
@@ -531,7 +541,7 @@ cmd_check() {
   for r in $(seq 0 $LAST); do
     n=${NODES[$r]}
     ( o=$(on "$n" "cd $PKG 2>/dev/null && echo -n files=\$($PKGSUM 2>/dev/null) || echo -n files=bad
-        echo -n ' weights='\$(cd $WEIGHTS 2>/dev/null && { find . -maxdepth 1 -type f -printf '%f %s\\n' | LC_ALL=C sort | sha256sum; sha256sum config.json; } | sha256sum | cut -c1-64)
+        echo -n ' weights='\$(cd $WEIGHTS 2>/dev/null && { find . -maxdepth 1 -type f ! -name 'README*' ! -name .gitattributes -printf '%f %s\\n' | LC_ALL=C sort | sha256sum; sha256sum config.json; } | sha256sum | cut -c1-64)
         $probe
         echo -n ' hca='\$(m=1; for h in $HCAS; do [ -d /sys/class/infiniband/\$h ] || m=0; done; echo \$m)
         echo -n ' py='\$(python3 -c 'print(1)' 2>/dev/null || echo 0)
@@ -761,6 +771,7 @@ cmd_up() {
     # NSYS_RANK0 (profiling, CONF): rank 0's server started by this nsys command line; its process is still
     # ./bin/tensorfold-native (nsys starts it), so PIDS finds it and down stops it, and nsys writes its report after
     local pre=""; [ "$r" -eq 0 ] && [ -n "${NSYS_RANK0:-}" ] && pre="$NSYS_RANK0 "
+    [ "$ENGINE_CORES" = a725 ] && pre="taskset -c $A725_CORES $pre"
     on "$n" "cd $PKG || exit 1; echo 1000 > /proc/self/oom_score_adj || exit 1; export $(rank_env "$r" "$gid"); ${m}nohup ${pre}./bin/tensorfold-native serve $WEIGHTS $a < /dev/null 2>&1 | nohup $KEEP send rank$r > /dev/null 2>&1 &"
   done
   drafter_line | $KEEP send drafter

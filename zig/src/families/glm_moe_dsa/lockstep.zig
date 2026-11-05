@@ -367,12 +367,43 @@ pub fn swap(ch: *Channel, e: *engine.Engine, target: []const u8, progress: ?expe
     st.alike = false;
     const hw = (Header{ .max_tokens = swap_tokens }).encode();
     ch.gpa.free(try ch.share(&hw));
+    return swapShared(ch, e, target, progress, st);
+}
+
+/// `swap` with TF_GLM53_MULTI, nothing live or waiting: the followers hear of it as an event (followMulti).
+/// TF_GLM53_MULTI での `swap`。使用中も待ちもないとき: フォロワーには出来事として伝える (followMulti)。
+pub fn swapMulti(ch: *Channel, e: *engine.Engine, target: []const u8, progress: ?expert_swap.Progress, st: *expert_swap.Stats) !void {
+    st.alike = false;
+    const w = [1]i32{ev_swap};
+    ch.gpa.free(try ch.share(&w));
+    return swapShared(ch, e, target, progress, st);
+}
+
+/// Rank 0: the table shared, then the change on every rank.
+/// rank 0: 表を配り、全ランクで変える。
+fn swapShared(ch: *Channel, e: *engine.Engine, target: []const u8, progress: ?expert_swap.Progress, st: *expert_swap.Stats) !void {
     const words = try ch.gpa.alloc(i32, (target.len + 3) / 4);
     defer ch.gpa.free(words);
     @memset(words, 0);
     @memcpy(std.mem.sliceAsBytes(words)[0..target.len], target);
     ch.gpa.free(try ch.share(words));
     return swapEvery(ch, e, target, progress, st);
+}
+
+/// A follower, told of a swap: rank 0's table, the change. An error only when the ranks may differ.
+/// フォロワー、入れ替えを告げられて: rank 0 の表を受けて変える。エラーはランクが食い違いうるときだけ。
+fn followSwap(ch: *Channel, e: *engine.Engine) !void {
+    const words = try ch.share(null);
+    defer ch.gpa.free(words);
+    const bytes = std.mem.sliceAsBytes(words);
+    var st: expert_swap.Stats = .{};
+    swapEvery(ch, e, bytes[0..@min(bytes.len, e.xbits.len)], null, &st) catch |err| {
+        std.log.err("glm53: rank {d}: expert swap: {s}", .{ e.rank, @errorName(err) });
+        // the ranks may differ: stop (the host's fatal), never serve on / ランクが食い違いうる: 止める
+        if (!st.alike) return err;
+        return;
+    };
+    std.log.info("glm53: rank {d}: expert swap: {d} experts in {d} layers ({d} up, {d} down), {d} ms", .{ e.rank, st.experts, st.layers, st.up, st.down, st.ms });
 }
 
 /// Every rank with the same `target` at the same point (the followers of `swap`, and harnesses whose ranks all run
@@ -484,17 +515,7 @@ pub fn follow(ch: *Channel, e: *engine.Engine, seen: ?*std.ArrayList(Received), 
         defer ch.gpa.free(hw);
         const h = try Header.decode(hw);
         if (h.max_tokens == swap_tokens) {
-            const words = try ch.share(null);
-            defer ch.gpa.free(words);
-            const bytes = std.mem.sliceAsBytes(words);
-            var st: expert_swap.Stats = .{};
-            swapEvery(ch, e, bytes[0..@min(bytes.len, e.xbits.len)], null, &st) catch |err| {
-                std.log.err("glm53: rank {d}: expert swap: {s}", .{ e.rank, @errorName(err) });
-                // the ranks may differ: stop (the host's fatal), never serve on / ランクが食い違いうる: 止める
-                if (!st.alike) return err;
-                continue;
-            };
-            std.log.info("glm53: rank {d}: expert swap: {d} experts in {d} layers ({d} up, {d} down), {d} ms", .{ e.rank, st.experts, st.layers, st.up, st.down, st.ms });
+            try followSwap(ch, e);
             continue;
         }
         if (h.max_tokens < 0) return;
@@ -528,6 +549,7 @@ pub const ev_round: i32 = 2;
 pub const ev_release: i32 = 3;
 pub const ev_single: i32 = 4;
 pub const ev_mid_end: i32 = 5; // the end of a round inside a prefill (and its releases) / prefill の中のラウンド (と確定) の終わり
+pub const ev_swap: i32 = 6; // the routed experts' bits changed, nothing live or waiting / routed expert の bit の変更。使用中も待ちもない
 
 /// Rank 0's live conversations for a round inside another's prefill (the host fills `ks`, `stops`, `sinks`; returns
 /// how many): every one live and not done, the conversation being admitted left out.
@@ -818,6 +840,7 @@ pub fn followMulti(ch: *Channel, e: *engine.Engine) !void {
         if (w.len == 0) return error.EmptyEvent;
         switch (w[0]) {
             ev_shutdown => return,
+            ev_swap => try followSwap(ch, e),
             ev_admit => {
                 const k: usize = @intCast(w[1]);
                 const h = try Header.decode(w[2..]);

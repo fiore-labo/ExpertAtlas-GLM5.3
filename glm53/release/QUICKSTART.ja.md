@@ -207,6 +207,8 @@ curl -s http://NODE:8000/v1/chat/completions -H 'Content-Type: application/json'
 
 ダッシュボード `http://NODE:8010/panel` では、エンジンの状態を見て、起動と停止ができます。AI エージェントは同じことを操作 API でできます。手順は `AGENT-API.ja.md`、システム全体の説明は `AI-GUIDE.ja.md` にあります。
 
+スイッチに他の人のノードがあるときは、起動の行で自分のノードを指定してください (`-e NODES=...`)。ダッシュボードのノード確認では、先に台数とチェックを選んでから押します (`PANEL-GUIDE.ja.md` の「ノード確認」)。
+
 ## 6. 止める、もう一度起動する
 
 ```sh

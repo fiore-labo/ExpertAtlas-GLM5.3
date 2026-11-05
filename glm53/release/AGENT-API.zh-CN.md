@@ -67,6 +67,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 | `/v1/launch/check` | `/v1/launch/check` | `state` 为 `done` | 2 至 4 秒（`deploy: false`） |
 | `/v1/launch/discover` | `/v1/launch/discover` | `state` 为 `done` | 1 至 3 秒 |
 | `/v1/launch/weights/check` | `/v1/launch/weights` 的 `check` | `check.state` 为 `done` | 少于 5 秒 |
+| `/v1/launch/inference-check` | `/v1/launch/inference-check` | `state` 为 `done` | 约 3 秒。排在长推理之后时最多 600 秒 |
 
 读取间隔 2 至 10 秒即可。
 
@@ -400,6 +401,8 @@ s, r = call(EP, "POST", "/v1/chat/completions", {"model": MODEL, "max_tokens": 6
     "chat_template_kwargs": {"enable_thinking": False}}, timeout=180)
 # content 中应包含 391
 ```
+
+`POST /v1/launch/inference-check` 由启动器做同样的事：在后台发送一个约 1,000 token 的请求（202；引擎未运行或正在检查时为 409）。然后 `GET /v1/launch/inference-check` 给出 `state`（idle、checking、done）、`ok`、异常时的 `why`，以及 `ms`、`prompt_tokens`、`completion_tokens`。由启动器判定回复：HTTP 200、`finish_reason` 为 stop，且答案与提示词中的随机数一致。引擎停止后回到 idle。
 
 `MODEL` 是 `GET /health` 的 `model`。**启动后的第 1 个请求 prefill 较慢。** 测速时丢弃它。
 

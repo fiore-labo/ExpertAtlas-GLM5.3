@@ -67,6 +67,7 @@ For an operation that takes time, the POST answers at once (202 or 200) and the 
 | `/v1/launch/check` | `/v1/launch/check` | `state` is `done` | 2 to 4 s (`deploy: false`) |
 | `/v1/launch/discover` | `/v1/launch/discover` | `state` is `done` | 1 to 3 s |
 | `/v1/launch/weights/check` | `check` in `/v1/launch/weights` | `check.state` is `done` | Under 5 s |
+| `/v1/launch/inference-check` | `/v1/launch/inference-check` | `state` is `done` | About 3 s. Up to 600 s behind a long inference |
 
 Reading every 2 to 10 s is enough.
 
@@ -400,6 +401,8 @@ s, r = call(EP, "POST", "/v1/chat/completions", {"model": MODEL, "max_tokens": 6
     "chat_template_kwargs": {"enable_thinking": False}}, timeout=180)
 # content holds 391
 ```
+
+`POST /v1/launch/inference-check` does the same from the launcher: one request of about 1,000 tokens, in the background (202; 409 when the engine does not run or a check runs). `GET /v1/launch/inference-check` then gives `state` (idle, checking, done), `ok`, and `why` when it is not ok, with `ms`, `prompt_tokens` and `completion_tokens`. The launcher judges the reply: HTTP 200, `finish_reason` stop, and the answer matching a random number in the prompt. It goes back to idle when the engine stops.
 
 `MODEL` is `model` in `GET /health`. **The first request after a start has a slow prefill.** Drop it when you measure speed.
 

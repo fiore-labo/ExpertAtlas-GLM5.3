@@ -191,6 +191,48 @@ pub fn coreKinds(io: std.Io) [max_cpus]Kind {
     return kinds;
 }
 
+/// Fiore-lab: "a725" when every CPU in `allowed` (a sched_getaffinity mask) is a Cortex-A725, else "os": another kind
+/// among them, or a kind not known.
+/// Fiore-lab: `allowed` (sched_getaffinity のマスク) の CPU がすべて Cortex-A725 なら "a725"、それ以外は "os":
+/// 別の種類が混ざる、または種類が分からない。
+pub fn coresOf(kinds: *const [max_cpus]Kind, allowed: []const usize) []const u8 {
+    var any = false;
+    for (allowed, 0..) |word, i| for (0..@bitSizeOf(usize)) |b| {
+        if (word >> @intCast(b) & 1 == 0) continue;
+        const c = i * @bitSizeOf(usize) + b;
+        if (c >= max_cpus or kinds[c] != .a725) return "os";
+        any = true;
+    };
+    return if (any) "a725" else "os";
+}
+
+/// Where this process may run, read from the process, not from the settings (/health engine_cores).
+/// このプロセスが動ける所。設定ではなくプロセスから読む (/health engine_cores)。
+pub fn engineCores(io: std.Io) []const u8 {
+    var set = std.mem.zeroes(std.os.linux.cpu_set_t);
+    const rc = std.os.linux.sched_getaffinity(0, @sizeOf(std.os.linux.cpu_set_t), &set);
+    if (std.os.linux.errno(rc) != .SUCCESS) return "os";
+    const kinds = coreKinds(io);
+    return coresOf(&kinds, &set);
+}
+
+test "the engine's cores: A725 only when every allowed CPU is one" {
+    var kinds: [max_cpus]Kind = @splat(.unknown);
+    for (0..5) |c| kinds[c] = .a725;
+    for (5..10) |c| kinds[c] = .x925;
+    for (10..15) |c| kinds[c] = .a725;
+    for (15..20) |c| kinds[c] = .x925;
+    try std.testing.expectEqualStrings("a725", coresOf(&kinds, &[_]usize{0b0111_1100_0001_1111}));
+    try std.testing.expectEqualStrings("a725", coresOf(&kinds, &[_]usize{0b1}));
+    // every core / 全コア
+    try std.testing.expectEqualStrings("os", coresOf(&kinds, &[_]usize{(1 << 20) - 1}));
+    // one X925 among them / X925 が 1 つ
+    try std.testing.expectEqualStrings("os", coresOf(&kinds, &[_]usize{0b10_0000}));
+    // a kind not known, or none allowed / 種類が不明、または 1 つもない
+    try std.testing.expectEqualStrings("os", coresOf(&kinds, &[_]usize{1 << 30}));
+    try std.testing.expectEqualStrings("os", coresOf(&kinds, &[_]usize{0}));
+}
+
 /// The two CPUs `mode` gives the proxies (null: none, the scheduler's choice).
 /// `mode` が proxy に与える 2 つの CPU (null はなし、スケジューラが選ぶ)。
 pub fn proxyCpus(kinds: *const [max_cpus]Kind, mode: Mode) [2]?u16 {
