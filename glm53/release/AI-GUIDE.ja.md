@@ -104,7 +104,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 | 設定 | 意味 | 8 台の例 / 4 台の例 |
 |---|---|---|
 | `NODES` | RoCE ネットワーク上のノードのアドレス。ランク 0 が先頭（リングでは管理ネットワーク上のアドレス） | 8 / 4 個のアドレス |
-| `TOPOLOGY` | `full`（スイッチ）、`ring4`、または `auto`（確認と起動のたびに配線から判定） | `full` |
+| `TOPOLOGY` | `full`（スイッチ）、`ring4`、または `auto`（`check` と `./tf-glm53 up` のたびに配線から判定。既知の不具合は `CONFIG.ja.md`） | `full` |
 | `SOCKET_IFNAME`、`IB_HCA`、`GID_INDEX` | 全ノードでのそのネットワークのインターフェースと RDMA デバイス、GID の番号（空なら自動選択） | 同じ |
 | `NCCL_LIB` | NCCL 2.30.7 の `libnccl.so.2`。全ノードで同じパス | 同じ |
 | `WEIGHTS` | チェックポイントのディレクトリ。全ノードで同じパス | 8x / 4x のチェックポイント |

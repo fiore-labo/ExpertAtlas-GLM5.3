@@ -181,7 +181,7 @@ details; the image can also be built from the archive with the fenced NCCL (`doc
 | Setting | Meaning | Eight-node example / four-node example |
 |---|---|---|
 | `NODES` | the nodes' addresses on the RoCE network, rank 0 first (a ring: on the management network) | 8 / 4 addresses |
-| `TOPOLOGY` | `full` (a switch), `ring4` or `auto` (judged from the cabling at each check and start) | `full` |
+| `TOPOLOGY` | `full` (a switch), `ring4` or `auto` (judged from the cabling at each check and `./tf-glm53 up`; a known bug in `CONFIG.md`) | `full` |
 | `SOCKET_IFNAME`, `IB_HCA`, `GID_INDEX` | that network's interface and RDMA device on every node; the GID index (empty: chosen) | the same |
 | `NCCL_LIB` | NCCL 2.30.7's `libnccl.so.2`, the same path on every node | the same |
 | `WEIGHTS` | the checkpoint's directory, the same path on every node | the 8x / 4x checkpoint |
