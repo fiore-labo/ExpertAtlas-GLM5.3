@@ -33,7 +33,7 @@ Changing these settings needs a restart of the engine. If you are unsure, the de
 | Decision | Option | Choices | Default | How to decide |
 |---|---|---|---|---|
 | The experts' width | `BITS` or `ALLOC` | 2, 3, 4 or 5 bits, or a saved allocation | 3 bits | A wider one uses more memory, which reduces the next two |
-| The longest request | `CONTEXT_LENGTH` | 65,536 to 1,048,576 tokens, a multiple of 16,384 | 737,280 (4 nodes, 3 bits) | Your longest prompt plus reply |
+| The longest request | `CONTEXT_LENGTH` | 65,536 to 1,048,576 tokens, a multiple of 16,384 | 1,048,576 (cut to fit) | Your longest prompt plus reply |
 | The KV cache's total | `KV_SIZE` | A token count, or `max` | `max` | Usually `max`. More keeps more conversations cached |
 | The KV cache's format | `KV` | `fp4`, `fp8` | `fp4` | `fp8` is more precise and uses more memory |
 | What drafts tokens | `DRAFTER_KIND` | `mtp`, `dflash2`, `none` | `mtp` | `dflash2` needs another model and reduces the KV cache |

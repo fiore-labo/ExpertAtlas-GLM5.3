@@ -6,7 +6,7 @@ With `docker run ... IMAGE up`, the keys of the engine settings can be given as 
 with `not an option`, so write them in `~/expertatlas/glm53.conf`: `GID_INDEX`, `RUNTIME`, `NCCL_LIB`, `EXPERT_LIVE`, `LOG_LISTEN`, `CONTEXT`, `STORE`, `THINKING_FOLD_KEEP`, `NEED_GB`, `LAUNCHER_HOST`, `ATLAS_DIR`, `LAUNCH_SNAPSHOTS`. The node check decides `TOPOLOGY`, `SOCKET_IFNAME` and `IB_HCA`.
 
 The defaults below are `tf-glm53`'s. `docker run ... IMAGE up` writes `glm53.conf` from `glm53.t4.conf.example` on any node count, so it begins
-with `CONTEXT_LENGTH` 737280, `KV_SIZE` 837280, `KV` fp4 and `NEED_GB` 115, and the start's KV size is `max`.
+with `CONTEXT_LENGTH` 1048576, `KV_SIZE` 1049088, `KV` fp4 and `NEED_GB` 115, and the start's KV size is `max`.
 
 `glm53.conf` holds a lane's settings: the nodes, the network, the weights, the drafter, the server, the memory and
 the control panel. It is a plain shell file that you write and edit by hand, next to `tf-glm53` on the first node.
@@ -138,7 +138,7 @@ fill in the nodes, the network devices and the paths. The examples carry the mea
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `NEED_GB` | `112` | The GiB a node must have available before a start (`tf-glm53 check`): 3 more with DFlash2, and for each 100,000 positions `KV_SIZE` is below 1,638,400, 2.55 fewer with `KV=fp8` and 1.73 fewer with `KV=fp4`. The four-node example sets 115, which comes to 101 with its `KV_SIZE`. A start from the panel uses its plan's figure instead. |
+| `NEED_GB` | `112` | The GiB a node must have available before a start (`tf-glm53 check`): 3 more with DFlash2, and for each 100,000 positions `KV_SIZE` is below 1,638,400, 2.55 fewer with `KV=fp8` and 1.73 fewer with `KV=fp4`. The four-node example sets 115, which comes to 105 with its `KV_SIZE`. A start from the panel uses its plan's figure instead. |
 | `READY_TIMEOUT` | `900` | Seconds a start (`tf-glm53 engine-up`, which the panel's start runs) waits for the server. |
 
 ### The control panel

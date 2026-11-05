@@ -4,7 +4,7 @@
 
 使用 `docker run ... IMAGE up` 时，引擎设置中的项目可以用 `-e 项目=值` 指定（`QUICKSTART.zh-CN.md`）。以下项目会以 `not an option` 停止，请写入 `~/expertatlas/glm53.conf`：`GID_INDEX`、`RUNTIME`、`NCCL_LIB`、`EXPERT_LIVE`、`LOG_LISTEN`、`CONTEXT`、`STORE`、`THINKING_FOLD_KEEP`、`NEED_GB`、`LAUNCHER_HOST`、`ATLAS_DIR`、`LAUNCH_SNAPSHOTS`。`TOPOLOGY`、`SOCKET_IFNAME` 和 `IB_HCA` 由节点检查决定。
 
-下面的默认值是 `tf-glm53` 的默认值。无论节点数多少，`docker run ... IMAGE up` 都根据 `glm53.t4.conf.example` 写入 `glm53.conf`，所以初始值为 `CONTEXT_LENGTH` 737280、`KV_SIZE` 837280、`KV` fp4、`NEED_GB` 115，启动时的 KV 大小为 `max`。
+下面的默认值是 `tf-glm53` 的默认值。无论节点数多少，`docker run ... IMAGE up` 都根据 `glm53.t4.conf.example` 写入 `glm53.conf`，所以初始值为 `CONTEXT_LENGTH` 1048576、`KV_SIZE` 1049088、`KV` fp4、`NEED_GB` 115，启动时的 KV 大小为 `max`。
 
 `glm53.conf` 保存一条通道（lane）的设置：节点、网络、权重、草稿模型、服务器、内存和控制面板。它是一个普通的 shell 文件，由你手工编写和编辑，放在第一个节点上 `tf-glm53` 所在的目录中。请从 `glm53.t4.conf.example`（四节点）或 `glm53.conf.example`（八节点）开始：复制为 `glm53.conf`，填写节点、网络设备和路径；其余项目在示例中已是实测值。
 
@@ -105,7 +105,7 @@
 
 | 设置项 | 默认值 | 含义 |
 |---|---|---|
-| `NEED_GB` | `112` | 启动前每个节点必须可用的 GiB（`tf-glm53 check`）：使用 DFlash2 时多 3；`KV_SIZE` 每比 1,638,400 少 100,000 个位置，`KV=fp8` 时少 2.55，`KV=fp4` 时少 1.73。四节点示例设为 115，按其 `KV_SIZE` 计算后为 101。从面板启动时改用计划中的数值。 |
+| `NEED_GB` | `112` | 启动前每个节点必须可用的 GiB（`tf-glm53 check`）：使用 DFlash2 时多 3；`KV_SIZE` 每比 1,638,400 少 100,000 个位置，`KV=fp8` 时少 2.55，`KV=fp4` 时少 1.73。四节点示例设为 115，按其 `KV_SIZE` 计算后为 105。从面板启动时改用计划中的数值。 |
 | `READY_TIMEOUT` | `900` | 启动（`tf-glm53 engine-up`；从面板启动时也执行它）等待服务器的秒数。 |
 
 ### 控制面板

@@ -44,13 +44,12 @@ PORT=8000
 #METRICS_LISTEN=0.0.0.0:9894
 #LOG_LISTEN=0.0.0.0:9895
 
-# The measured configuration: 737,280 positions a request (prompt + reply), 100,000 more kept for earlier
-# conversations (the pool holds 837,280 positions in blocks of 256 that every conversation shares), decode context
-# parallelism 2, prompt chunks of 8,192 rows in 4 sequence-parallel parts, the 4-bit KV cache.
-# From the control panel four nodes reach a context length of 1,048,576: 3 bits for 70 % of the routed experts, 4 bits for
-# the rest, a KV of 1,049,088 (about 7.5 GiB a node to spare at ROWS=16384, enough for a live re-sort).
-CONTEXT_LENGTH=737280
-KV_SIZE=837280
+# The longest a request may be (prompt + reply), the model's longest: a start with less room cuts it and says so, as
+# the dashboard's Max does. KV_SIZE is the least a start takes: docker run ... up and the dashboard's start give the KV all the
+# room left, in blocks of 256 that every conversation shares. Decode context parallelism 2, prompt chunks of 8,192 rows in 4
+# sequence-parallel parts, the 4-bit KV cache.
+CONTEXT_LENGTH=1048576
+KV_SIZE=1049088
 DCP=2
 ROWS=8192
 SP_PARTS=4

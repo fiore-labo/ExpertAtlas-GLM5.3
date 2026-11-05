@@ -89,8 +89,8 @@ cp glm53.conf.example glm53.conf    # nodes, network names, NCCL, weights, draft
 | `NODES` | 8 つのアドレス（rank 0 が先頭） | 4 つのアドレス（rank 0 が先頭） |
 | `WEIGHTS` | `~/models/GLM-5.3-EXL3-Base` | `~/models/GLM-5.3-EXL3-Base` |
 | `KV` | `fp8`（既定） | `fp4` |
-| `CONTEXT_LENGTH` | 819200 | 737280 |
-| `KV_SIZE` | 1638400 | 837280 |
+| `CONTEXT_LENGTH` | 819200 | 1048576 |
+| `KV_SIZE` | 1638400 | 1049088 |
 | `DCP` | 2 | 2 |
 | `ROWS` / `SP_PARTS` | 8192 / 4（既定） | 8192 / 4（既定） |
 
@@ -174,7 +174,7 @@ Byte Resume（`TF_GLM53_BYTE_RESUME`、既定は `on`）は、モデルがテキ
 `tf-glm53 status` はプールを表示します。起動でも、同じ表示が `tf-glm53 logs launcher` に出ます。4 台の設定では次のようになります。
 
 ```text
-conversation cache (pool): 837280 positions in 3271 blocks of 256, shared by up to 64 conversations (context 737280)
+conversation cache (pool): 1049088 positions in 4098 blocks of 256, shared by up to 64 conversations (context 1048576)
 ```
 
 このとき、サーバーの `/health` には `pool` オブジェクトがあり、`blocks`、`free_blocks`、`slots`（保持している会話の数）、`shared_blocks`（複数の会話が持つブロックの数）、`evicted_total`（空きを作るために捨てた会話の数）、`cold_total`（最初から計算したリクエストの数）が入ります。
@@ -298,7 +298,7 @@ ENDPOINT=http://FIRST-NODE:8000 ./claude-glm53      # 後ろに Claude Code 自�
 
 ## 速度
 
-**リリース r2-102 で、全ノードの GPU クロックを 2.1 GHz（2,100 MHz）に制限して測定しています**。エンジンはその後変わっており、このリリースでは数値を測り直していません。数値は各チェックポイント自身の幅を読み込んだもので、既定の起動のようにすべての expert を 3 ビットにしたものではありません。まだキャッシュにないコーディング用のプロンプト、リクエストは一度に 1 件です（reasoning effort low、応答は最大 4,000 トークン）。8 台: `glm53.conf.example` の設定（FP8 KV キャッシュ、`CONTEXT_LENGTH` 819,200）と `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`（routed expert は 4 ビット、その他の線形層は 5 ビット）。4 台: `glm53.t4.conf.example` の設定（4 ビット KV キャッシュ、`CONTEXT_LENGTH` 737,280。`ROWS` は当時 16,384、今は 8,192）と `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`。MTP は 2 回の中央値、DFlash2 は 8 台で 1 回、4 台で 2 回の中央値です。1 ラウンドあたりモデルが進んだトークン数は MTP で 3.4〜3.5、DFlash2 で 4.6〜4.8 でした。速度は環境によって違います（チェックポイント、プロンプト、クロックなど）。数値は目安です。
+**リリース r2-102 で、全ノードの GPU クロックを 2.1 GHz（2,100 MHz）に制限して測定しています**。エンジンはその後変わっており、このリリースでは数値を測り直していません。数値は各チェックポイント自身の幅を読み込んだもので、既定の起動のようにすべての expert を 3 ビットにしたものではありません。まだキャッシュにないコーディング用のプロンプト、リクエストは一度に 1 件です（reasoning effort low、応答は最大 4,000 トークン）。8 台: `glm53.conf.example` の設定（FP8 KV キャッシュ、`CONTEXT_LENGTH` 819,200）と `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`（routed expert は 4 ビット、その他の線形層は 5 ビット）。4 台: 当時の設定（4 ビット KV キャッシュ、`CONTEXT_LENGTH` 737,280、`ROWS` 16,384。今の例は 1,048,576 と 8,192）と `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`。MTP は 2 回の中央値、DFlash2 は 8 台で 1 回、4 台で 2 回の中央値です。1 ラウンドあたりモデルが進んだトークン数は MTP で 3.4〜3.5、DFlash2 で 4.6〜4.8 でした。速度は環境によって違います（チェックポイント、プロンプト、クロックなど）。数値は目安です。
 
 | ノード数 | プロンプト | MTP（k=3）: 最初のトークンまでの時間 / decode | DFlash2: 最初のトークンまでの時間 / decode |
 |---|---|---|---|

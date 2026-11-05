@@ -38,11 +38,11 @@ sit together at the top level.
   `CONTEXT_LENGTH=1048576` with `KV_SIZE=2097152` on the 4-bit KV cache (`KV=fp4`, `NEED_GB=100`; about 23 GiB a node
   to spare), or `KV_SIZE=1638400` on the 8-bit one. Four nodes: `CONTEXT_LENGTH=1048576` from the control panel with
   3 bits for 70 % of the routed experts and 4 bits for the rest (`KV=fp4`, `KV_SIZE=1049088`: the context length and
-  512 more, the least the pool takes; about 7.5 GiB a node to spare at `ROWS` 16,384, enough for a live re-sort); a default
-  start, every routed expert at 3 bits, takes `CONTEXT_LENGTH=737280`. Eight nodes on the 4-bit KV cache and four nodes from
+  512 more, the least the pool takes; about 7.5 GiB a node to spare at `ROWS` 16,384, enough for a live re-sort). A default
+  start asks for `CONTEXT_LENGTH=1048576` on either node count, and one with less room cuts it and says so. Eight nodes on the 4-bit KV cache and four nodes from
   the control panel were each measured with one prompt of about 1,019,000 tokens. The 4-bit KV cache costs some accuracy (KL 0.0190 against 0.0156 with the 8-bit cache, same
   weights: [glm53/release/T4.md](glm53/release/T4.md)); the speeds below are with the 8-bit cache on eight nodes. The
-  conf examples ship with context lengths of 819,200 and 737,280 and KV sizes of 1,638,400 and 837,280 (the KV size is
+  conf examples ship with context lengths of 819,200 and 1,048,576 and KV sizes of 1,638,400 and 1,049,088 (the KV size is
   the whole KV cache, one pool every conversation shares: a request takes up to the context length, and the rest keeps
   earlier conversations' KV in whatever blocks are free).
 - Long prompts read in sequence-parallel parts; decode-step collectives over RoCE.

@@ -89,8 +89,8 @@ cp glm53.conf.example glm53.conf    # nodes, network names, NCCL, weights, draft
 | `NODES` | 八个地址，rank 0 在前 | 四个地址，rank 0 在前 |
 | `WEIGHTS` | `~/models/GLM-5.3-EXL3-Base` | `~/models/GLM-5.3-EXL3-Base` |
 | `KV` | `fp8`（默认） | `fp4` |
-| `CONTEXT_LENGTH` | 819200 | 737280 |
-| `KV_SIZE` | 1638400 | 837280 |
+| `CONTEXT_LENGTH` | 819200 | 1048576 |
+| `KV_SIZE` | 1638400 | 1049088 |
 | `DCP` | 2 | 2 |
 | `ROWS` / `SP_PARTS` | 8192 / 4（默认） | 8192 / 4（默认） |
 
@@ -174,7 +174,7 @@ Byte Resume（`TF_GLM53_BYTE_RESUME`，默认 `on`）在模型的切分方式与
 `tf-glm53 status` 会显示池的情况，启动时也会显示，见 `tf-glm53 logs launcher`；采用四节点设置时如下：
 
 ```text
-conversation cache (pool): 837280 positions in 3271 blocks of 256, shared by up to 64 conversations (context 737280)
+conversation cache (pool): 1049088 positions in 4098 blocks of 256, shared by up to 64 conversations (context 1048576)
 ```
 
 此时服务器的 `/health` 中有一个 `pool` 对象：`blocks`、`free_blocks`、`slots`（保留的对话数）、`shared_blocks`（由多个对话共同持有的块数）、`evicted_total`（为腾出空间而丢弃的对话数）和 `cold_total`（从头计算的请求数）。
@@ -298,7 +298,7 @@ ENDPOINT=http://FIRST-NODE:8000 ./claude-glm53      # 后面可以接 Claude Cod
 
 ## 速度
 
-**测量使用发布版本 r2-102，每个节点的 GPU 时钟上限均设为 2.1 GHz（2,100 MHz）。** 引擎此后已有变化，这些数字尚未针对本发布重新测量。它们载入的是各检查点自身的位宽，而不是默认启动时所有专家都用的 3 bit。使用尚未缓存的编程提示词，一次一个请求（reasoning effort 为 low，回复最多 4,000 个 token）。八个节点：`glm53.conf.example` 的设置（FP8 KV 缓存，`CONTEXT_LENGTH` 为 819,200）和 `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`（路由专家 4 bits，其他线性层 5 bits）。四个节点：`glm53.t4.conf.example` 的设置（4 bit KV 缓存，`CONTEXT_LENGTH` 为 737,280；`ROWS` 当时为 16,384，现在为 8,192）和 `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`。MTP 为两次运行的中位数；DFlash2 在八个节点上为一次运行，在四个节点上为两次运行的中位数。每轮模型前进的 token 数：MTP 为 3.4 至 3.5，DFlash2 为 4.6 至 4.8。速度因环境而异（检查点、提示词、时钟等），这些数字仅供参考。
+**测量使用发布版本 r2-102，每个节点的 GPU 时钟上限均设为 2.1 GHz（2,100 MHz）。** 引擎此后已有变化，这些数字尚未针对本发布重新测量。它们载入的是各检查点自身的位宽，而不是默认启动时所有专家都用的 3 bit。使用尚未缓存的编程提示词，一次一个请求（reasoning effort 为 low，回复最多 4,000 个 token）。八个节点：`glm53.conf.example` 的设置（FP8 KV 缓存，`CONTEXT_LENGTH` 为 819,200）和 `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`（路由专家 4 bits，其他线性层 5 bits）。四个节点：当时的设置（4 bit KV 缓存，`CONTEXT_LENGTH` 为 737,280，`ROWS` 为 16,384；现在的示例为 1,048,576 和 8,192）和 `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`。MTP 为两次运行的中位数；DFlash2 在八个节点上为一次运行，在四个节点上为两次运行的中位数。每轮模型前进的 token 数：MTP 为 3.4 至 3.5，DFlash2 为 4.6 至 4.8。速度因环境而异（检查点、提示词、时钟等），这些数字仅供参考。
 
 | 节点数 | 提示词 | MTP（k=3）：首 token 时间 / 解码 | DFlash2：首 token 时间 / 解码 |
 |---|---|---|---|

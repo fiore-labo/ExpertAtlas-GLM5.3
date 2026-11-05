@@ -136,8 +136,8 @@ these lines; the network names, NCCL, the drafter and the server are set the sam
 | `NODES` | eight addresses, rank 0 first | four addresses, rank 0 first |
 | `WEIGHTS` | `~/models/GLM-5.3-EXL3-Base` | `~/models/GLM-5.3-EXL3-Base` |
 | `KV` | `fp8` (the default) | `fp4` |
-| `CONTEXT_LENGTH` | 819200 | 737280 |
-| `KV_SIZE` | 1638400 | 837280 |
+| `CONTEXT_LENGTH` | 819200 | 1048576 |
+| `KV_SIZE` | 1638400 | 1049088 |
 | `DCP` | 2 | 2 |
 | `ROWS` / `SP_PARTS` | 8192 / 4 (the defaults) | 8192 / 4 (the defaults) |
 
@@ -272,7 +272,7 @@ slightly from one computed from the tokenizer's ids. `log` only reports the plac
 `tf-glm53 status` prints the pool, and so does a start, in `tf-glm53 logs launcher`; with the four-node settings:
 
 ```text
-conversation cache (pool): 837280 positions in 3271 blocks of 256, shared by up to 64 conversations (context 737280)
+conversation cache (pool): 1049088 positions in 4098 blocks of 256, shared by up to 64 conversations (context 1048576)
 ```
 
 The server's `/health` then holds a `pool` object: `blocks`, `free_blocks`, `slots` (the conversations kept),
@@ -568,8 +568,8 @@ Limits:
 since, and these numbers have not been measured again for this release. They load each checkpoint's own widths, not the
 default start's 3 bits for every expert. A coding prompt not yet cached, one request at a time (reasoning effort low,
 up to 4,000 reply tokens). Eight nodes: the settings of `glm53.conf.example` (FP8 KV cache, `CONTEXT_LENGTH` 819,200) and `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`
-(routed experts 4 bits, other linear layers 5 bits). Four nodes: the settings of `glm53.t4.conf.example` (4-bit KV
-cache, `CONTEXT_LENGTH` 737,280; `ROWS` was 16,384 then and is 8,192 now) and `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`. MTP: the median of two runs; DFlash2: one
+(routed experts 4 bits, other linear layers 5 bits). Four nodes: the settings of that time (4-bit KV
+cache, `CONTEXT_LENGTH` 737,280, `ROWS` 16,384; the example now has 1,048,576 and 8,192) and `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`. MTP: the median of two runs; DFlash2: one
 run on eight nodes, the median of two on four. The model advanced 3.4 to 3.5 tokens a round with MTP and 4.6 to 4.8
 with DFlash2. Speeds differ with the environment (the checkpoint, the prompt, the clocks): take these numbers as a guide.
 
