@@ -486,8 +486,7 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # or glm53.t4.conf
   `launch/`, writable. Docker keeps no log of them (`--log-driver none`): their output goes to the node's log keeper.
   Containers are named `glm53-p<PORT>-r<rank>` and removed when they stop.
   `tf-glm53 down`, `status`, the watcher and the control panel work on them as on ranks run from the host.
-- The engine reads the NCCL at `/opt/nccl-fenced`, on a switch and on a ring. NVIDIA's wheel stays at `/opt/nccl` for
-  comparison and is not read by default.
+- The engine reads the NCCL at `/opt/nccl-fenced`, on a switch and on a ring.
 - Measured on four nodes (the eight-node checkpoint, a context length of 131,072 tokens, MTP): the start took 4
   minutes, as on the host; the smoke test passed; `down` stopped every rank in 4 s; with one rank's container killed,
   the watcher stopped the others and every container was gone in 43 s.

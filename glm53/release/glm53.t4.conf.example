@@ -46,13 +46,13 @@ PORT=8000
 
 # The measured configuration: 737,280 positions a request (prompt + reply), 100,000 more kept for earlier
 # conversations (the pool holds 837,280 positions in blocks of 256 that every conversation shares), decode context
-# parallelism 2, prompt chunks of 16,384 rows in 4 sequence-parallel parts, the 4-bit KV cache.
+# parallelism 2, prompt chunks of 8,192 rows in 4 sequence-parallel parts, the 4-bit KV cache.
 # From the control panel four nodes reach a context length of 1,048,576: 3 bits for 70 % of the routed experts, 4 bits for
 # the rest, a KV of 1,049,088 (about 7.5 GiB a node to spare, enough for a live re-sort).
 CONTEXT_LENGTH=737280
 KV_SIZE=837280
 DCP=2
-ROWS=16384
+ROWS=8192
 SP_PARTS=4
 KV=fp4
 # The memory a node must have available before the start: tf-glm53 check asks NEED_GB minus 2.7 GiB for each
