@@ -149,18 +149,18 @@ the details.
 
 | What | Repository | Size | Used for |
 |---|---|---|---|
-| Eight-node checkpoint: every weight, the routed experts at 4 bits | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | eight nodes; the control panel on four or eight nodes (it serves as the 4-bit bank too) |
-| Four-node checkpoint: the least used half of the routed experts at 3 bits | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | four nodes without the control panel |
-| Expert bank, 2 bits | [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit) | 187.3 GB | the control panel |
-| Expert bank, 3 bits | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | the control panel (on four nodes, for the full context length) |
-| Expert bank, 4 bits | [fiore-lab/GLM-5.3-EXL3-Experts-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) | 368.5 GB | the control panel, on a node without the eight-node checkpoint |
-| Expert bank, 5 bits | [fiore-lab/GLM-5.3-EXL3-Experts-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit) | 459.1 GB | the control panel |
+| Eight-node checkpoint: every weight, the routed experts at 4 bits | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | **Required** on eight nodes. It also runs four nodes in place of the four-node checkpoint, and serves as the 4-bit bank |
+| Four-node checkpoint: the least used half of the routed experts at 3 bits | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | **Required** on four nodes, unless the eight-node checkpoint is used |
+| Expert bank, 2 bits | [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit) | 187.3 GB | Optional: for experts at 2 bits |
+| Expert bank, 3 bits | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | **Required** on every start |
+| Expert bank, 4 bits | [fiore-lab/GLM-5.3-EXL3-Experts-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) | 368.5 GB | Optional: for experts at 4 bits (not needed with the eight-node checkpoint) |
+| Expert bank, 5 bits | [fiore-lab/GLM-5.3-EXL3-Experts-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit) | 459.1 GB | Optional: for experts at 5 bits |
 
 A bank holds the 19,200 routed experts at one width; the engine loads each expert from the bank of the width its plan
 gives it. **Every start needs the checkpoint for the node count and the 3-bit bank; download the other banks only for the widths you
 want to use**: the panel offers the widths every node holds. For four nodes that is the four-node checkpoint and the
 3-bit bank, 622.5 GB together. Every node needs the same files at the same paths. Download once and copy to the other
-nodes, for example:
+nodes, for example (`python3 -m venv` needs the `python3-venv` package):
 
 ```sh
 python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
@@ -183,9 +183,11 @@ have the same layout as Fiore-lab's and load the same way.
 ## What you need
 
 - Four or eight DGX Spark systems (GB10) on one RoCE v2 network, or four cabled as a ring. The first reaches every
-  node, and itself, over ssh with a key that has no passphrase. For four nodes on a switch, one 100 Gb/s port a node is
+  node, and itself, over ssh with a key that has no passphrase, their host keys already known. [QUICKSTART](glm53/release/QUICKSTART.md), section 1,
+  has the ssh and ConnectX-7 network steps. For four nodes on a switch, one 100 Gb/s port a node is
   enough.
-- With the image: Docker and the NVIDIA container toolkit (DGX OS has both) and `python3` on every node, and about
+- With the image: the NVIDIA driver 580 or later (the image uses the host's), Docker and the NVIDIA container toolkit
+  (DGX OS has both) and `python3` on every node, and about
   115 GiB free on each before the start.
 - With the archive instead: DGX OS (Ubuntu 24.04) with the NVIDIA driver 580 or later and cuBLAS 13, and NCCL 2.30.7 on
   every node: NVIDIA's `nvidia-nccl-cu13` wheel, unpacked by pip (`packaging/RUNTIME.md`).

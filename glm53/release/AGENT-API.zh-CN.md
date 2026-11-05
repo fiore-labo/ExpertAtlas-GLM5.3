@@ -21,7 +21,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 - 出现以 `READY` 开头的行，就表示已经启动。后面的行给出仪表板和 API 的地址。
 - 出现 `STOP` 时，它说明停止的原因。`FIX` 说明修复方法，`THEN` 给出重新执行的 1 行命令。修复后，照原样运行 `THEN` 这一行。启动器保持运行，所以本文档的 API 也可以使用。
 - 启动设置都可以用 `-e 名称=值` 指定：`WEIGHTS`、`BANK_2` 至 `BANK_5`、`DRAFTER`、`BITS`、`ALLOC`、`NODES`、`PORT`、`LAUNCHER_PORT`、`EA_DIR`、`IMAGE`，以及第 4 节的引擎设置（`TOPOLOGY`、`SOCKET_IFNAME`、`IB_HCA` 由节点检查决定，不能指定）。不认识的名称会导致 `STOP`。列表见 `QUICKSTART.zh-CN.md`。
-- 主机需要：Docker 和 NVIDIA Container Toolkit、`python3`，以及所有节点之间和到自身的没有口令的 ssh。
+- 主机需要：NVIDIA 驱动 580 或更高版本、Docker 和 NVIDIA Container Toolkit、`python3`、ConnectX-7 网络的地址，以及所有节点之间和到自身的没有口令的 ssh，并已登记它们的 host key（`QUICKSTART.zh-CN.md` 第 1 节）。
 - 发布的镜像包含带 AArch64 fence 的 NCCL，交换机和环都读取它（`RING.zh-CN.md`）。
 - 如果已在运行，则不启动任何内容，只做 1 次推理并输出 `READY`。
 

@@ -71,7 +71,7 @@ AI 助手在无人操作页面时启动引擎，使用下面这一行或 `./tf-g
 
 ### 一行命令，面向 AI 助手（推荐方式）
 
-在第一个节点上，以运行它的用户执行（每个节点都能通过无密码 ssh 访问每个节点，镜像已在节点上或可以拉取）：
+在第一个节点上，以运行它的用户执行（每个节点都能通过无密码 ssh 访问每个节点，并已登记它们的 host key（`QUICKSTART.zh-CN.md` 第 1 节），镜像已在节点上或可以拉取）：
 
 ```sh
 docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
@@ -85,7 +85,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 
 ### 设置（两种方式都需要）
 
-1. 每个节点：DGX OS（Ubuntu 24.04）、NVIDIA 驱动 580 或更高版本、cuBLAS 13（`libcublas-13-0`）、`libibverbs`，节点在同一个 RoCE v2 网络上，第一个节点能通过无密码 ssh 访问每个节点。
+1. 每个节点：DGX OS（Ubuntu 24.04）、NVIDIA 驱动 580 或更高版本、cuBLAS 13（`libcublas-13-0`）、`libibverbs`，节点在同一个 RoCE v2 网络上，第一个节点能通过无密码 ssh 访问每个节点，并已登记它们的 host key（`QUICKSTART.zh-CN.md` 第 1 节）。
 2. 每个节点上的 NCCL 2.30.7：`pip3 install --no-deps --target ~/nccl-2.30.7 nvidia-nccl-cu13==2.30.7`（pip 只解压库；不运行任何 Python）。在交换机上这样可以运行，但推荐使用带 AArch64 fence 的构建；环必须使用该构建（`RING.zh-CN.md`）。
 3. 检查点，在每个节点上放在相同路径下：`fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`（390 GB，八节点）或 `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`（344.6 GB，四节点）。用 Hugging Face CLI 下载一次，用 `rsync` 复制到其他节点，用 `./tf-glm53 verify` 校验。检查点也可以从官方 BF16 检查点制作（第 2 节，`glm53/weights/`）。
 4. 在第一个节点上解压归档，运行 `sha256sum -c SHA256SUMS`，把对应的示例复制为 `glm53.conf`，设置 `NODES`、`SOCKET_IFNAME`、`IB_HCA`、`NCCL_LIB`、`WEIGHTS`。

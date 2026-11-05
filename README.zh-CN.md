@@ -83,16 +83,16 @@ GLM-5.3 为每个 token 在每层 256 个路由专家中选出 8 个，而不同
 
 | 内容 | 仓库 | 大小 | 用途 |
 |---|---|---|---|
-| 八节点检查点：全部权重（路由专家为 4 位） | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | 八节点运行；四节点或八节点的控制面板（同时作为 4 位专家 bank） |
-| 四节点检查点：使用最少的一半路由专家为 3 位 | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | 不使用控制面板的四节点运行 |
-| 专家 bank，2 位 | [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit) | 187.3 GB | 控制面板 |
-| 专家 bank，3 位 | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | 控制面板（四节点时用于取满上下文长度） |
-| 专家 bank，4 位 | [fiore-lab/GLM-5.3-EXL3-Experts-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) | 368.5 GB | 控制面板（在没有八节点检查点的节点上） |
-| 专家 bank，5 位 | [fiore-lab/GLM-5.3-EXL3-Experts-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit) | 459.1 GB | 控制面板 |
+| 八节点检查点：全部权重（路由专家为 4 位） | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | **八节点时必需**。四节点时也可代替四节点检查点，并同时作为 4 位专家 bank |
+| 四节点检查点：使用最少的一半路由专家为 3 位 | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | **四节点时必需**（使用八节点检查点时除外） |
+| 专家 bank，2 位 | [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit) | 187.3 GB | 可选：使用 2 位专家时 |
+| 专家 bank，3 位 | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | **每次启动都必需** |
+| 专家 bank，4 位 | [fiore-lab/GLM-5.3-EXL3-Experts-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) | 368.5 GB | 可选：使用 4 位专家时（有八节点检查点时不需要） |
+| 专家 bank，5 位 | [fiore-lab/GLM-5.3-EXL3-Experts-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit) | 459.1 GB | 可选：使用 5 位专家时 |
 
 专家 bank 是把 19,200 个路由专家统一为一种位宽的权重；引擎为每个专家从其计划位宽的 bank 中加载。
 **每次启动都需要与节点数相符的检查点和 3 bit bank；其他 bank 只需下载你想用的位宽**（面板只提供每个节点都具备的位宽）。
-四个节点时即四节点检查点和 3 bit bank，共 622.5 GB。每个节点都需要在相同路径下放置相同的文件。在一台机器上下载后复制到其他节点，例如：
+四个节点时即四节点检查点和 3 bit bank，共 622.5 GB。每个节点都需要在相同路径下放置相同的文件。在一台机器上下载后复制到其他节点（`python3 -m venv` 需要 `python3-venv` 软件包），例如：
 
 ```sh
 python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
@@ -111,8 +111,8 @@ python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
 
 ## 所需环境
 
-- 四台或八台 DGX Spark 系统（GB10），位于同一 RoCE v2 网络上，或四台连成环。第一台通过 ssh 访问每个节点，包括它自己，使用没有口令的密钥。四个节点接在交换机上时，每个节点一个 100 Gb/s 端口即可。
-- 使用镜像时：每个节点上有 Docker 和 NVIDIA Container Toolkit（DGX OS 两者都有）以及 `python3`，并且启动前每个节点约有 115 GiB 空闲内存。
+- 四台或八台 DGX Spark 系统（GB10），位于同一 RoCE v2 网络上，或四台连成环。第一台通过 ssh 访问每个节点，包括它自己，使用没有口令的密钥，并已登记它们的 host key。ssh 和 ConnectX-7 网络的步骤见 [QUICKSTART](glm53/release/QUICKSTART.zh-CN.md) 第 1 节。四个节点接在交换机上时，每个节点一个 100 Gb/s 端口即可。
+- 使用镜像时：每个节点上有 NVIDIA 驱动 580 或更高版本（镜像使用主机的驱动）、Docker 和 NVIDIA Container Toolkit（DGX OS 两者都有）以及 `python3`，并且启动前每个节点约有 115 GiB 空闲内存。
 - 改用归档时：DGX OS（Ubuntu 24.04），NVIDIA 驱动 580 或更高版本，以及 cuBLAS 13；每个节点上都有 NCCL 2.30.7：即 NVIDIA 的 `nvidia-nccl-cu13` wheel，由 pip 解包（见 `packaging/RUNTIME.zh-CN.md`）。
 - 使用归档时，带 AArch64 fence 的 NCCL 在交换机上推荐使用，在环上必须使用；NVIDIA 的 wheel 没有这个 fence（[RING](glm53/release/RING.zh-CN.md)）。镜像已包含它。
 - 与节点数相符的 Fiore-lab EXL3 检查点（Hugging Face），在每个节点上放在相同路径下：八个节点用 [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks)（390 GB），四个节点用 [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks)（344.6 GB）。四节点检查点中，第 3 至 77 层的路由专家里使用最少的一半为 3 bit，其余为 4 bit；其他部分与八节点检查点相同。

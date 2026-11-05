@@ -108,8 +108,8 @@ drafter for that start.
 
 ### In one line, for an AI assistant (the recommended way)
 
-On the first node, as the user who runs it (every node reaches every node over ssh without a password, and the image
-is on them or can be pulled):
+On the first node, as the user who runs it (every node reaches every node over ssh without a password, their host keys
+known (`QUICKSTART.md`, section 1), and the image is on them or can be pulled):
 
 ```sh
 docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
@@ -140,7 +140,7 @@ details; the image can also be built from the archive with the fenced NCCL (`doc
 ### Setting up (both)
 
 1. Every node: DGX OS (Ubuntu 24.04), NVIDIA driver 580 or later, cuBLAS 13 (`libcublas-13-0`), `libibverbs`, the
-   nodes on one RoCE v2 network, the first node reaching every node over ssh without a password.
+   nodes on one RoCE v2 network, the first node reaching every node over ssh without a password, their host keys known (`QUICKSTART.md`, section 1).
 2. NCCL 2.30.7 on every node: `pip3 install --no-deps --target ~/nccl-2.30.7 nvidia-nccl-cu13==2.30.7` (pip only
    unpacks the library; nothing runs Python). On a switch this runs, and the build with the AArch64 fence
    is recommended; a ring requires that build (`RING.md`).

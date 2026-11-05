@@ -22,6 +22,7 @@ CHECKPOINT_REPO = {4: "fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks", 8: "fiore-lab/GLM-
 BANK_OPTIONS = {f"BANK_{w}": w for w in (2, 3, 4, 5)}
 # this script's own options; the rest are the settings' keys
 OWN_OPTIONS = ("WEIGHTS", "DRAFTER", "BITS", "ALLOC", "NODES", *BANK_OPTIONS)
+ACCESS_WHY = {"hostkey": "its host key is not known here", "nokey": "it refuses this node's ssh key", "noanswer": "no answer on ssh"}
 # what the node check decides and writes (glm53.nodes.conf); no option sets them
 NODE_CHECK_KEYS = ("TOPOLOGY", "SOCKET_IFNAME", "IB_HCA")
 
@@ -147,7 +148,9 @@ class Quick:
     def nodes(self):
         c = self.call("GET", "/v1/launch/config")[1]
         want = (self.opts.get("NODES") or "").replace(",", " ").split()
-        if c.get("registered") and (not want or set(want) <= set(c["nodes"])):
+        registered = c.get("nodes") or []
+        # the nodes asked for are the workers, the head among them or not: fewer than are registered registers them again
+        if c.get("registered") and (not want or set(want) - set(registered[:1]) == set(registered[1:])):
             self.world = c["world"]
             say(f"[2/6] nodes: registered already: {c['topology']}, {' '.join(n or a for n, a in zip(c.get('names') or c['nodes'], c['nodes']))}")
             # stopped: this directory (an update changes it) and the image on every node again; running: nothing to touch
@@ -165,7 +168,7 @@ class Quick:
         kind = d.get("kind")
         say(f"      cabling: {kind}" + (f" ({d['why']})" if d.get("why") else ""))
         if kind == "none":
-            raise Stop("no other node answers over ConnectX-7", "check the cables and the link addresses on this node: ip -br addr; rdma link", self.again)
+            raise Stop("no other node answers over ConnectX-7", f"check the cables and the link addresses on this node (ip -br addr; rdma link), and that this node can ssh to itself and to the others without a question ({GUIDE[0]}, section 1)", self.again)
         if kind == "ring":
             head, workers = d["head"]["lan"]["addr"], self.trace_ring()
         else:
@@ -205,9 +208,10 @@ class Quick:
             raise Stop(f"the ring trace was refused ({code}): {self.why(r)}", self.log_fix(), self.again)
         t = self.wait("/v1/launch/ring", lambda x: x.get("state") == "done", "the ring trace")
         if t.get("ring") != "closed" or len(t.get("nodes", [])) != 4 or not all(t["nodes"]):
-            bad = [f"  {p.get('name') or p.get('addr') or '?'}: {p.get('what')}: {p.get('detail', '')}" for p in t.get("problems", [])]
+            bad = [f"  {p.get('name') or p.get('addr') or '?'}: {ACCESS_WHY.get(p.get('what'), p.get('what'))}" + (f": {p['detail']}" if p.get("detail") else "") for p in t.get("problems", [])]
             raise Stop(f"the ring is {t.get('ring')}, nodes {' '.join(t.get('names', []))}:\n" + "\n".join(bad or ["  (no problem named)"]),
-                       "a ring is four nodes, each node's port 0 cabled to the next one's port 1 (RING.md); this node must ssh to the others without a password", self.again)
+                       f"a ring is four nodes, each node's port 0 cabled to the next one's port 1 (RING.md); this node must ssh to itself and to the others without a question ({GUIDE[0]}, section 1)"
+                       + ("; every node needs lldpd running, which finds the neighbours (lldpctl shows them)" if any(p.get("what") == "open" for p in t.get("problems", [])) else ""), self.again)
         say(f"      ring: {' '.join(t['names'])}")
         return t["nodes"][1:]
 
@@ -216,8 +220,12 @@ class Quick:
         if n + 1 in (2, 4, 8):
             return
         listed = ", ".join(f"{h['addr']} ({h.get('name') or '?'})" for h in hosts) or "none"
-        raise Stop(f"{n} free worker nodes found on {(d.get('fabric') or {}).get('subnet', 'the fabric')}: {listed}. A lane has 2, 4 or 8 nodes with this one",
-                   "choose them: add -e NODES=\"ADDR ADDR ADDR\" with 3 of these addresses (7 for eight nodes) to the docker run line", self.again)
+        kept = [h for h in d.get("hosts", []) if h.get("access") != "ok"]
+        why = "".join(f"\n  {h['addr']}: {ACCESS_WHY.get(h.get('access'), h.get('access'))}" for h in kept)
+        fix = "choose them: add -e NODES=\"ADDR ADDR ADDR\" with 3 of these addresses (7 for eight nodes) to the docker run line"
+        if kept:
+            fix = f"ssh from this node to each address above, and to its own ({(d.get('fabric') or {}).get('head_addr') or 'its ConnectX-7 address'}), must work without a question ({GUIDE[0]}, section 1). Then, if more are free than a lane uses: " + fix
+        raise Stop(f"{n} free worker nodes found on {(d.get('fabric') or {}).get('subnet', 'the fabric')}: {listed}. A lane has 2, 4 or 8 nodes with this one" + why, fix, self.again)
 
     def check(self, head, workers):
         code, r = self.call("POST", "/v1/launch/check", {"head": head, "workers": workers, "deploy": True})
@@ -235,6 +243,8 @@ class Quick:
         t = c.get("topology") or {}
         if t.get("why"):
             lines.append(f"  cabling: {t['why']}")
+            if "not read" in t["why"]:
+                lines.append(f"  this node must ssh to itself and to every node without a question ({GUIDE[0]}, section 1)")
         why = c.get("why") or []
         if not bad:
             lines += [f"  {x}" for x in (why if isinstance(why, list) else [why])]
@@ -341,7 +351,7 @@ class Quick:
     def apply_settings(self):
         """The engine settings given, saved in glm53.conf as the settings screen saves them (checked there): after the
         plan passed, so a start that cannot fit leaves the settings as they were."""
-        keys = {k: v for k, v in self.opts.items() if k not in OWN_OPTIONS and not (k == "KV_SIZE" and v == "max")}
+        keys = {k: v for k, v in self.opts.items() if k not in OWN_OPTIONS and k != "KV_SIZE"}
         changed = {k: v for k, v in keys.items() if str(self.settings[k].get("value", "")) != v}
         if not changed:
             return
@@ -371,7 +381,10 @@ class Quick:
         if kv_size == "max":
             o["store"] = "max"
         elif kv_size.isdigit():
-            o["store"] = max(0, int(kv_size) - int(self.opts.get("CONTEXT_LENGTH") or self.settings["CONTEXT_LENGTH"]["value"]))
+            context = int(self.opts.get("CONTEXT_LENGTH") or self.settings["CONTEXT_LENGTH"]["value"])
+            if int(kv_size) < context + 512:
+                raise Stop(f"KV_SIZE={kv_size} is too small: the KV holds the context length, {context} tokens, and 512 more", "give a larger KV_SIZE, or a smaller CONTEXT_LENGTH with -e CONTEXT_LENGTH=N", self.again)
+            o["store"] = int(kv_size) - context
         else:
             raise Stop(f"KV_SIZE={kv_size}: a number of tokens, or max", f"each key's rule: {self.pkg}/CONFIG.md", self.again)
         if "ALLOC" in self.opts:

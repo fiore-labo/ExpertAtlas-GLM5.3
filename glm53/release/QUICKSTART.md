@@ -14,20 +14,71 @@ the same line tells you what to do.
 - **The `up` container** only sets things up. It exits when the engine is running. The engine and the launcher stay on.
 - **The weights** stay on the hosts. They are not in the image.
 
-Neither the dashboard nor the API has a key, and both are open to the LAN. Keep the nodes on a closed network.
+Neither the dashboard nor the API has a key, and both listen on every address of the first node. Keep the nodes on a
+closed network (section 4 has how to keep them to the first node).
 
 ## 1. What the nodes need
 
 | What | Detail |
 |---|---|
 | Nodes | 4 or 8 DGX Sparks on one RoCE v2 switch, or 4 cabled as a ring without a switch (`RING.md`). 2 or 3 nodes are being tested |
-| Software on each node | Docker and the NVIDIA container toolkit (DGX OS has both), and `python3` |
-| ssh | From the first node to every node, and to itself, with a key that has no passphrase |
+| Software on each node | The NVIDIA driver 580 or later (the image uses the host's driver; `nvidia-smi` shows it), Docker and the NVIDIA container toolkit (DGX OS has both), and `python3` |
+| ConnectX-7 network | An address on each half of the cabled ports, MTU 9000 (below) |
+| ssh | From the first node to every node, and to itself, with a key that has no passphrase and host keys it already knows (below) |
 | Docker access | Your user can run `docker` on every node (the `docker` group) |
 | Memory | About 115 GiB free on each node before the start, with nothing else on the GPU |
-| Disk | At least 622.5 GB on each node for the two required downloads |
+| Disk | For the two required downloads, on each node: at least 622.5 GB on four nodes, 667.8 GB on eight |
 
 The release's image holds NCCL with the AArch64 fence, and reads it on a switch and on a ring (`RING.md`, "The fenced NCCL").
+
+### The ConnectX-7 network
+
+A ConnectX-7 port is two PCIe halves, each a network device with its own address: port 0 is `enp1s0f0np0` and
+`enP2p1s0f0np0`, port 1 is `enp1s0f1np1` and `enP2p1s0f1np1`. Each half needs its own /24 and an MTU of 9000.
+
+On a switch, give the two halves of the cabled port an address on every node: the same two /24s everywhere, a different
+last number on each node. For port 1, on one node, with example addresses:
+
+```sh
+sudo tee /etc/netplan/01-cx7.yaml >/dev/null <<'EOF'
+network:
+  version: 2
+  renderer: NetworkManager
+  ethernets:
+    enp1s0f1np1:
+      mtu: 9000
+      addresses: [172.16.88.1/24]
+    enP2p1s0f1np1:
+      mtu: 9000
+      addresses: [172.16.89.1/24]
+EOF
+sudo chmod 600 /etc/netplan/01-cx7.yaml
+sudo netplan apply
+ip -br addr    # both halves UP, with their addresses
+rdma link      # both halves ACTIVE
+```
+
+On a ring, all four halves have addresses, and every node also needs `lldpd`: `RING.md`, "Cabling and addresses".
+
+DGX OS already sets the kernel settings this needs (`arp_ignore=1`, `arp_announce=2`, `rp_filter=2`), so there is nothing
+to set by hand.
+
+### ssh
+
+The launcher connects with a key that has no passphrase, and it never adds a host key it does not know. So the first node
+must already know every node's host key, its own too. On the first node:
+
+```sh
+[ -f ~/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+for a in NODE1 NODE2 NODE3 NODE4; do    # every node's address, the first node's too
+  ssh-copy-id -o StrictHostKeyChecking=accept-new "$a"    # asks for the password
+  ssh -o BatchMode=yes "$a" true && echo "$a OK"
+done
+```
+
+`NODE1` and the others are the addresses the launcher uses. On a switch, each node's ConnectX-7 address on the `enp1s0f…`
+half (`172.16.88.N` above): the first node finds the others by trying ssh's port on that /24. On a ring, each node's LAN
+address.
 
 ## 2. Download the weights
 
@@ -37,14 +88,14 @@ plan to use another width. Every path must be the same on every node.
 | What | Hugging Face repository | Size | Default directory | Option |
 |---|---|---|---|---|
 | Checkpoint, 4 nodes (**required**) | `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks` | 344.6 GB | `~/models/GLM-5.3-EXL3-4x-DGX-Sparks` | `WEIGHTS` |
-| Checkpoint, 8 nodes (**required**) | `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks` | | `~/models/GLM-5.3-EXL3-8x-DGX-Sparks` | `WEIGHTS` |
+| Checkpoint, 8 nodes (**required**) | `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks` | 389.9 GB | `~/models/GLM-5.3-EXL3-8x-DGX-Sparks` | `WEIGHTS` |
 | 3-bit bank (**required**) | `fiore-lab/GLM-5.3-EXL3-Experts-3bit` | 277.9 GB | `~/models/GLM-5.3-EXL3-Experts-3bit` | `BANK_3` |
 | 2-bit bank (optional) | `fiore-lab/GLM-5.3-EXL3-Experts-2bit` | 187.3 GB | `~/models/GLM-5.3-EXL3-Experts-2bit` | `BANK_2` |
 | 4-bit bank (optional) | `fiore-lab/GLM-5.3-EXL3-Experts-4bit` | 368.5 GB | `~/models/GLM-5.3-EXL3-Experts-4bit` | `BANK_4` |
 | 5-bit bank (optional) | `fiore-lab/GLM-5.3-EXL3-Experts-5bit` | 459.1 GB | `~/models/GLM-5.3-EXL3-Experts-5bit` | `BANK_5` |
 | DFlash2 (optional, separate licence) | `incoai/GLM-5.3-DFlash2` (`RUNTIME.md`, "Using DFlash2") | | none | `DRAFTER` |
 
-Download once, then copy to the other nodes. For four nodes:
+Download once, then copy to the other nodes. If `python3 -m venv` fails, install the `python3-venv` package. For four nodes:
 
 ```sh
 python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
@@ -100,6 +151,7 @@ THEN: docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 ```
 
 Do what `FIX` says, then run the `THEN` line. Running the line again is always safe: it does not restart a running engine.
+`hf` in a `FIX` line is the Hugging Face CLI of section 2, `~/hf-cli/bin/hf`.
 
 ## 4. Options
 
@@ -156,6 +208,8 @@ Good to know:
   for that start only.
 - `TOPOLOGY`, `SOCKET_IFNAME` and `IB_HCA` are not options: the node check decides them from the cabling.
 - Options do not change a running engine. Stop it first, then run the line. The output says so when it ignored any.
+- To keep the API to the first node, add `-e HOST=127.0.0.1`. `LAUNCHER_HOST`, for the dashboard and the control API, is not
+  an option: write `LAUNCHER_HOST=127.0.0.1` in `~/expertatlas/glm53.conf`, stop the launcher (section 6), and run the line again.
 
 ## 5. Use it
 
@@ -165,6 +219,9 @@ The API speaks the OpenAI chat format. Point any client at the address `READY` p
 curl -s http://NODE:8000/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"glm-5.3","messages":[{"role":"user","content":"hello"}]}'
 ```
+
+A reply's thinking is in `reasoning_content` and its answer in `content` (`delta.reasoning_content` and `delta.content` in a
+stream).
 
 The dashboard at `http://NODE:8010/panel` shows the engine and starts and stops it. An AI agent can do the same through
 the control API: `AGENT-API.md` has the steps, and `AI-GUIDE.md` describes the whole system.
@@ -187,10 +244,14 @@ To start again, run the same `docker run` line. The nodes, the weights' location
 | `this container cannot ssh to the host` | Make a key without a passphrase and add it to your own `authorized_keys`. The message gives the commands |
 | `IMAGE is not on NODE and docker pull failed` | Copy it with the `docker save \| ssh NODE docker load` lines the message gives |
 | `3 bit (always needed)`, `checkpoint (always needed)` | Download it (section 2), or name its directory with `BANK_3` or `WEIGHTS` |
+| `no other node answers over ConnectX-7` | Check the cables and the addresses (section 1) |
+| `its host key is not known here`, `it refuses this node's ssh key` | Do the ssh steps of section 1 for that address |
 | `N free worker nodes found` | Choose them with `-e NODES="ADDR ADDR ADDR"` |
+| `the ring is none` | Every node needs `lldpd` (section 1). Check the cables and ssh too |
 | `port N answers another lane's launcher` | Stop that launcher, or add `-e PORT=N` |
 | `does not fit with context length N` | Add a smaller `CONTEXT_LENGTH` or a narrower `BITS`, or free the nodes' memory |
 | `not an option` | Check the spelling. The message suggests the nearest name |
 
 More: `BEFORE-START.md` (what to decide before the first start), `RUNTIME.md` (every command and failure), `T4.md` (four nodes and their measurements), `RING.md` (a ring),
-`CONFIG.md` (every setting).
+`CONFIG.md` (every setting). In the source repository, `RUNTIME.md` is `packaging/RUNTIME.md` and the others are in
+`glm53/release/`.

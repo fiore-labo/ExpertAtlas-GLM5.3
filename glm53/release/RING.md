@@ -29,8 +29,9 @@ TensorFold project.
 - Cable each node's port 0 to the next node's port 1, around the ring. With port 0 to port 0 and port 1 to port 1
   instead, NCCL's subnet-aware routing finds no device on some links (a listener advertises only its own device's
   address) and connecting fails.
-- Give each link one /24 for each PCIe half (a ConnectX-7 port is two halves, `rocep1s0f*` and `roceP2p1s0f*`), and
-  set `arp_ignore=1`, `arp_announce=2`, `rp_filter=2`. The example used here (ring order node-0, 1, 3, 2):
+- Give each link one /24 for each PCIe half (a ConnectX-7 port is two halves, `rocep1s0f*` and `roceP2p1s0f*`), with an
+  MTU of 9000. DGX OS already sets `arp_ignore=1`, `arp_announce=2` and `rp_filter=2`, so there is nothing to set by hand.
+  The example used here (ring order node-0, 1, 3, 2):
 
 | Link | half 0 | half 1 |
 |---|---|---|
@@ -39,11 +40,41 @@ TensorFold project.
 | node-0 – node-2 | 172.16.92.0/24 | 172.16.93.0/24 |
 | node-1 – node-3 | 172.16.94.0/24 | 172.16.95.0/24 |
 
+node-0's addresses, with its port 0 cabled to node-1 and its port 1 to node-2; the `enp1s0f*` devices are half 0 and the
+`enP2p1s0f*` devices half 1, and each node takes its own last number:
+
+```sh
+sudo tee /etc/netplan/01-cx7.yaml >/dev/null <<'EOF'
+network:
+  version: 2
+  renderer: NetworkManager
+  ethernets:
+    enp1s0f0np0:
+      mtu: 9000
+      addresses: [172.16.88.10/24]
+    enP2p1s0f0np0:
+      mtu: 9000
+      addresses: [172.16.89.10/24]
+    enp1s0f1np1:
+      mtu: 9000
+      addresses: [172.16.92.10/24]
+    enP2p1s0f1np1:
+      mtu: 9000
+      addresses: [172.16.93.10/24]
+EOF
+sudo chmod 600 /etc/netplan/01-cx7.yaml
+sudo netplan apply
+ip -br addr    # all four halves UP, with their addresses
+rdma link      # all four halves ACTIVE
+```
+
 - Check every link in both directions with `ib_write_bw` after cabling: here one stream reached 98 Gb/s a half, and all
   four links in both directions at once 48 to 49 Gb/s a half, about 194 Gb/s sent and 194 Gb/s received by each node.
   A port re-plugged while the node ran stayed at 5 to 13 Gb/s until the node restarted.
 - The rendezvous and ssh go over the management network (`SOCKET_IFNAME`), which needs no link between the opposite
-  nodes.
+  nodes. `QUICKSTART.md`, section 1, has the ssh steps; on a ring they use the management addresses.
+- `docker run ... IMAGE up` and the control panel's node check follow the cables with LLDP, so every node needs `lldpd`. DGX OS's
+  updates bring it. `lldpctl` shows a node's neighbours, and `sudo apt install lldpd` adds it when it is missing.
 
 ## The fenced NCCL
 

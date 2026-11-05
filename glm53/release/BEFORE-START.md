@@ -12,7 +12,7 @@ Decide the nodes and the weights' location first. The weights use the same path 
 | Decision | Choices | Default | Option |
 |---|---|---|---|
 | The nodes | 4 or 8 on a switch, or 4 in a ring (2 or 3 are being tested) | Found automatically. Choose only when a switch has more free nodes than a lane uses | `NODES` |
-| Where the checkpoint is (required) | 4 nodes 344.6 GB, or 8 nodes | `~/models/GLM-5.3-EXL3-4x-DGX-Sparks` (8 nodes: `-8x-`) | `WEIGHTS` |
+| Where the checkpoint is (required) | 4 nodes 344.6 GB, or 8 nodes 389.9 GB | `~/models/GLM-5.3-EXL3-4x-DGX-Sparks` (8 nodes: `-8x-`) | `WEIGHTS` |
 | Where the 3-bit bank is (required) | 277.9 GB | `~/models/GLM-5.3-EXL3-Experts-3bit` | `BANK_3` |
 | Banks of other widths | 2 bit 187.3 GB, 4 bit 368.5 GB, 5 bit 459.1 GB. Only the widths you use | `~/models/GLM-5.3-EXL3-Experts-<N>bit` | `BANK_2`, `BANK_4`, `BANK_5` |
 | DFlash2's model | Only if you use it. It has a separate licence | None | `DRAFTER` |
@@ -22,8 +22,9 @@ Decide the nodes and the weights' location first. The weights use the same path 
 
 Neither the API nor the dashboard has a key. Keep the nodes on a closed network.
 
-The start also needs these, which are not decisions: about 115 GiB free on each node, nothing else on the GPU, an ssh key
-without a passphrase, and access to `docker`.
+The start also needs these, which are not decisions: about 115 GiB free on each node, nothing else on the GPU, addresses on
+the ConnectX-7 network, an ssh key without a passphrase with every node's host key known to the first node, and access to
+`docker`. `QUICKSTART.md`, section 1, has the steps.
 
 ## Decide for each start
 
