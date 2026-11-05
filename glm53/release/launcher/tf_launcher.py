@@ -30,6 +30,9 @@ The control panel's launcher: always on, on the lane's first node, beside tf-glm
     "workers"} writes the node file (glm53.nodes.conf beside CONF: TOPOLOGY, NODES, SOCKET_IFNAME, IB_HCA as judged;
     read after CONF by tf-glm53 and here, so it wins; the previous one copied aside; only while stopped) once that
     list passed
+  - the inference check (the [ NODE ] card's button): POST /v1/launch/inference-check sends the running engine one
+    request of about 1,000 tokens, in the background, and GET /v1/launch/inference-check gives the result ("state":
+    idle, checking, done; "ok", "why", "ms", "prompt_tokens", "completion_tokens"; idle once this start's engine has stopped)
   - where the weights are (the launch settings): GET /v1/launch/weights (WEIGHTS, DRAFTER, every bank's directory),
     POST /v1/launch/weights/check (the locations on every node), POST /v1/launch/weights (once they passed: glm53.conf's
     WEIGHTS and DRAFTER lines and banks.json's directories written, each copied aside first; banks.json copied to every
@@ -63,6 +66,7 @@ nothing that changes a node.
 """
 import argparse, base64, glob, hashlib, ipaddress, json, os, re, select, shlex, shutil, signal, socket, struct, subprocess, sys, threading, time
 import http.client
+import random
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -210,8 +214,9 @@ BROWSE_MAX = 500
 MEMORY_ONLY = {"last-usage.json", "pending.json", "usage-base.json"}  # kept in the launcher's memory, never written
 TESTED_WORLDS = (2, 4, 8)  # the node counts the panel has run on, offered by GET /v1/launch/config (worlds)
 # the check's items that may fail on nodes a node check registers all the same (nodes_ok): where the weights are,
-# set afterwards on the launch settings (the checkpoint, the expert banks)
-NODES_OK_FAILS = ("weights", "banks")
+# set afterwards on the launch settings (the checkpoint, the expert banks), and the memory, which tf-glm53 check
+# estimates from KV_SIZE and the launch screen's plan judges with the widths and the KV picked there
+NODES_OK_FAILS = ("weights", "banks", "memory")
 # the engine's rule: the 3-bit bank must be on every node, whatever a start uses, and a start that names no
 # widths loads every expert at 3 bits
 REQUIRED_BITS = 3
@@ -336,6 +341,7 @@ SETTINGS = {
     "ROWS": ("8192", SET_INT(256, 65536, step=256), "start"),
     "SP_PARTS": ("4", SET_INT(2, 4), "start"),
     "ROCE_PROXY_CORES": ("a725", SET_ENUM("a725", "os"), "start"),
+    "ENGINE_CORES": ("all", SET_ENUM("all", "a725"), "start"),
     "ATLAS_GENERIC": ("1", SET_BOOL, "start"),
     "TF_GLM53_CANON_CLOSE": ("near", SET_ENUM("near", "all", "off"), "start"),
     "TF_GLM53_CANON_NEAR": ("4096", SET_INT(1, 1048576), "start"),
@@ -670,6 +676,43 @@ def usage_norm(u, saved_unix=0):
         return None
 
 
+# the inference check: records of random numbers, about 1,000 tokens, and one asked: the right answer can only come from
+# reading this prompt. The reply's limit and temperature as tf-glm53 smoke; the wait as a request's behind a long one
+INFER_CHECK_ROWS = 66
+INFER_CHECK_MAX_TOKENS = 1200
+INFER_CHECK_WAIT = 600
+
+
+def inference_check_request(model, rows=INFER_CHECK_ROWS):
+    """The request of the inference check and the answer it must get: (body, answer)."""
+    boxes = random.sample(range(100000, 1000000), rows)
+    asked = random.randrange(rows)
+    name = lambda i: f"{chr(65 + i % 26)}{i}"
+    doc = "\n".join(f"Record {i}: warehouse {name(i)} holds {n} boxes." for i, n in enumerate(boxes))
+    ask = f"{doc}\nHow many boxes does warehouse {name(asked)} hold? Answer with the number only."
+    return {"model": model, "messages": [{"role": "user", "content": ask}], "max_tokens": INFER_CHECK_MAX_TOKENS,
+            "temperature": 0.6}, str(boxes[asked])
+
+
+def inference_check_read(status, body, want):
+    """The engine's answer to the inference check: (why it is wrong, "" when right; prompt tokens; reply tokens)."""
+    if status != 200:
+        return f"the engine answered {status}", 0, 0
+    try:
+        j = json.loads(body)
+        choice = j["choices"][0]
+        text = choice["message"].get("content") or ""
+        usage = j.get("usage") or {}
+        prompt, reply = int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+        return "the engine's answer did not parse", 0, 0
+    if choice.get("finish_reason") != "stop":
+        return f"the reply did not end ({choice.get('finish_reason')}, {reply} tokens)", prompt, reply
+    if not re.search(rf"(?<!\d){want}(?!\d)", text.replace(",", "")):
+        return f"wrong answer: {text[:80]!r}, the prompt says {want}", prompt, reply
+    return "", prompt, reply
+
+
 class Launcher:
     def __init__(self, a):
         self.conf = os.path.abspath(a.conf)
@@ -694,6 +737,9 @@ class Launcher:
         self.wcheck = {"state": "idle", "started_unix": 0, "ended_unix": 0, "asked": None, "nodes": [], "items": [], "ok": False, "why": "",
                        "found": []}
         self.wcheck_lock = threading.Lock()
+        self.icheck = {"state": "idle", "t0": 0.0, "started_unix": 0, "ended_unix": 0, "ok": False, "why": "", "ms": 0,
+                       "prompt_tokens": 0, "completion_tokens": 0}
+        self.icheck_lock = threading.Lock()
         self.check_lock = threading.Lock()
         env = dict(t.split("=", 1) for t in shlex.split(c.get("EXTRA_ENV", "")) if "=" in t)
         self.page = env.get("TF_PANEL_HTML", os.path.join(self.pkg_local, "panel.html"))
@@ -2005,7 +2051,7 @@ class Launcher:
             if c.returncode == 0 and not (judged and judged.get("mode")):
                 why.append("the check judged no cabling (tools/topology.py)")
             # the nodes themselves fit (what a registration needs): every node read, the cabling judged, the ring's
-            # check not failed, and nothing failed but where the weights are (set afterwards on the launch settings)
+            # check not failed, and nothing failed but where the weights are and the memory (both settled on the launch settings)
             nodes_ok = (bool(judged and judged.get("mode")) and ring["state"] != "fail" and (d is None or d.returncode == 0)
                         and all(any(i["key"] == "ssh" and i["state"] == "ok" for i in r["items"]) for r in res)
                         and all(i["key"] in NODES_OK_FAILS for r in res for i in r["items"] if i["state"] == "fail")
@@ -2028,8 +2074,8 @@ class Launcher:
 
     def save_config(self, body):
         """POST /v1/launch/config: the node file written (TOPOLOGY, NODES, SOCKET_IFNAME, IB_HCA as the check judged
-        them) once a check found the nodes fit (nodes_ok: only where the weights are may have failed, set afterwards on
-        the launch settings) on exactly this head and these workers; glm53.conf is not touched. The previous node
+        them) once a check found the nodes fit (nodes_ok: only where the weights are and the memory may have failed, settled
+        on the launch settings) on exactly this head and these workers; glm53.conf is not touched. The previous node
         file copied aside first, the new one written whole (a temporary file, then a rename), then everything read
         again."""
         head, workers = self.nodes_of(body, required=True)
@@ -2191,6 +2237,45 @@ class Launcher:
         dirs = {x["id"]: path(x.get("dir", ""), f"banks {x['id']}", empty=True) for x in bs}   # "": that width not used
         return {"weights": w, "drafter": d, "banks": [{"id": i, "dir": dirs[i]} for i in have]}
 
+    def begin_inference_check(self):
+        """POST /v1/launch/inference-check: one request to the running engine, in the background."""
+        with self.lock:
+            state, t0 = self.st["state"], self.st["t0"]
+        if state != "running":
+            return 409, {"error": "the engine does not run"}
+        with self.icheck_lock:
+            if self.icheck["state"] == "checking":
+                return 409, {"error": "an inference check runs"}
+            self.icheck = {"state": "checking", "t0": t0, "started_unix": int(time.time()), "ended_unix": 0, "ok": False, "why": "",
+                           "ms": 0, "prompt_tokens": 0, "completion_tokens": 0}
+        threading.Thread(target=self.run_inference_check, daemon=True).start()
+        return 202, {"state": "checking"}
+
+    def run_inference_check(self):
+        t = time.time()
+        try:
+            _, health = self.engine_get("/health", 5)
+            body, want = inference_check_request(json.loads(health).get("model") or "")
+            status, ans = self.engine_post("/v1/chat/completions", json.dumps(body).encode(), INFER_CHECK_WAIT)
+            why, prompt, reply = inference_check_read(status, ans, want)
+        except (OSError, ValueError, http.client.HTTPException) as e:
+            why, prompt, reply = f"the engine does not answer ({e})", 0, 0
+        ms = int((time.time() - t) * 1000)
+        with self.icheck_lock:
+            self.icheck.update(state="done", ended_unix=int(time.time()), ok=not why, why=why, ms=ms, prompt_tokens=prompt,
+                               completion_tokens=reply)
+        log(f"inference check: {'ok' if not why else 'NG: ' + why} ({prompt} + {reply} tokens, {ms / 1000:.1f} s)")
+
+    def inference_check_view(self):
+        """GET /v1/launch/inference-check: the last check while the engine it asked still runs."""
+        with self.lock:
+            state, t0 = self.st["state"], self.st["t0"]
+        with self.icheck_lock:
+            v = dict(self.icheck)
+        if v.pop("t0") != t0 or state != "running":
+            v.update(state="idle", ok=False, why="", ms=0, prompt_tokens=0, completion_tokens=0)
+        return v
+
     def begin_weights_check(self, body):
         """POST /v1/launch/weights/check: the locations checked on every node at once, in the background."""
         asked = self.weights_body(body)
@@ -2279,6 +2364,9 @@ class Launcher:
         with self.wcheck_lock:
             self.wcheck.update(state="done", ended_unix=int(time.time()), nodes=rows, items=summary, ok=ok, why="; ".join(why[:5]),
                                found=found, _found=found_full)
+        # what this check just saw: a plan must not read the banks of up to BANK_TTL ago and say a width has no data
+        with self.bank_lock:
+            self.bank_state, self.bank_t = {}, 0.0
         log(f"weights check: {'ok' if ok else 'NG'}: " + ", ".join(f"{x['key']} {x['state']}" for x in summary))
 
     def ssh_in(self, node, cmd, data, timeout=30):
@@ -2362,8 +2450,9 @@ class Launcher:
         return 200, dict(self.weights_get(), copied=copied)
 
     def forget_check_weights(self):
-        """The last node check's rows for the weights and the banks were about the paths before this save: gone, or the
-        node screen goes on failing a lane whose weights are found (the save itself follows a check of these paths)."""
+        """The last node check's rows for the weights and the banks were about the paths before this save, and its memory
+        row about the KV_SIZE of then: gone, or the node screen goes on failing a lane whose weights are found (the save
+        itself follows a check of these paths)."""
         with self.check_lock:
             nodes = self.check.get("nodes") or []
             for n in nodes:
@@ -2708,7 +2797,8 @@ class Launcher:
         with self.bank_lock:
             if not force and self.bank_state and time.time() - self.bank_t < BANK_TTL:
                 return self.bank_state
-            if not force and self.bank_busy:
+            # a check in the background answers only with what it had: nothing yet is not "no bank"
+            if not force and self.bank_busy and self.bank_state:
                 return self.bank_state
             self.bank_busy = True
         try:
@@ -3338,8 +3428,8 @@ class Launcher:
         While the engine runs: its own picks and bits; apply asks the engine for the swap and saves the allocation as
         sort-<time> (save false: nothing saved, the panel names one itself). While it does not: the last run's picks and
         bits (launch/last-usage.json, whatever became of it: saved, pending or discarded, said in basis.run); apply saves
-        the allocation (applied false, saved, for the next start). An engine that cannot swap (TF_GLM53_MULTI): the
-        allocation saved and 409 asking for a stop and a start with it."""
+        the allocation (applied false, saved, for the next start). A request running or waiting: 409 busy, with
+        TF_GLM53_MULTI too."""
         try:
             j = json.loads(body or b"{}")
         except ValueError:
@@ -3430,7 +3520,7 @@ class Launcher:
         miss = self.missing_bits(set(target) if run is not None else {b for a, b in zip(cur, target) if a != b})
         out["missing_bits"] = {str(w): why for w, why in miss.items()}
         # while the engine runs and can swap: whether every node has the memory the swap needs (the engine refuses it
-        # otherwise); an engine that swaps nothing while it runs (TF_GLM53_MULTI: "available" false) only saves
+        # otherwise)
         live = run is None and up + down > 0
         if live:
             s, raw = self.engine_get("/v1/experts/swap", 5)
@@ -3463,16 +3553,6 @@ class Launcher:
             st, sw = r.status, r.read()
         finally:
             c.close()
-        if st == 409 and b"UnsupportedWithMulti" in sw:
-            # TF_GLM53_MULTI swaps nothing while it runs: the allocation kept for a start after a stop (save false:
-            # not kept, the panel saves the estimate under a name of its own)
-            saved = ""
-            if keep:
-                code, res = self.alloc_save(time.strftime("sort-%Y%m%d-%H%M%S"), bytes(target), "sort", what[:NOTE_MAX], basis)
-                saved = res.get("saved", "") if code == 200 else ""
-            return 409, dict(out, applied=False, saved=saved, multi=True,
-                             error="this engine runs TF_GLM53_MULTI and changes no bits while it runs" +
-                                   (": stop it and start with the saved allocation" if keep else ""))
         if st == 409:
             return 409, {"error": "busy"}
         if st != 200:
@@ -4465,6 +4545,11 @@ class Handler(BaseHTTPRequestHandler):
             # the inference screen's [ THINKING ]: the engine's change written to glm53.conf too (R-029)
             if method == "POST" and path == "/v1/thinking":
                 return self.send_json(*Lr.thinking_post(self.body()))
+            if method == "GET" and path == "/v1/launch/inference-check":
+                return self.send_json(200, Lr.inference_check_view())
+            if method == "POST" and path == "/v1/launch/inference-check":
+                self.body()
+                return self.send_json(*Lr.begin_inference_check())
             if method == "GET" and path == "/v1/launch/weights":
                 return self.send_json(200, Lr.weights_get())
             if method == "GET" and path == "/v1/launch/browse":

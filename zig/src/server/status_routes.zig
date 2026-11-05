@@ -123,6 +123,7 @@ fn cudaHealth(srv: *Server, a: Allocator, o: *json.Object, status: *const api.St
             try ro.put(a, "ranks", .{ .array = ranks });
             try o.put(a, "roce", .{ .object = ro });
         }
+        if (p.engine_cores.len > 0) try o.put(a, "engine_cores", .{ .string = p.engine_cores });
         const r = try json.newObject(a);
         try r.put(a, "phase", .{ .string = @tagName(p.phase) });
         try r.put(a, "prompt_tokens", try json.intValue(a, p.prompt));
@@ -315,7 +316,7 @@ pub fn expertsPost(srv: *Server, conn: *Conn, a: Allocator, route: []const u8) v
     const body = srv.engine.expertsControl(a, c) catch |err| {
         const code: u16 = switch (err) {
             error.Unsupported => 404,
-            error.Busy, error.Exists, error.UnsupportedWithMulti => 409,
+            error.Busy, error.Exists => 409,
             error.BadRequest => 400,
             error.Failed, error.OutOfMemory => 500,
         };

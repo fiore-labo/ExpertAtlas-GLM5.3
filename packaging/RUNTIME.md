@@ -116,7 +116,7 @@ cp glm53.conf.example glm53.conf    # nodes, network names, NCCL, weights, draft
 
 `up` starts the control panel's launcher on the first node and prints the panel's address,
 `http://FIRST-NODE:LAUNCHER_PORT/panel`. The first time, the panel opens on the node check: it finds how the nodes
-are cabled (a ring, or a switch whose servers you choose), checks them and registers them in `glm53.nodes.conf`;
+are cabled (a ring, or a switch, which takes the free servers; to use others, change the ticks and press again), checks them and registers them in `glm53.nodes.conf`;
 from then on it opens on the launch settings, where the weights' locations can be set too. A start from the panel loads the routed experts from the expert banks at the
 widths of the plan chosen there ("The control panel", below); `start` takes the last start's plan (none yet: every expert at 3 bits) and waits until the
 engine runs. `./tf-glm53 engine-up` by hand does the same as `start`. With the launcher's plan it checks every node, starts the ranks, waits for the
@@ -378,11 +378,12 @@ language, or Display > Language).
   `CONTEXT_LENGTH` or the longest that fits (at most 1,048,576 tokens); a length the plan's memory cannot hold is cut
   to what fits. The choice goes into `glm53.conf`, the number the plan took at the start, and the next page opens on it;
   until the panel has written one it opens on the longest.
-- **What each node keeps for the OS** (`RESERVE_GB`, 4 GiB by default, 2 to 32) is chosen there too. The panel does not
-  ask for a KV size: the KV cache takes all the room the plan leaves (the context length for one request, the rest for
-  earlier conversations), and the launch screen's KV rows (KV FP4 / KV FP8) show it in tokens. `tf-glm53 start` takes
+- **What each node keeps for the OS** (`RESERVE_GB`, 4 GiB by default, 2 to 32) is typed there too, in whole GiB. The KV
+  cache then takes all the room the plan leaves (the context length for one request, the rest for
+  earlier conversations), and the launch screen shows it in tokens. The KV size can be typed there instead: what each node
+  would keep then shows, and typing what a node keeps gives the KV all the room again. `tf-glm53 start` takes
   the context length and the KV size from `glm53.conf`, and `-e KV_SIZE=N` on the `docker run` line sets it for that start. The plan sizes the KV
-  cache with what each node keeps; the engine's own memory check at the start keeps the same amount. The KV cache is
+  cache with what each node keeps; the engine's own memory check at the start keeps the same amount (2 GiB, the least, with a KV size typed). The KV cache is
   set aside at the start and does not grow while the engine runs.
 - **The nodes.** While the engine is stopped the workers' addresses can be changed on the launch screen; the first
   node stays. Check copies this directory to them (`tf-glm53 deploy`) and runs `tf-glm53 check` on the list; Save writes
@@ -414,11 +415,10 @@ language, or Display > Language).
   then those that grow, and every node needs the largest layer's new copy on top of what the layers before it grew,
   plus 2 GiB (`TF_GLM53_SWAP_MARGIN_GIB`): the estimate says whether each node has it, and the page refuses the change
   with the node and the amounts when one does not (more kept for the OS at the next start leaves room, since the
-  KV takes all the room the plan leaves; a start from glm53.conf without the panel, a smaller `KV_SIZE`). A rank stuck past
+  KV takes all the room the plan leaves; with a KV size typed, or a start from glm53.conf without the panel, a smaller `KV_SIZE`). A rank stuck past
   `TF_GLM53_SWAP_DEADLINE_S` (600 s by default) ends its process, and `tf-glm53`'s watcher stops every rank. The
   result is not saved by itself: Save keeps it. A start loads the widths it is given and never re-sorts.
-- With `MULTI` set (`glm53.conf`) the engine changes no widths while it runs: expert optimisation saves the
-  estimate's widths under a name (`opt-<time>`), for a stop and a start with it.
+- With `MULTI` set (`glm53.conf`) it works the same: a change waits until no request runs or waits.
 - The page's settings (colours, the circle's order and the rest) are one file for every browser:
   `launch/panel-settings.json` (`TF_PANEL_SETTINGS` in `EXTRA_ENV` moves it).
 - `LAUNCH_SNAPSHOTS=1` in `glm53.conf` writes each node's GPU, memory and log tail before and after each start and

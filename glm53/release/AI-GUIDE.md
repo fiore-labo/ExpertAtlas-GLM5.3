@@ -172,7 +172,7 @@ details; the image can also be built from the archive with the fenced NCCL (`doc
    `glm53.nodes.conf`. That file is read after `glm53.conf` and wins for `TOPOLOGY`, `NODES`, `SOCKET_IFNAME` and `IB_HCA`.
    The launch screen's [ WEIGHTS ] sets where the weights are, and the engine settings screen the settings that need a restart.
 3. On the page: choose a plan, the KV format, the context length, what each node keeps for the OS, the drafter and the
-   concurrent inferences (the KV size is all the room the plan leaves, shown on the KV rows); check the memory verdict;
+   concurrent inferences (the KV size is all the room the plan leaves unless you type one); check the memory verdict;
    press Start (then Confirm). Stop from the page too (or `./tf-glm53 down`). Later starts with the same plan:
    `./tf-glm53 start`.
 
@@ -306,8 +306,8 @@ allocs/delete). `AGENT-API.md` gives what an agent needs of it; its fields may c
   meanwhile wait (a full change of 75 layers took 83 to 90 s on four nodes). Every node needs room for the largest
   layer's new copy on top of what the layers before it grew, plus 2 GiB; the estimate says whether each has it, and
   the page refuses the change, naming the node, when one does not. The result is not saved by itself. A start
-  loads the widths it is given and never re-sorts. With `MULTI` set nothing changes while the
-  engine runs: the estimate's widths are saved under a name (`opt-<time>`) for a stop and a start with it.
+  loads the widths it is given and never re-sorts. With `MULTI` set it works the same: a change
+  waits until no request runs or waits.
 - **What the re-sort gains** (four nodes, half 3 / half 4 bits, Both): the KL divergence from the all-4-bit model fell
   24 % on the reply's tokens at 8,192 tokens and 32 to 34 % at 128K and 256K tokens; 15 to 22 % on the prompt's tokens
   (`ATLAS-TESTS.md`). On kinds of work not in the counts it ranks by the gain is smaller (about two thirds).

@@ -232,6 +232,9 @@ stream).
 The dashboard at `http://NODE:8010/panel` shows the engine and starts and stops it. An AI agent can do the same through
 the control API: `AGENT-API.md` has the steps, and `AI-GUIDE.md` describes the whole system.
 
+On a switch that also has other people's nodes, give your own to the start line (`-e NODES=...`). In the dashboard's node
+check, choose the node count and the ticks first, then press (`PANEL-GUIDE.md`, "Node check").
+
 ## 6. Stop and start again
 
 ```sh

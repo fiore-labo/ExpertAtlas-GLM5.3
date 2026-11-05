@@ -11,6 +11,16 @@ itself. This release's panel runs on four or eight nodes (the count is picked in
 
 The circle shows the 19,200 routed experts: layers 3 to 77 run from the inside out, 256 experts a ring.
 
+## Node check
+
+While no nodes are registered, the panel opens here, and it reads how the head is cabled as it opens (on a switch, the list of nodes to choose from). **Check the nodes** does the rest: it finds how the nodes are cabled, checks
+them (copying the package where it is missing), registers them and goes on to the launch screen; anything wrong stops it there
+and says why. A ring also measures its lanes' bandwidth. A switch takes the lane's registered workers, else the largest node
+count the free nodes fill. To use others, change the node count or the ticks and press again.
+
+**A switch with other people's nodes:** the button can take only nodes your ssh key reaches, but choose the node count and the
+ticks first, then press. For `docker run ... IMAGE up`, give your own to the start line (`-e NODES=...`, `QUICKSTART.md`).
+
 ## Launch screen (engine stopped)
 
 - **Plan** ([ BIT ALLOC ]): the bits each expert loads at. The screen opens with a new plan at the last run's shares
@@ -56,8 +66,8 @@ The circle shows the 19,200 routed experts: layers 3 to 77 run from the inside o
   planned: its row in the table shows No data and takes no share.
 - **Memory** ([ NODE ]): each node's memory for the plan (expert, Other weights, KV, Work, Margin) and the verdict:
   Can start, Can start (little room) or Not enough memory. KV FP4 / FP8 shows the KV size each format would allocate (tokens, and GiB a node); press
-  one to choose it. The KV always takes all the room the plan leaves: Context length for one conversation, the rest for
-  earlier conversations. Keep for the OS sets how much each node keeps free.
+  one to choose it. By default the KV takes all the room the plan leaves: Context length for one conversation, the rest for
+  earlier conversations.
 - **Context length**: the longest request (prompt and reply) the start allows, in tokens: 131K, 262K, 524K, glm53.conf's
   CONTEXT_LENGTH, or Max (the most the plan leaves room for in the chosen KV format, less what the engine needs beyond it: it
   is never the whole KV size, the pool cache keeping at least 512 tokens). A size that does not fit is greyed; a
@@ -66,8 +76,12 @@ The circle shows the 19,200 routed experts: layers 3 to 77 run from the inside o
   sizes with 2 GiB more kept, so Max is shorter (est.); the KV rows say est. or Measured to the left of their size. The measurement is taken just after the start, with nothing
   running, so at Max a node can dip a little under what it keeps for the OS while requests run. The i beside the name
   says this and whether the drafter picked is measured.
-- **Keep for the OS**: what each node keeps free after the start, 4, 6, 8 or 12 GiB (glm53.conf's RESERVE_GB, 4 by
-  default). The verdict and the engine's own admission use it; more kept leaves less for the KV.
+- **Keep for the OS**: what each node keeps free after the start, in whole GiB from 2 to 32 (glm53.conf's RESERVE_GB, 4 by
+  default). The verdict and the engine's own admission use it; more kept leaves less for the KV, whose size shows in the box below.
+- **KV size**: the tokens the KV holds in all. Type a number to set it yourself, at least Context length + 512: Keep for the OS
+  then shows what would be left, the least of the nodes, marked Expected, and another KV format keeps the tokens. If the memory
+  does not hold it, the verdict is Not enough memory and the context stays as it is. Typing Keep for the OS again gives the KV all
+  the room left. Both go into glm53.conf as they change (RESERVE_GB, KV_SIZE).
 - **Drafter**: MTP, DFlash2 or None, chosen under the KV format; the memory is planned for it. DFlash2 is not shipped
   (its licence): download it and set DRAFTER in glm53.conf. Until every node has it, it is greyed with the reason.
 - **Nodes** (in the card's head, while the engine is stopped): the head (rank 0) is the node the launcher runs on.
@@ -106,12 +120,13 @@ The circle shows the 19,200 routed experts: layers 3 to 77 run from the inside o
   below the circle, prefill and decode tok/s (decode: every request's tokens together, decode total when several run at
   once; prefill when several run: the request the circle follows, over the time its prompt computed, the waits for the
   decode left out, — from an engine that does not give it), and bpw over the last 3 minutes.
-- **[ NODE ]**: Stop, and the servers: each named with head or worker beside it, with its free memory and its GPU and CPU
+- **[ NODE ]**: Health check sends the running engine one request of about 1,000 tokens and judges the reply: Inference OK over the circle's centre, for a few seconds, or Inference error, which stays with its reason under the button until the next press or the engine stops (under the button too while the circle is hidden). Behind a long inference it waits its turn, up to 600 s. Stop, and the servers: each named with head or worker beside it, with its free memory and its GPU and CPU
   temperatures (the CPU's is the hottest of the node's thermal zones: on GB10 the CPU and GPU share one chip, which runs
   6-10 °C above the GPU's own reading under load), read by the launcher every 5 s; "—" where the launcher gives none.
   RDMA (an engine that says where its RoCE proxy threads run): each node's two proxy threads' CPUs, between the nodes
-  and the DCP pair (e.g. 0·10), and their kind, A725 or X925; the line under the table says the start setting
-  (ROCE_PROXY_CORES: kept on A725, the default, or left to the OS). The head's are where they ran last; the
+  and the DCP pair (e.g. 0·10), with their kind, A725 or X925, in the cell's title; the line under the table says the
+  start setting (ROCE_PROXY_CORES: kept on A725, the default, or left to the OS), and the line below it where the engine
+  itself runs (ENGINE_CORES: A725, or OS, the default), for an engine that says so. The head's are where they ran last; the
   other nodes' where they were kept at the start, "—" when left to the OS. Without the launcher the same is a card of
   its own, [ RDMA ].
   Concurrent: the engine's conversations at once and, at 2 or more, the requests in flight.
@@ -121,8 +136,7 @@ The circle shows the 19,200 routed experts: layers 3 to 77 run from the inside o
   generating, new prompts wait and a running prefill stops), in steps of 5; between, that percentage of the time goes
   to the decode. When only one of them has work, it uses all of the GPU. The value is sent when the slider is let go
   (Applying…, then Applied) and holds for the running requests too; a refused change goes back to the value in use, the
-  reason in red. The dot under the slider is the value the engine started with, when the engine gives it. Below: the
-  decode's share the engine measured over the latest overlap (Overlapping while they overlap); at decode 100%, the
+  reason in red. The dot under the slider is the value the engine started with, when the engine gives it. Below, at decode 100%: the
   prompts waiting and the longest wait. Each row's explanation opens from the ⓘ beside its name (as Context length's)
   and shuts with it or Escape; a refusal's reason shows in red without it.
   Priority prompt (short_prompt in the API): a prompt with at most this many new tokens to compute (past the cache, not its length) goes before the
@@ -166,13 +180,11 @@ The circle shows the 19,200 routed experts: layers 3 to 77 run from the inside o
   While it shows, it is asked again every 30 s, and Apply sorts by the counts at the press.
   Press Apply: the panel waits for the running request to end, then swaps layer by layer. The result is not saved by
   itself; Save keeps it. A full change (9,756 experts over 75 layers) took 83 to 90 s on four nodes.
-- An engine run with `TF_GLM53_MULTI` changes no bits while it runs. There Optimise experts gives the estimate with
-  Save for a start in place of Apply: the estimate's bits are saved under a name (`opt-<time>`), inference going on.
-  Stop the engine, Open that allocation and Start.
+- With concurrent inference (2 or more) Apply works as it does without it: it waits until no request runs or waits.
 
 ## Engine settings
 
-The switch at the top right, Inference (Launch while stopped) | Engine settings, opens the settings that need a restart,
+Hide, right of the switch at the top right, takes the circle off the inference and launch screens and stops drawing it, and the cards stand in columns: beside what was under it, the nodes, then what changes while it runs and the plan (on the launch screen the nodes, the plan, then the rest). Show brings it back, and the lane remembers. The switch at the top right, Inference (Launch while stopped) | Engine settings, opens the settings that need a restart,
 in glm53.conf (a launcher without them shows no switch). The settings that change while running stay on the inference
 screen: the GPU split, [ REASONING CONTROL ] (its changes written to glm53.conf as they apply) and Optimise experts.
 
@@ -180,8 +192,8 @@ screen: the GPU split, [ REASONING CONTROL ] (its changes written to glm53.conf 
   default), Changed while it differs from glm53.conf, and the key. A value against its rule (the same checks as
   tf-glm53) is red and Save is greyed; a choice that cannot be taken now is greyed and says why when pointed at.
 - **KV and context length**: Context length (CONTEXT_LENGTH: one request's longest) and KV size (KV_SIZE: the whole
-  KV cache, one pool every conversation shares; a start from the panel always takes all the room the plan leaves, so
-  this is for `tf-glm53 up`) and the KV format.
+  KV cache, one pool every conversation shares; a start from the panel takes it once it is set here or typed on the launch
+  screen; Keep for the OS, typed there, gives the KV all the room left again) and the KV format.
 - **Thinking and answer sizes**: max_tokens, one reply's limit (MAX_TOKENS_SHARE, a slider: a share of the context length, 70% by default,
   for a request that names no max_tokens; the client's own max_tokens comes first, and an older glm53.conf's MAX_TOKENS
   until the slider is saved, which clears it) and the

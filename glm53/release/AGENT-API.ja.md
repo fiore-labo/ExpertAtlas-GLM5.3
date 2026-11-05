@@ -67,6 +67,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 | `/v1/launch/check` | `/v1/launch/check` | `state` が `done` | 2〜4 秒 (`deploy: false`) |
 | `/v1/launch/discover` | `/v1/launch/discover` | `state` が `done` | 1〜3 秒 |
 | `/v1/launch/weights/check` | `/v1/launch/weights` の `check` | `check.state` が `done` | 5 秒未満 |
+| `/v1/launch/inference-check` | `/v1/launch/inference-check` | `state` が `done` | 約 3 秒。長い推論の後ろでは最大 600 秒 |
 
 読む間隔は 2〜10 秒で足ります。
 
@@ -400,6 +401,8 @@ s, r = call(EP, "POST", "/v1/chat/completions", {"model": MODEL, "max_tokens": 6
     "chat_template_kwargs": {"enable_thinking": False}}, timeout=180)
 # content に 391 があること
 ```
+
+`POST /v1/launch/inference-check` は、同じことをランチャーから行います。約 1,000 token の要求を 1 本、裏で送ります (202。エンジンが動いていないときと確認中は 409)。`GET /v1/launch/inference-check` で `state` (idle、checking、done)、`ok`、異常のときの `why`、`ms`、`prompt_tokens`、`completion_tokens` を読みます。判定はランチャーが行います: HTTP 200、`finish_reason` が stop、答えがプロンプト内の乱数と一致。エンジンが止まると idle に戻ります。
 
 `MODEL` は `GET /health` の `model` です。**起動直後の 1 本目は prefill が遅くなります。** 速さを測る時は捨てます。
 

@@ -311,7 +311,7 @@ pub const TokenBytes = struct {
 /// Fiore-lab: POST /v1/experts/swap (the bits wanted: one byte an expert, the MoE layers in order; run between
 /// requests) or POST /v1/experts/save (a name for the bits in use).
 pub const ExpertsControl = union(enum) { swap: []const u8, save: []const u8 };
-pub const ControlError = error{ Unsupported, UnsupportedWithMulti, Busy, BadRequest, Exists, Failed, OutOfMemory };
+pub const ControlError = error{ Unsupported, Busy, BadRequest, Exists, Failed, OutOfMemory };
 
 /// Fiore-lab: how TF_GLM53_MULTI shares the GPU's time between a prompt being computed and the live conversations'
 /// decode while both want it (GET / POST /v1/schedule, changed while the engine runs; the family's pace.zig).
@@ -459,6 +459,8 @@ pub const Progress = struct {
     multi_schedule: Schedule = .{},
     /// Fiore-lab: where the RoCE proxies poll (world 0: no RoCE).
     roce: Roce = .{},
+    /// Fiore-lab: where the engine itself may run: "a725" or "os" (empty: not said).
+    engine_cores: []const u8 = "",
     /// The requests running now, the oldest admitted first: every conversation admitted when several decode
     /// together, else the one running. Not the ones waiting for admission.
     requests: [max_requests]RequestProgress = @splat(.{}),

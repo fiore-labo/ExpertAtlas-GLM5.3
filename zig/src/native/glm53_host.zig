@@ -1005,6 +1005,7 @@ pub const Host = struct {
         p.multi_schedule = h.scheduleNow();
         // where the RoCE proxies poll (TF_GLM53_ROCE_PROXY_CORES): rank 0's from /proc now, the others' from the start
         // RoCE の proxy が待つ所 (TF_GLM53_ROCE_PROXY_CORES): rank 0 のものは今 /proc から、ほかは起動時から
+        p.engine_cores = glm.roce.engineCores(h.io);
         if (h.eng.roceView(h.io)) |v| {
             p.roce.mode = switch (v.mode) {
                 .a725 => .a725,
@@ -1137,7 +1138,7 @@ pub const Host = struct {
         h.lock();
         defer h.unlock();
         const s = h.swap;
-        try w.print("{{\"available\": {}, \"plan\": ", .{h.eng.banks != null and h.multi_n == 0});
+        try w.print("{{\"available\": {}, \"plan\": ", .{h.eng.banks != null});
         try planJson(h, w);
         try w.writeAll(", \"banks\": {");
         var first = true;
@@ -1214,18 +1215,15 @@ pub const Host = struct {
         std.log.info("glm53: schedule: a prompt with at most {d} rows to compute past the cache is short (it goes first, not held by the share)", .{v});
     }
 
-    /// POST /v1/experts/swap: taken only while nothing runs or waits (the engine thread runs it next);
+    /// POST /v1/experts/swap: taken only while nothing runs or waits (the engine thread runs it next), with
+    /// TF_GLM53_MULTI too: no conversation live or being admitted;
     /// POST /v1/experts/save: the bits in use, as a named set (TF_GLM53_EXPERT_SETS/<name>.json).
-    /// Neither with TF_GLM53_MULTI (UnsupportedWithMulti, 409: its scheduler runs no swap: not supported for
-    /// now).
     /// POST /v1/experts/swap: 何も実行・待機していないときだけ受ける (次にエンジンのスレッドが実行)。
+    /// TF_GLM53_MULTI でも同じく、使用中の会話も受け入れ中の会話もないとき。
     /// POST /v1/experts/save: 使用中の bit を名前つきのセットとして (TF_GLM53_EXPERT_SETS/<name>.json)。
-    /// TF_GLM53_MULTI ではどちらも断る (UnsupportedWithMulti、409: そのスケジューラは入れ替えをしない。今は対応
-    /// しない)。
     fn controlFn(ctx: *anyopaque, a: Allocator, c: api.ExpertsControl) api.ControlError![]u8 {
         const h: *Host = @ptrCast(@alignCast(ctx));
         if (h.group.rank != 0) return error.Unsupported;
-        if (h.multi_n > 0) return error.UnsupportedWithMulti;
         switch (c) {
             .swap => |bits| {
                 if (h.eng.banks == null) return error.Unsupported;
@@ -1234,7 +1232,7 @@ pub const Host = struct {
                 const want = try h.gpa.dupe(u8, bits);
                 h.lock();
                 defer h.unlock();
-                if (h.running != null or h.queued.items.len > 0 or h.swap_want != null or h.swap.state == .running or h.closing) {
+                if (h.running != null or h.admitting != null or h.prefilling != null or h.liveCount() > 0 or h.queued.items.len > 0 or h.swap_want != null or h.swap.state == .running or h.closing) {
                     h.gpa.free(want);
                     return error.Busy;
                 }
@@ -1343,7 +1341,8 @@ pub const Host = struct {
         };
         std.log.info("glm53: expert swap {d}: start", .{h.swap.seq});
         var st: glm.expert_swap.Stats = .{};
-        const r = glm.lockstep.swap(&h.ch, h.eng, want, .{ .ctx = h, .f = Prog.f }, &st);
+        const prog: glm.expert_swap.Progress = .{ .ctx = h, .f = Prog.f };
+        const r = if (h.multi_n > 0) glm.lockstep.swapMulti(&h.ch, h.eng, want, prog, &st) else glm.lockstep.swap(&h.ch, h.eng, want, prog, &st);
         h.lock();
         h.swap.stats = st;
         if (r) |_| {
@@ -2127,10 +2126,25 @@ pub const Host = struct {
             // TF_GLM53_MULTI_WAIT_S を過ぎた待ち。鍵を取る前に (expireWaits が自分で取る)
             h.expireWaits();
             h.lock();
-            while (h.queued.items.len == 0 and h.liveCount() == 0 and !h.closing) {
+            while (h.queued.items.len == 0 and h.liveCount() == 0 and h.swap_want == null and !h.closing) {
                 h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
             }
+            // a change of the bits goes before what came after it was asked (nothing was live or waiting then); the
+            // pool is cold after it, so the queued jobs' estimates are made again
+            // bit の変更は、求められた後に来たものより先 (そのとき使用中も待ちもなかった)。変更の後の
+            // pool は空なので、待ち行列の job の見積もりは作り直す
+            if (h.swap_want) |want| if (!h.closing and h.liveCount() == 0) {
+                h.swap_want = null;
+                h.swap.state = .running;
+                h.pool_gen +%= 1;
+                h.unlock();
+                h.runSwap(want);
+                h.memSnap();
+                continue;
+            };
             if (h.closing) {
+                if (h.swap_want) |want| h.gpa.free(want);
+                h.swap_want = null;
                 const left = h.gpa.dupe(*Job, h.queued.items) catch &.{};
                 h.queued.clearRetainingCapacity();
                 for (h.act[0..h.multi_n]) |a| if (a) |job| job.stop.store(true, .monotonic);

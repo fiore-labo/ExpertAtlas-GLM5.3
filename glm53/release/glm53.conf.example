@@ -96,6 +96,9 @@ READY_TIMEOUT=900
 # ROCE_PROXY_CORES: the cores the RoCE proxy threads poll on (they spin while the decode runs): a725 (default: GB10's
 # Cortex-A725 cores 0 and 10, so they do not heat the fast X925 cores), x925 (cores 5 and 15), os (the scheduler's).
 #ROCE_PROXY_CORES=a725
+# ENGINE_CORES: the cores every rank runs on: all (default), or a725 (each node's Cortex-A725 cores, none of the X925;
+# ROCE_PROXY_CORES=x925 cannot go with it).
+#ENGINE_CORES=all
 # MAX_TOKENS_SHARE: a reply's max_tokens when the request names none, as a percent of CONTEXT_LENGTH (1 to 100; default
 # 70). MAX_TOKENS: the same as a token count; it comes first when set.
 # THINKING_SHARE: the percent of a reply's max_tokens, at most of what the prompt leaves of CONTEXT_LENGTH, its thinking
