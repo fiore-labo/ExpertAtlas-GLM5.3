@@ -251,7 +251,7 @@ s, r = call(LP, "POST", "/v1/launch/settings", {"values": {"THINKING_SHARE": "90
 
 所有设置项和规则由 `GET /v1/launch/settings` 返回。说明见 `CONFIG.zh-CN.md`。
 
-下表的默认值是 `tf-glm53` 的默认值。`docker run ... IMAGE up` 根据 `glm53.t4.conf.example` 写入 `glm53.conf`，所以初始值为 `CONTEXT_LENGTH` 737280、`KV_SIZE` 837280、`KV` fp4、`LAUNCHER_PORT` 8010，启动时的 KV 大小为 `max`。
+下表的默认值是 `tf-glm53` 的默认值。`docker run ... IMAGE up` 根据 `glm53.t4.conf.example` 写入 `glm53.conf`，所以初始值为 `CONTEXT_LENGTH` 1048576、`KV_SIZE` 1049088、`KV` fp4、`LAUNCHER_PORT` 8010，启动时的 KV 大小为 `max`。
 
 | 设置项 | 默认值 | when | 含义 |
 |---|---|---|---|

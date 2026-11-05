@@ -117,7 +117,7 @@ Weights already somewhere else? Keep them there and name the directory with an o
 ### What the widths mean
 
 The routed experts of the model can be loaded at 2, 3, 4 or 5 bits. **The default start loads every expert at 3 bits.** On
-four nodes this fits with a context length of 737,280 tokens. You can start every expert at another width with
+four nodes this fits with the default context length of 1,048,576 tokens. You can start every expert at another width with
 `BITS`. The dashboard can also choose a width for each expert from the banks you have.
 
 ## 3. Start
@@ -187,7 +187,7 @@ The start:
 | `BITS` | `3` | Every expert at this width (2 to 5). Its bank must be on every node |
 | `ALLOC` | none | A saved allocation (its per-expert widths and usage), instead of `BITS` |
 | `NODES` | found | The workers' addresses on a switch, when more nodes are free than a lane uses. A ring finds its own |
-| `CONTEXT_LENGTH` | `737280` | The longest prompt plus reply. Cut to fit when too long, and the output says so |
+| `CONTEXT_LENGTH` | `1048576` | The longest prompt plus reply. Cut to fit when too long, and the output says so |
 | `KV_SIZE` | `max` | The tokens the KV cache holds in all: a number, or `max` for all the memory left. For this start only |
 | `KV` | `fp4` | The KV cache's format: `fp4` or `fp8` |
 | `DRAFTER_KIND` | `mtp` | `mtp`, `dflash2` or `none` |

@@ -2159,7 +2159,7 @@ class Launcher:
         with self.wcheck_lock:
             ch = {k: v for k, v in self.wcheck.items() if not k.startswith("_")}
         return {"weights": w if w is not None else self.weights_dir, "drafter": d if d is not None else self.drafter_path,
-                "drafter_kind": self.drafter_conf, "saved_unix": saved,
+                "drafter_kind": self.drafter_conf, "saved_unix": saved, "checkpoint_repo": CHECKPOINT_REPO,
                 "banks": [{"id": b["id"], "bits": b.get("bits"), "dir": b.get("dir", ""), "repo": b.get("repo", ""), "required": b.get("bits") == REQUIRED_BITS,
                            "manifest": b.get("manifest") or os.path.join(b.get("dir", ""), b["id"] + ".json")} for b in self.banks_raw()],
                 "check": json.loads(json.dumps(ch))}

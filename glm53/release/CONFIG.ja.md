@@ -4,7 +4,7 @@
 
 `docker run ... IMAGE up` では、エンジン設定の項目を `-e 項目=値` で指定できます (`QUICKSTART.ja.md`)。次の項目は `not an option` で止まるので、`~/expertatlas/glm53.conf` に書きます: `GID_INDEX`、`RUNTIME`、`NCCL_LIB`、`EXPERT_LIVE`、`LOG_LISTEN`、`CONTEXT`、`STORE`、`THINKING_FOLD_KEEP`、`NEED_GB`、`LAUNCHER_HOST`、`ATLAS_DIR`、`LAUNCH_SNAPSHOTS`。`TOPOLOGY`、`SOCKET_IFNAME`、`IB_HCA` はノード確認が決めます。
 
-下の既定は `tf-glm53` の既定です。`docker run ... IMAGE up` は台数によらず `glm53.t4.conf.example` から `glm53.conf` を書くので、`CONTEXT_LENGTH` 737280、`KV_SIZE` 837280、`KV` fp4、`NEED_GB` 115 で始まり、起動の KV サイズは `max` です。
+下の既定は `tf-glm53` の既定です。`docker run ... IMAGE up` は台数によらず `glm53.t4.conf.example` から `glm53.conf` を書くので、`CONTEXT_LENGTH` 1048576、`KV_SIZE` 1049088、`KV` fp4、`NEED_GB` 115 で始まり、起動の KV サイズは `max` です。
 
 `glm53.conf` には、レーンの設定（ノード、ネットワーク、重み、drafter、サーバー、メモリ、コントロールパネル）を書きます。シェルのファイルで、1 台目のノードの `tf-glm53` と同じディレクトリに置き、手で書いて編集します。`glm53.t4.conf.example`（4 台）か `glm53.conf.example`（8 台）を `glm53.conf` にコピーし、ノード、ネットワークのデバイス、パスを書き入れてください。それ以外の項目は、例に実測した値が入っています。
 
@@ -105,7 +105,7 @@
 
 | 項目 | 既定 | 意味 |
 |---|---|---|
-| `NEED_GB` | `112` | 起動の前に各ノードで使えなければならない GiB（`tf-glm53 check`）。DFlash2 では 3 多く、`KV_SIZE` が 1,638,400 より 100,000 位置少ないごとに、`KV=fp8` で 2.55、`KV=fp4` で 1.73 少なくなります。4 台の例は 115 で、その `KV_SIZE` で 101 になります。パネルからの起動は、計画の値を代わりに使います。 |
+| `NEED_GB` | `112` | 起動の前に各ノードで使えなければならない GiB（`tf-glm53 check`）。DFlash2 では 3 多く、`KV_SIZE` が 1,638,400 より 100,000 位置少ないごとに、`KV=fp8` で 2.55、`KV=fp4` で 1.73 少なくなります。4 台の例は 115 で、その `KV_SIZE` で 105 になります。パネルからの起動は、計画の値を代わりに使います。 |
 | `READY_TIMEOUT` | `900` | 起動（`tf-glm53 engine-up`。パネルからの起動もこれを実行します）がサーバーを待つ秒数。 |
 
 ### コントロールパネル

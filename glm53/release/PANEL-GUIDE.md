@@ -43,6 +43,13 @@ The circle shows the 19,200 routed experts: layers 3 to 77 run from the inside o
   The 12 domains: Coding, Agent, Japanese, English, Agent A, Agent B, Coding (ja), Coding (en), Linux ops (ja),
   Linux ops (en), Security (ja), Security (en). Each weighs the same: an expert ranks by the largest share it has of its
   layer in any domain.
+- **[ WEIGHTS ]**: where the checkpoint and the expert banks are, the same path on every node. By default the checkpoint is
+  `~/models/GLM-5.3-EXL3-Base` (Hugging Face `fiore-lab/GLM-5.3-EXL3-Base`) and each bank `~/models/GLM-5.3-EXL3-Experts-<N>bit`
+  (`QUICKSTART.md`, section 2). Weights somewhere else: write the directory in the row, or use Browse, then press Check and save.
+  Every node is looked at when the screen opens, when a row changes, and every 15 seconds while something required is missing;
+  this only reads, nothing is saved. The checkpoint and the 3-bit bank are required: without them the row is red, names the
+  nodes and the repository, and Start stays off. Start also stays off while a row shows a directory that is not saved. The other
+  widths are optional: a row left empty, or a bank not found, only leaves that width out.
 - **Banks and No data**: the experts at each width come from Hugging Face `fiore-lab/GLM-5.3-EXL3-Experts-<N>bit`
   (N = 2, 3, 4, 5), each in its own directory on every node, by default `~/models/GLM-5.3-EXL3-Experts-<N>bit`, with
   its manifest. A width whose bank is missing on any node shows No data with the node and what it lacks. It cannot be
@@ -54,7 +61,7 @@ The circle shows the 19,200 routed experts: layers 3 to 77 run from the inside o
 - **Context length**: the longest request (prompt and reply) the start allows, in tokens: 131K, 262K, 524K, glm53.conf's
   CONTEXT_LENGTH, or Max (the most the plan leaves room for in the chosen KV format, less what the engine needs beyond it: it
   is never the whole KV size, the pool cache keeping at least 512 tokens). A size that does not fit is greyed; a
-  context the launcher had to cut is shown under the row. Max is the default until the panel has written one: every choice on this screen goes into glm53.conf as it is made (Max as its number, at the start), and the next page opens on it. The launcher finds Max from the memory a
+  context the launcher had to cut is shown under the row. Max is the default until the panel has written one: every choice on this screen goes into glm53.conf as it is made (Max as its number, and again when that moves; not pressed, at the start), and the next page opens on it. The launcher finds Max from the memory a
   start with that drafter took on this lane (measured each start, a drafter at a time); until then it plans on built-in
   sizes with 2 GiB more kept, so Max is shorter (est.); the KV rows say est. or Measured to the left of their size. The measurement is taken just after the start, with nothing
   running, so at Max a node can dip a little under what it keeps for the OS while requests run. The i beside the name

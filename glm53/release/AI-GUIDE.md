@@ -22,7 +22,7 @@ server needs no Python at run time.
 |---|---|
 | Model | GLM-5.3, full size, EXL3-quantized weights published by Fiore-lab on Hugging Face |
 | Nodes | 4 or 8 DGX Spark (GB10) on one RoCE v2 network, or 4 cabled as a ring without a switch; 2- and 3-node forms are being tested, and nothing else is supported |
-| Context length | up to 1,048,576 tokens on both node counts. Eight nodes: `KV_SIZE` 2,097,152 with it on the 4-bit KV cache (`KV=fp4`, `NEED_GB=100`), 1,638,400 on the 8-bit one. Four nodes: from the control panel with 70 % of the routed experts at 3 bits and 30 % at 4 (4-bit KV, `KV_SIZE` 1,049,088); a default start, every routed expert at 3 bits, 737,280. Eight nodes on the 4-bit KV cache and four nodes from the control panel were each measured with one prompt of about 1,019,000 tokens. The 4-bit KV cache costs some accuracy (KL 0.0190 against 0.0156, `T4.md`). The examples ship 819,200 and 737,280 |
+| Context length | up to 1,048,576 tokens on both node counts. Eight nodes: `KV_SIZE` 2,097,152 with it on the 4-bit KV cache (`KV=fp4`, `NEED_GB=100`), 1,638,400 on the 8-bit one. Four nodes: from the control panel with 70 % of the routed experts at 3 bits and 30 % at 4 (4-bit KV, `KV_SIZE` 1,049,088); a default start asks for 1,048,576 on either node count and cuts it, saying so, when the room is short. Eight nodes on the 4-bit KV cache and four nodes from the control panel were each measured with one prompt of about 1,019,000 tokens. The 4-bit KV cache costs some accuracy (KL 0.0190 against 0.0156, `T4.md`). The examples ship 819,200 and 1,048,576 |
 | API | OpenAI-compatible chat API (`/v1/chat/completions`) and Anthropic's Messages API (`/v1/messages`) on every address (`0.0.0.0:8000`) by default |
 | Requests | one runs at a time by default, up to 32 more waiting in a queue; `MULTI` decodes up to 4 conversations together |
 | Drafters | MTP (the layer in the weights, default), DFlash2 (optional, not included, separate licence), or none |
@@ -189,8 +189,8 @@ details; the image can also be built from the archive with the fenced NCCL (`doc
 | `NAME`, `HOST`, `PORT` | the model name in the API, the listen address and port | `glm-5.3`, `0.0.0.0`, 8000 |
 | `METRICS_LISTEN` | an extra read-only address answering `/metrics`, `/health` and `/v1/experts/usage` only | off |
 | `LOG_LISTEN` | every node's log keeper answers its logs on this address, read-only | off |
-| `CONTEXT_LENGTH` | the context length: positions one request may reach, prompt and reply together (at most 1,048,576) | 819,200 / 737,280 |
-| `KV_SIZE` | the KV size: the whole KV cache in positions, one pool every conversation shares; what a request does not use keeps earlier conversations (`CONTEXT_LENGTH` + 512 at least) | 1,638,400 / 837,280 |
+| `CONTEXT_LENGTH` | the context length: positions one request may reach, prompt and reply together (at most 1,048,576) | 819,200 / 1,048,576 |
+| `KV_SIZE` | the KV size: the whole KV cache in positions, one pool every conversation shares; what a request does not use keeps earlier conversations (`CONTEXT_LENGTH` + 512 at least) | 1,638,400 / 1,049,088 |
 | `KV` | the KV cache format, `fp8` or `fp4` | `fp8` / `fp4` |
 | `DCP`, `ROWS`, `SP_PARTS` | decode context parallelism, prompt chunk rows, sequence-parallel parts a chunk | 2, 8,192, 4 |
 | `NEED_GB` | the memory a node must have available before a start (it follows the KV size, plus 3 with DFlash2; `CONFIG.md` gives how) | 112 (default) / 115 (asks 101 GiB) |
@@ -311,7 +311,7 @@ allocs/delete). `AGENT-API.md` gives what an agent needs of it; its fields may c
 - **What the re-sort gains** (four nodes, half 3 / half 4 bits, Both): the KL divergence from the all-4-bit model fell
   24 % on the reply's tokens at 8,192 tokens and 32 to 34 % at 128K and 256K tokens; 15 to 22 % on the prompt's tokens
   (`ATLAS-TESTS.md`). On kinds of work not in the counts it ranks by the gain is smaller (about two thirds).
-- **Memory, four nodes** (4-bit KV, a KV size of the context length + 100,000, MTP, `ROWS` 16,384; the default of 8,192 leaves more): all 3 bits fits a context length
+- **Memory, four nodes** (4-bit KV, plans asking for at most 737,280 with a KV size of the context length + 100,000, MTP, `ROWS` 16,384; the default of 8,192 leaves more): all 3 bits fits a context length
   of 737,280 tokens; half 3 / half 4 bits 737,280; a quarter 3 / three quarters 4 bits 622,592; all 4 bits 327,680; all
   5 bits does not fit. With `CONTEXT_LENGTH` 1,048,576 and `KV_SIZE` 1,049,088, 70 % at 3 bits and 30 % at 4 bits
   fits with about 7.5 GiB a node to spare, enough for a live re-sort. DFlash2 needs about 4 GiB more a node. Mixes with 2-bit experts were 13 to 30 % further from the reference at the same memory.
