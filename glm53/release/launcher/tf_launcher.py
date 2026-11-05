@@ -861,10 +861,14 @@ class Launcher:
         return n
 
     def probe_all(self):
+        asked = self.nodes
         with ThreadPoolExecutor(max(1, self.world)) as ex:  # max: a lane with no NODES yet (the node check first)
             info = list(ex.map(self.probe, range(self.world)))
         with self.lock:
-            self.node_info, self.node_t = info, time.time()
+            # NODES saved meanwhile: this read is of the old nodes, 8 s late when they do not answer (the example's
+            # addresses before the first node check). It must not replace the new nodes': it reads as no memory
+            if asked is self.nodes:
+                self.node_info, self.node_t = info, time.time()
         return info
 
     def on_all(self, cmd, timeout=120):
