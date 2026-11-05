@@ -251,7 +251,7 @@ s, r = call(LP, "POST", "/v1/launch/settings", {"values": {"THINKING_SHARE": "90
 
 全部の鍵と規則は `GET /v1/launch/settings` が返します。説明は `CONFIG.ja.md` にあります。
 
-下の表の既定は `tf-glm53` の既定です。`docker run ... IMAGE up` は `glm53.t4.conf.example` から `glm53.conf` を書くので、`CONTEXT_LENGTH` 737280、`KV_SIZE` 837280、`KV` fp4、`ROWS` 16384、`LAUNCHER_PORT` 8010 で始まり、起動の KV サイズは `max` です。
+下の表の既定は `tf-glm53` の既定です。`docker run ... IMAGE up` は `glm53.t4.conf.example` から `glm53.conf` を書くので、`CONTEXT_LENGTH` 737280、`KV_SIZE` 837280、`KV` fp4、`LAUNCHER_PORT` 8010 で始まり、起動の KV サイズは `max` です。
 
 | 鍵 | 既定 | when | 意味 |
 |---|---|---|---|

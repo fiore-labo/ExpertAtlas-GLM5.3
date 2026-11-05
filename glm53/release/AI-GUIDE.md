@@ -192,7 +192,7 @@ details; the image can also be built from the archive with the fenced NCCL (`doc
 | `CONTEXT_LENGTH` | the context length: positions one request may reach, prompt and reply together (at most 1,048,576) | 819,200 / 737,280 |
 | `KV_SIZE` | the KV size: the whole KV cache in positions, one pool every conversation shares; what a request does not use keeps earlier conversations (`CONTEXT_LENGTH` + 512 at least) | 1,638,400 / 837,280 |
 | `KV` | the KV cache format, `fp8` or `fp4` | `fp8` / `fp4` |
-| `DCP`, `ROWS`, `SP_PARTS` | decode context parallelism, prompt chunk rows, sequence-parallel parts a chunk | 2, 8,192, 4 / 2, 16,384, 4 |
+| `DCP`, `ROWS`, `SP_PARTS` | decode context parallelism, prompt chunk rows, sequence-parallel parts a chunk | 2, 8,192, 4 |
 | `NEED_GB` | the memory a node must have available before a start (it follows the KV size, plus 3 with DFlash2; `CONFIG.md` gives how) | 112 (default) / 133 (asks 112 GiB) |
 | `MASTER_PORT`, `READY_TIMEOUT` | the ranks' rendezvous port; seconds to wait for the server | 29551, 900 |
 | `RUNTIME`, `IMAGE` | how the ranks run: `host` (default, from this directory) or `docker` (each in a container of `IMAGE`) | `host`, empty |
@@ -311,14 +311,14 @@ allocs/delete). `AGENT-API.md` gives what an agent needs of it; its fields may c
 - **What the re-sort gains** (four nodes, half 3 / half 4 bits, Both): the KL divergence from the all-4-bit model fell
   24 % on the reply's tokens at 8,192 tokens and 32 to 34 % at 128K and 256K tokens; 15 to 22 % on the prompt's tokens
   (`ATLAS-TESTS.md`). On kinds of work not in the counts it ranks by the gain is smaller (about two thirds).
-- **Memory, four nodes** (4-bit KV, a KV size of the context length + 100,000, MTP): all 3 bits fits a context length
+- **Memory, four nodes** (4-bit KV, a KV size of the context length + 100,000, MTP, `ROWS` 16,384; the default of 8,192 leaves more): all 3 bits fits a context length
   of 737,280 tokens; half 3 / half 4 bits 737,280; a quarter 3 / three quarters 4 bits 622,592; all 4 bits 327,680; all
   5 bits does not fit. With `CONTEXT_LENGTH` 1,048,576 and `KV_SIZE` 1,049,088, 70 % at 3 bits and 30 % at 4 bits
   fits with about 7.5 GiB a node to spare, enough for a live re-sort. DFlash2 needs about 4 GiB more a node. Mixes with 2-bit experts were 13 to 30 % further from the reference at the same memory.
 
 ## 9. What it can do (measured)
 
-- **Speed** (measured with release r2-102 and each checkpoint's own widths, not measured again for this release; GPU clock
+- **Speed** (measured with release r2-102 and each checkpoint's own widths, not measured again for this release; on four nodes `ROWS` was 16,384 then and is 8,192 now; GPU clock
   capped at 2.1 GHz, one request, a coding prompt not yet cached, reasoning effort low; speeds differ with the environment, so these are a guide):
 
 | Nodes | Prompt | MTP: time to first token / decode | DFlash2: time to first token / decode |

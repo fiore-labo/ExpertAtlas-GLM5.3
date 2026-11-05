@@ -38,7 +38,7 @@ sit together at the top level.
   `CONTEXT_LENGTH=1048576` with `KV_SIZE=2097152` on the 4-bit KV cache (`KV=fp4`, `NEED_GB=100`; about 23 GiB a node
   to spare), or `KV_SIZE=1638400` on the 8-bit one. Four nodes: `CONTEXT_LENGTH=1048576` from the control panel with
   3 bits for 70 % of the routed experts and 4 bits for the rest (`KV=fp4`, `KV_SIZE=1049088`: the context length and
-  512 more, the least the pool takes; about 7.5 GiB a node to spare, enough for a live re-sort); a default
+  512 more, the least the pool takes; about 7.5 GiB a node to spare at `ROWS` 16,384, enough for a live re-sort); a default
   start, every routed expert at 3 bits, takes `CONTEXT_LENGTH=737280`. Eight nodes on the 4-bit KV cache and four nodes from
   the control panel were each measured with one prompt of about 1,019,000 tokens. The 4-bit KV cache costs some accuracy (KL 0.0190 against 0.0156 with the 8-bit cache, same
   weights: [glm53/release/T4.md](glm53/release/T4.md)); the speeds below are with the 8-bit cache on eight nodes. The
@@ -250,7 +250,7 @@ for a single start.
 **Measured with release r2-102, with the GPU clock capped at 2.1 GHz (2,100 MHz) on every node.** The engine has changed
 since, and these numbers have not been measured again for this release. One request at a time with a coding prompt not
 yet cached (reasoning effort low, up to 4,000 reply tokens), the settings of `glm53.conf.example` (eight nodes, FP8 KV
-cache) and `glm53.t4.conf.example` (four nodes, 4-bit KV cache), and Fiore-lab's published checkpoints with their own widths: every routed expert at 4 bits on eight nodes, half at 3 and half at 4 bits on four. A default start loads every expert at 3 bits, which these rows did not measure. Speeds differ with the environment (the checkpoint, the prompt, the clocks): take these numbers as a guide. `packaging/RUNTIME.md` gives the conditions in full.
+cache) and `glm53.t4.conf.example` (four nodes, 4-bit KV cache; `ROWS` was 16,384 then and is 8,192 now), and Fiore-lab's published checkpoints with their own widths: every routed expert at 4 bits on eight nodes, half at 3 and half at 4 bits on four. A default start loads every expert at 3 bits, which these rows did not measure. Speeds differ with the environment (the checkpoint, the prompt, the clocks): take these numbers as a guide. `packaging/RUNTIME.md` gives the conditions in full.
 
 | Nodes | Prompt | MTP (k=3): time to first token / decode | DFlash2: time to first token / decode |
 |---|---|---|---|
@@ -260,6 +260,8 @@ cache) and `glm53.t4.conf.example` (four nodes, 4-bit KV cache), and Fiore-lab's
 | 4 | 128K | 120.1 s / 35.3 | 121.9 s / 42.9 |
 | 4 | 256K | 253.3 s / 33.2 | 256.9 s / 40.7 |
 | 4 | 512K | 565.4 s / 32.2 | 571.5 s / 37.8 |
+
+Prefill at each `ROWS`, measured for this release on four nodes, one run each: 1,054 tokens/s at 8,192, 1,102 at 16,384, 1,110 at 32,768. A reference only; [glm53/release/T4.md](glm53/release/T4.md) gives the conditions.
 
 ## Accuracy
 

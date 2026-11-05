@@ -135,7 +135,7 @@ an opposite pair on one /24) is refused with what to fix; nothing falls back.
 ## Speed
 
 Measured when the ring was brought up, on release r3-102's engine. The four ring nodes, routed experts half at 3 and
-half at 4 bits (the panel's plan, 9,600 each), the settings of `T4.md` with the MTP drafter and the 4-bit KV cache. A coding prompt with no cached prefix, one request at a time
+half at 4 bits (the panel's plan, 9,600 each), the settings of `T4.md` as they were then (`ROWS` 16,384) with the MTP drafter and the 4-bit KV cache. A coding prompt with no cached prefix, one request at a time
 (reasoning effort low, up to 4,000 reply tokens), one run after a warm-up; GPU clocks not capped (2,080 to 2,405 MHz
 seen). The four-node form on a switch, from `T4.md` (GPU clock capped at 2.1 GHz, median of two):
 

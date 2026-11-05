@@ -4,7 +4,7 @@
 
 `docker run ... IMAGE up` では、エンジン設定の項目を `-e 項目=値` で指定できます (`QUICKSTART.ja.md`)。次の項目は `not an option` で止まるので、`~/expertatlas/glm53.conf` に書きます: `GID_INDEX`、`RUNTIME`、`NCCL_LIB`、`EXPERT_LIVE`、`LOG_LISTEN`、`CONTEXT`、`STORE`、`THINKING_FOLD_KEEP`、`NEED_GB`、`LAUNCHER_HOST`、`ATLAS_DIR`、`LAUNCH_SNAPSHOTS`。`TOPOLOGY`、`SOCKET_IFNAME`、`IB_HCA` はノード確認が決めます。
 
-下の既定は `tf-glm53` の既定です。`docker run ... IMAGE up` は台数によらず `glm53.t4.conf.example` から `glm53.conf` を書くので、`CONTEXT_LENGTH` 737280、`KV_SIZE` 837280、`KV` fp4、`ROWS` 16384、`NEED_GB` 133 で始まり、起動の KV サイズは `max` です。
+下の既定は `tf-glm53` の既定です。`docker run ... IMAGE up` は台数によらず `glm53.t4.conf.example` から `glm53.conf` を書くので、`CONTEXT_LENGTH` 737280、`KV_SIZE` 837280、`KV` fp4、`NEED_GB` 133 で始まり、起動の KV サイズは `max` です。
 
 `glm53.conf` には、レーンの設定（ノード、ネットワーク、重み、drafter、サーバー、メモリ、コントロールパネル）を書きます。シェルのファイルで、1 台目のノードの `tf-glm53` と同じディレクトリに置き、手で書いて編集します。`glm53.t4.conf.example`（4 台）か `glm53.conf.example`（8 台）を `glm53.conf` にコピーし、ノード、ネットワークのデバイス、パスを書き入れてください。それ以外の項目は、例に実測した値が入っています。
 
@@ -81,8 +81,8 @@
 | `MULTI_DECODE_SHARE` | `30` | `MULTI` のとき、decode 中の会話の横で prompt が待っているか計算されている間の、GPU の時間のうち decode に回す割合（%）。`0` は prompt を先にします（prefill の途中に decode を挟まず、待っているリクエストを続けて受け入れます）。`100` は decode を先にします（どれかの会話が decode している間は prompt を待たせ、実行中の prefill も会話が終わるまで止めます。短い prompt は通します。`MULTI_SHORT_PROMPT` を参照）。その間の値では、エンジンが両方の時間を測ってその割合に保ちます。片方の仕事しかないときは、その仕事が GPU を全部使います。これは起動時の値で、動作中は `POST /v1/schedule {"decode_share": N}`（API キー、または先頭ノードのクライアントから）で変えられ、実行中の prefill にも数層のうちに効きます。`GET /v1/schedule` と `/health`（`multi.decode_share`、`multi.measured`）で見られます。取り分による待ちには `MULTI_WAIT` の上限がかかりません（`MULTI_WAIT` は空きを待つ時間です）。 |
 | `MULTI_SHORT_PROMPT` | `8192` | `MULTI` のとき、計算するトークン（会話キャッシュで再利用できる分より後ろ。長い会話の次のターンは新しく足した分だけを数えます）がこれ以下の prompt を短いものとして扱います。短い prompt は、待っている長い prompt より先に入り、`MULTI_DECODE_SHARE` で待たされず、prefill を decode のラウンドを挟まずに終わりまで進めます（取り分にかかわらず、その間 GPU は prompt のものです。decode 中の会話はその間待ちます。4 台で 8,192 トークンなら約 7 秒）。実行中の prefill は、`MULTI_SHORT_PREEMPT=1` でなければ終わるまで待ちます。`0` は短いものなし（待ち行列の順のまま）。これは起動時の値で、動作中は `POST /v1/schedule {"short_prompt": N}` で変えられ、次の受け入れから効きます。`GET /v1/schedule` と `/health`（`multi.short_prompt`）で見られます。 |
 | `MULTI_SHORT_PREEMPT` | `0` | `MULTI` と `MULTI_SHORT_PROMPT` のとき、`1` にすると、実行中の長い prefill も、待っている短い prompt に譲ります。譲るのは次に decode のために止まる所で、ほかに decode している会話がなければ次のチャンクです。終わったチャンクはキャッシュに残り、ストリームを開いたまま、あとでそこから再開します。止まる所で手放したチャンクの分は計算し直します（最大 1 チャンク。4 台・取り分 30 で長い prompt が約 14 秒遅れます）。再開した後は、1 チャンク終えるまで次は譲りません。`0`（既定）は、短い prompt が実行中の prefill の終わりを待ちます。動作中は `POST /v1/schedule {"short_preempt": true}` で変えられ、`GET /v1/schedule` と `/health`（`multi.short_preempt`）で見られます。 |
-| `ROWS` | `8192` | プロンプトのチャンクの行数（4 台の例では `16384`）。 |
-| `SP_PARTS` | `4` | プロンプトのチャンクを分ける系列並列の数。 |
+| `ROWS` | `8192` | プロンプトのチャンクの行数: 256〜65,536、256 刻み。増やすとメモリを多く使います（1,024 行あたり 1 ノード約 0.41 GiB、4 台で測定）。起動の計画はその分を KV から差し引くので、KV が小さくなります。 |
+| `SP_PARTS` | `4` | プロンプトのチャンクを分ける系列並列の数: 2〜4。 |
 | `ROCE_PROXY_CORES` | `a725` | RDMA (RoCE) の通信スレッド（proxy、1 ランクに 2 本: ノード間のものと DCP の組のもの）が待つコア。decode の間ずっと回ります。`a725` は GB10 の Cortex-A725 のコア 0 と 10 に留め（クラスタに 1 本ずつ）、`os` はスケジューラに任せます（X925 に載ることが多い）。4 台で、A725 はスケジューラ任せより SoC が 5〜16 °C 低く、decode の速さは同じでした。その種類のコアがない CPU ではスケジューラに任せます。どこで待つかはエンジンのログに出て、`/health` の `roce` で全ランクの分が見られます（rank 0 の分は今の値）。 |
 | `MAX_TOKENS_SHARE` | `70` | 要求が max_tokens を指定しないときの応答の max_tokens を、`CONTEXT_LENGTH` の割合 (1〜100 %) で決めます。クライアントの `max_tokens` が優先します。 |
 | `MAX_TOKENS` | (空) | 同じものをトークン数で指定します。値があれば `MAX_TOKENS_SHARE` より優先し、パネルで `MAX_TOKENS_SHARE` を保存すると空になります。中間整理も予算の終わりの整理もオフのとき、context の残りより多くを求める要求は断ります (400)。中間整理がオンのときは、エンジンが間隔を空きに合わせます。要求が自分で `thinking_fold_window` を指定し、それが収まらないときは断ります (400)。 |

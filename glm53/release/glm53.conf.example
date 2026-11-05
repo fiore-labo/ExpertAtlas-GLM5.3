@@ -86,8 +86,10 @@ READY_TIMEOUT=900
 # Four nodes (TP=4): see glm53.t4.conf.example and T4.md (the four-node checkpoint, KV=fp4, the measured settings).
 # NEED_GB is the memory a node must have available before the start (default 112).
 #DCP=2
+# ROWS: the rows of a prompt chunk. More rows use more memory (about 0.41 GiB a node for each 1,024 rows, measured on
+# four nodes), and a start's plan takes that from the KV.
 #ROWS=8192
-# SP_PARTS: the parts a prompt chunk of ROWS rows is split into (default 4). Parts wider than 2,048 rows
+# SP_PARTS: the parts a prompt chunk of ROWS rows is split into (2 to 4, default 4). Parts wider than 2,048 rows
 # (e.g. ROWS=12288 with SP_PARTS=3) run the routed experts on more rows a pass, at the memory of wider buffers.
 #SP_PARTS=4
 # ROCE_PROXY_CORES: the cores the RoCE proxy threads poll on (they spin while the decode runs): a725 (default: GB10's

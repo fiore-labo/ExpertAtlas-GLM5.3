@@ -251,7 +251,7 @@ s, r = call(LP, "POST", "/v1/launch/settings", {"values": {"THINKING_SHARE": "90
 
 `GET /v1/launch/settings` returns every key and its rule. `CONFIG.md` explains them.
 
-The defaults below are `tf-glm53`'s. `docker run ... IMAGE up` writes `glm53.conf` from `glm53.t4.conf.example`, so it begins with `CONTEXT_LENGTH` 737280, `KV_SIZE` 837280, `KV` fp4, `ROWS` 16384 and `LAUNCHER_PORT` 8010, and the start's KV size is `max`.
+The defaults below are `tf-glm53`'s. `docker run ... IMAGE up` writes `glm53.conf` from `glm53.t4.conf.example`, so it begins with `CONTEXT_LENGTH` 737280, `KV_SIZE` 837280, `KV` fp4 and `LAUNCHER_PORT` 8010, and the start's KV size is `max`.
 
 | Key | Default | when | Meaning |
 |---|---|---|---|

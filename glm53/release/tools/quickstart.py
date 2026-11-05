@@ -374,7 +374,8 @@ class Quick:
         """The options a plan takes itself, so it can be judged before they are saved."""
         out = {}
         for key, name, conv in (("KV", "kv", str), ("DRAFTER_KIND", "drafter", str), ("CONTEXT_LENGTH", "context", int),
-                                ("RESERVE_GB", "reserve_gib", float), ("MULTI", "multi", int), ("MULTI_WAIT", "multi_wait", int)):
+                                ("RESERVE_GB", "reserve_gib", float), ("MULTI", "multi", int), ("MULTI_WAIT", "multi_wait", int),
+                                ("ROWS", "rows", int), ("SP_PARTS", "sp_parts", int), ("DRAFT_SAVES", "draft_saves", int)):
             if key in self.opts:
                 try:
                     out[name] = conv(self.opts[key])
