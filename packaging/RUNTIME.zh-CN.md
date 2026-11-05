@@ -262,7 +262,7 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # 或 glm53.t4.con
 - 镜像也可以由归档构建：在刚解开的归档中执行 `docker build --build-context fenced=DIR -f docker/Dockerfile -t glm53-tensorfold:r3.3-102 .`，`DIR` 中放带 fence 的 NCCL（`RING.zh-CN.md`；没有它构建会失败）。只要有归档 `SHA256SUMS` 未列出的文件，构建就会失败，因此安装环境中的设置或日志不会进入镜像。用 `docker save` 和 `docker load` 复制到其他节点。
 - `tf-glm53 check` 在每个节点上检查：`IMAGE` 存在且层与第一个节点相同；容器能访问 GPU（`--gpus all`）；镜像中是与本目录相同的发布（否则为 `NG: image-not-this-release`）。
 - 每个 rank 的容器获得 GPU、`/dev/infiniband`、主机网络和 IPC、`--ulimit memlock=-1 --ulimit nofile=1048576:1048576`、`--oom-score-adj 1000`、主机用户和一个 init。以相同路径挂载：只读的 `WEIGHTS`、`DRAFTER`（DFlash2）以及该节点上 `expert-plan/banks.json` 中的每个 bank；可写的 `launch/`。Docker 不保存容器的日志（`--log-driver none`）：其输出进入节点的日志保管进程。容器名为 `glm53-p<PORT>-r<rank>`，停止后即删除。`tf-glm53 down`、`status`、监视进程和控制面板对它们的处理与从主机运行的 rank 相同。
-- 引擎在交换机和环上都读取 `/opt/nccl-fenced` 的 NCCL。NVIDIA 的 wheel 为了比较保留在 `/opt/nccl`，默认不读取。
+- 引擎在交换机和环上都读取 `/opt/nccl-fenced` 的 NCCL。
 - 四个节点上的测量（八节点检查点，上下文长度 131,072 个 token，MTP）：启动用了 4 分钟，与在主机上相同；冒烟测试通过；`down` 在 4 秒内停止所有 rank；强制终止一个 rank 的容器后，监视进程停止了其余 rank，43 秒后所有容器都已消失。
 - 主机上的 `systemctl daemon-reload` 可能使运行中的 GPU 容器失去 GPU（容器内 `nvidia-smi` 失败）：执行 `tf-glm53 down`，再从面板（或用 `tf-glm53 start`）重新启动。
 

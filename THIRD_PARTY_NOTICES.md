@@ -165,13 +165,11 @@ The container image built from the archive's `docker/Dockerfile` adds to the arc
 system and the packages it installs, each under its own license (listed in the image's `/usr/share/doc`); NVIDIA's
 cuBLAS 13 (`libcublas-13-0` from NVIDIA's CUDA repository), under the NVIDIA CUDA Toolkit End User License Agreement
 (its text in the image's `/usr/share/doc/libcublas-13-0/`); rdma-core's `libibverbs1` and `ibverbs-providers`, under
-the GNU General Public License version 2 or the OpenIB.org BSD license; and NCCL 2.30.7 twice. At `/opt/nccl-fenced`,
-the one the engine reads: built by Fiore-lab from NCCL's source at tag v2.30.7-1, for sm_121 only, with commit `05d026f4`
+the GNU General Public License version 2 or the OpenIB.org BSD license; and NCCL 2.30.7 at `/opt/nccl-fenced`,
+built by Fiore-lab from NCCL's source at tag v2.30.7-1, for sm_121 only, with commit `05d026f4`
 (NVIDIA/nccl#2393, an acquire fence in `ncclIbIsend`) added; mostly Apache-2.0, with parts under their original BSD
 license and NVTX under Apache-2.0 with LLVM exceptions (its `LICENSE.txt` and `ThirdPartyNotices.txt` beside the
-library). At `/opt/nccl`, kept for comparison: NVIDIA's `nvidia-nccl-cu13` wheel, Copyright (c) 2015-2020 NVIDIA
-CORPORATION, under the BSD 3-clause license in its
-`/opt/nccl/nvidia_nccl_cu13-2.30.7.dist-info/licenses/License.txt`. The image carries no model weights.
+library). The image carries no model weights.
 
 The archive's binaries are built with Zig 0.17.0, whose standard library and compiler runtime are linked in (MIT
 License, Copyright (c) Zig contributors, text below). Their GPU code is compiled with NVIDIA's CUDA 13.0 compiler and

@@ -6,18 +6,13 @@
 # stay on the host and are mounted read-only. tf-glm53 with RUNTIME=docker starts one container a rank (RUNTIME.md).
 # Build in a freshly unpacked archive: the build refuses any file the archive's SHA256SUMS does not list (a glm53.conf,
 # logs, a key file), so nothing of an installation goes into the image.
-# The image runs on NCCL's AArch64 send fence (NVIDIA/nccl#2393, RING.md), on a ring and on a switch alike; the wheel
-# lacks it and stays beside it. The image is built with that build beside it, checked by its sha256, and not without:
+# The image runs on NCCL's AArch64 send fence (NVIDIA/nccl#2393, RING.md), on a ring and on a switch alike. It is built
+# with that build beside it, checked by its sha256, and not without:
 #   docker build --build-context fenced=DIR -f docker/Dockerfile -t glm53-tensorfold:VERSION .
 # DIR holds libnccl.so.2.30.7 and that source's LICENSE.txt and ThirdPartyNotices.txt, which go beside it in the image.
-# Both stages start from one Ubuntu 24.04, pinned by its multi-arch index digest, so a rebuild starts from the same
+# The image starts from one Ubuntu 24.04, pinned by its multi-arch index digest, so a rebuild starts from the same
 # base. Move it deliberately (for Ubuntu's security updates) to the digest `docker buildx imagetools inspect
-# ubuntu:24.04` gives, in both lines.
-FROM ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c AS nccl
-ARG DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends python3-pip ca-certificates \
- && pip3 install --break-system-packages --no-deps --target /opt/nccl nvidia-nccl-cu13==2.30.7
-
+# ubuntu:24.04` gives.
 # replaced by --build-context fenced=DIR
 FROM scratch AS fenced
 
@@ -28,7 +23,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && dpkg -i cuda-keyring_1.1-1_all.deb && rm cuda-keyring_1.1-1_all.deb \
  && apt-get update && apt-get install -y --no-install-recommends libcublas-13-0 \
  && apt-get purge -y wget && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
-COPY --from=nccl /opt/nccl /opt/nccl
 COPY --from=fenced libnccl.so.2.30.7* LICENSE.txt ThirdPartyNotices.txt /opt/nccl-fenced/
 RUN [ -f /opt/nccl-fenced/libnccl.so.2.30.7 ] || { echo "no fenced NCCL: docker build --build-context fenced=DIR_WITH_libnccl.so.2.30.7"; exit 1; }; \
     echo "f75ac06821bbf42793a4951d6fc89061526a3fa1ad37b565c4146b0995a53299  /opt/nccl-fenced/libnccl.so.2.30.7" | sha256sum -c --quiet \

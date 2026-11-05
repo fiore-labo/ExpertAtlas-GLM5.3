@@ -334,7 +334,7 @@ SETTINGS = {
     "LOG_KEEP_MB": ("8", SET_INT(1, 1024), "start"),
     "LAUNCHER_PORT": ("8010", SET_INT(1, 65535), "launcher"),
     "ROWS": ("8192", SET_INT(256, 65536, step=256), "start"),
-    "SP_PARTS": ("4", SET_INT(2, 8), "start"),
+    "SP_PARTS": ("4", SET_INT(2, 4), "start"),
     "ROCE_PROXY_CORES": ("a725", SET_ENUM("a725", "os"), "start"),
     "ATLAS_GENERIC": ("1", SET_BOOL, "start"),
     "TF_GLM53_CANON_CLOSE": ("near", SET_ENUM("near", "all", "off"), "start"),
@@ -368,7 +368,7 @@ RING_ENV = ("NCCL_ALGO NCCL_PROTO NCCL_IB_HCA NCCL_IB_GID_INDEX NCCL_IB_ADDR_FAM
 # the sizes a rank holds besides its routed experts, by node count and drafter, the largest node measured: used until
 # this lane has a measured start with that drafter and node count (estimate: true). MTP holds its layer in the other
 # weights; DFlash2 its model and state in the work, on every rank alike. Node counts not listed take four nodes'.
-#   4 nodes: 737,280 + 100,000 positions, fp4, DCP 2
+#   4 nodes: 737,280 + 100,000 positions, fp4, DCP 2, ROWS 16,384, less what ROW_BYTES says of the 8,192 rows less
 #   8 nodes (the release test): MTP 819,200 + 819,200 positions, DFlash2 1,048,576 + 704,512, fp8, DCP 2; no drafter
 #     as DFlash2's other weights and MTP's work
 #   2 nodes: 65,536 + 512 positions, fp8, DCP 2, ROWS 4,096 in 2 SP parts, 2-bit experts; DFlash2 not run there: its
@@ -376,9 +376,9 @@ RING_ENV = ("NCCL_ALGO NCCL_PROTO NCCL_IB_HCA NCCL_IB_GID_INDEX NCCL_IB_ADDR_FAM
 #   3 nodes: 131,072 + 32,768 positions, fp8, DCP 3, CACHE=slots, PEER_Q, 3-bit experts, measured with an engine that
 #     splits the shares in three
 G = lambda x: int(x * GiB)
-DEFAULTS = {4: {"mtp": {"other_weights": G(8.11), "kv": G(14.55), "work": G(12.8)},
-                "dflash2": {"other_weights": G(6.515), "kv": G(14.323), "work": G(17.42)},
-                "none": {"other_weights": G(6.515), "kv": G(14.323), "work": G(12.8)}},
+DEFAULTS = {4: {"mtp": {"other_weights": G(8.11), "kv": G(14.55), "work": G(9.5)},
+                "dflash2": {"other_weights": G(6.515), "kv": G(14.323), "work": G(14.12)},
+                "none": {"other_weights": G(6.515), "kv": G(14.323), "work": G(9.5)}},
             8: {"mtp": {"other_weights": G(5.625), "kv": G(41.962), "work": G(8.413)},
                 "dflash2": {"other_weights": G(4.704), "kv": G(44.246), "work": G(13.619)},
                 "none": {"other_weights": G(4.704), "kv": G(44.246), "work": G(8.413)}},
@@ -388,6 +388,15 @@ DEFAULTS = {4: {"mtp": {"other_weights": G(8.11), "kv": G(14.55), "work": G(12.8
             3: {"mtp": {"other_weights": G(10.57), "kv": G(2.24), "work": G(6.9)},
                 "dflash2": {"other_weights": G(8.69), "kv": G(2.24), "work": G(10.1)},
                 "none": {"other_weights": G(8.69), "kv": G(2.24), "work": G(6.9)}}}
+# what the sizes above were measured with, and what more of it holds on a node (four nodes, 11-05: a start's work 7.9 GiB
+# at ROWS 8,192, 11.2 at 16,384, 17.7 at 32,768, the same at SP_PARTS 2 and 4 within 0.2 GiB; DFlash2 1.2 GiB more at
+# DRAFT_SAVES 32 than at 8). The engine allocates a chunk's buffers for ROWS after the KV: nothing refuses them later
+DEFAULT_ROWS = {2: 4096}  # 8,192 for the other node counts
+DEFAULT_DRAFT_SAVES = 8
+ROW_BYTES = int(0.00041 * GiB)
+DRAFT_SAVE_BYTES = int(0.05 * GiB)
+# a measured start's sizes hold for a later plan only with the same of these
+START_SETTINGS = ("rows", "sp_parts", "draft_saves")
 PHASES = ["checking", "weights", "kv", "prewarm", "ready"]
 # the KV cache's bytes a row on one rank (forward.zig State.bytes): every cache layer's latent row (fp4 432 B, fp8 656 B)
 # and the full-indexer layers' index row (144 B); GLM-5.3 with DFlash2: 78 cache layers, 21 of them with an indexer.
@@ -434,7 +443,7 @@ def start_entry(doc):
     """A measured start as the plans' history keeps it: its positions (context + store) and each node's work."""
     kv = doc.get("kv") or {}
     return {"positions": int(kv.get("context") or 0) + int(kv.get("store") or 0), "unix": doc.get("unix", 0),
-            "work": {n: v.get("work", 0) for n, v in (doc.get("nodes") or {}).items()}}
+            "work": {n: v.get("work", 0) for n, v in (doc.get("nodes") or {}).items()}, **{k: doc.get(k) for k in START_SETTINGS}}
 
 
 def manifest_of(bank):
@@ -531,7 +540,7 @@ def read_conf(conf, nodes_file=""):
     script = r'''. "$1" >/dev/null || exit 1
 if [ -n "$2" ] && [ -f "$2" ]; then . "$2" >/dev/null || exit 1; fi
 printf 'NODE=%s\n' "${NODES[@]}"
-for v in NAME HOST PORT EXTRA_ENV LAUNCHER_PORT LAUNCHER_HOST KV DCP CONTEXT STORE CONTEXT_LENGTH KV_SIZE CACHE RESERVE_GB DRAFTER_KIND DRAFTER ATLAS_DIR ATLAS_GENERIC LAUNCH_DROP_CACHES LAUNCH_SNAPSHOTS RUNTIME IMAGE TOPOLOGY SOCKET_IFNAME IB_HCA WEIGHTS MULTI MULTI_WAIT DRAFT_SAVES; do printf '%s=%s\n' "$v" "${!v:-}"; done'''
+for v in NAME HOST PORT ROWS SP_PARTS EXTRA_ENV LAUNCHER_PORT LAUNCHER_HOST KV DCP CONTEXT STORE CONTEXT_LENGTH KV_SIZE CACHE RESERVE_GB DRAFTER_KIND DRAFTER ATLAS_DIR ATLAS_GENERIC LAUNCH_DROP_CACHES LAUNCH_SNAPSHOTS RUNTIME IMAGE TOPOLOGY SOCKET_IFNAME IB_HCA WEIGHTS MULTI MULTI_WAIT DRAFT_SAVES; do printf '%s=%s\n' "$v" "${!v:-}"; done'''
     out = subprocess.run(["bash", "-c", script, "_", conf, nodes_file or ""], capture_output=True, text=True, check=True).stdout
     c = {"NODES": []}
     for line in out.splitlines():
@@ -750,6 +759,8 @@ class Launcher:
         self.multi_conf = int(c.get("MULTI") or 0)
         self.multi_wait_conf = int(c.get("MULTI_WAIT") or MULTI_WAIT_DEFAULT)
         self.draft_saves = int(c.get("DRAFT_SAVES") or 8)
+        self.rows = int(c.get("ROWS") or 8192)  # tf-glm53's defaults
+        self.sp_parts = int(c.get("SP_PARTS") or 4)
         self.weights_dir = c.get("WEIGHTS") or ""
         env = dict(t.split("=", 1) for t in shlex.split(c.get("EXTRA_ENV", "")) if "=" in t)
         # what a live swap keeps to spare on every rank (the engine's TF_GLM53_SWAP_MARGIN_GIB, 2 by default)
@@ -1317,6 +1328,17 @@ class Launcher:
         work at p0 positions) the work's growth beyond p0 takes its share."""
         return int((room + slope * p0) // (self.position_bytes(drafter)[fmt] + slope))
 
+    def start_settings(self):
+        return {"rows": self.rows, "sp_parts": self.sp_parts, "draft_saves": self.draft_saves}
+
+    def settings_extra(self, drafter):
+        """What this conf's ROWS and DRAFT_SAVES hold on a node beyond DEFAULTS. A lower value is not taken off: it only
+        leaves memory over, and the next start measures it."""
+        more = max(0, self.rows - DEFAULT_ROWS.get(self.world, 8192)) * ROW_BYTES
+        if drafter == "dflash2":
+            more += max(0, self.draft_saves - DEFAULT_DRAFT_SAVES) * DRAFT_SAVE_BYTES
+        return more
+
     def work_slope(self, last):
         """The work a position more (bytes; the steepest node's) between the fewest and the most positions of the
         measured starts with this drafter (the record's history), when they are at least 65,536 apart, and the positions
@@ -1324,7 +1346,8 @@ class Launcher:
         426K positions, 16.99 at 557K, 17.3 at 606K)."""
         kv = (last or {}).get("kv") or {}
         p0 = int(kv.get("context") or 0) + int(kv.get("store") or 0)
-        hist = [h for h in (last or {}).get("history") or [] if h.get("positions")]
+        now = self.start_settings()
+        hist = [h for h in (last or {}).get("history") or [] if h.get("positions") and all(h.get(k) == v for k, v in now.items())]
         if len(hist) < 2:
             return 0, p0
         lo, hi = min(hist, key=lambda h: h["positions"]), max(hist, key=lambda h: h["positions"])
@@ -1444,9 +1467,14 @@ class Launcher:
         m_idle, m_load, m_est = self.multi_bytes(mn, drafter)
         m_why = self.multi_why(mn, drafter)
         default = defaults(self.world, drafter)
+        default = dict(default, work=default["work"] + self.settings_extra(drafter))
         reserve = int(reserve_gib * GiB) if reserve_gib is not None else self.reserve
         nodes = nodes or self.node_info or self.probe_all()
         last = self.last_start(drafter)
+        # a start measured with another ROWS, SP_PARTS or DRAFT_SAVES (or before they were recorded) held other buffers:
+        # the estimate, not its sizes
+        if last is not None and any(last.get(k) != v for k, v in self.start_settings().items()):
+            last = None
         # the store taking the rest on an estimate keeps ESTIMATE_SLACK more (the sizes not yet measured)
         slack = (ESTIMATE_SLACK if last is None or last.get("world") != self.world else MEASURED_SLACK) if store == "max" else 0
         estimate = last is None or last.get("world") != self.world
@@ -2934,7 +2962,7 @@ class Launcher:
         with self.lock:
             kvu = self.st.get("kv")
         doc = {"unix": int(time.time()), "world": self.world, "nodes": nodes, "phases": phases, "kv": kvu,
-               "drafter": drafter or self.drafter_conf, "multi": multi}
+               "drafter": drafter or self.drafter_conf, "multi": multi, **self.start_settings()}
         self.record_start(doc)
         self.keep_usage()
 
