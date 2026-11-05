@@ -19,6 +19,20 @@ pub const Stop = struct {
     check: *const fn (ctx: *anyopaque, emitted: []const u32) bool,
 };
 
+/// A reply's think ids as the server's tokenizer cuts their text (decoded, then encoded as one text), into `a`; null
+/// when that would change the text or its structural tokens. The engine thread calls it when it edits the context.
+/// Fiore-lab: a token's raw bytes (before the decoder's lossy UTF-8; null: unknown) and whether it is an added token.
+pub const TokenVocab = struct {
+    ctx: *anyopaque,
+    bytes: *const fn (ctx: *anyopaque, a: Allocator, id: u32) ?[]const u8,
+    added: *const fn (ctx: *anyopaque, id: u32) bool,
+};
+
+pub const Canon = struct {
+    ctx: *anyopaque,
+    run: *const fn (ctx: *anyopaque, a: Allocator, ids: []const u32) ?[]u32,
+};
+
 /// tool_choice "required" or a named function: outside a think block the answer opens a call to an offered tool.
 pub const CallGate = struct {
     /// The token that opens a call, the template text before the name, and the mark that ends the name.
@@ -39,6 +53,34 @@ pub const Structure = struct {
     /// With thinking on, the grammar starts after this token.
     after: ?u32 = null,
 };
+
+/// GLM-5.3: how a long think block is folded (Request.think_fold).
+pub const Fold = enum { off, recent, checkpoint, branch };
+
+/// GLM-5.3: one moment the think block is rewritten from what the model writes beside the reply (thinking_fold_steps,
+/// to try ways of summing up without a rebuild): the segment runs from the context and ``ask``; what comes back goes
+/// into the block as ``place`` says, between ``label`` + ``heading`` and ``after``.
+pub const ThinkStep = struct {
+    /// The tokens after the block in the branch's segment (their last are ``heading``, which the model goes on from).
+    ask: []const u32 = &.{},
+    heading: []const u32 = &.{},
+    label: []const u32 = &.{},
+    after: []const u32 = &.{},
+    take: Take = .after,
+    place: Place = .replace,
+    /// At the block's end: the think tokens since the last rewrite the step needs (fewer: it does not run).
+    min: u32 = 1024,
+
+    /// Which part is the result: what follows the last ``think_end`` (what precedes it if that is too short), or what
+    /// precedes the first (the branch ends there; all of it if none comes).
+    pub const Take = enum { after, before };
+    /// What the result does: takes the place of the thinking since the last rewrite, follows it, or is only shown.
+    pub const Place = enum { replace, add, show };
+};
+
+/// GLM-5.3: a reply that ends with its think block open (its answer written there): ``keep`` leaves the content empty,
+/// ``close`` closes the block and lets the model answer.
+pub const Unclosed = enum { keep, close };
 
 /// A reply to decode. The request and every slice in it stay valid until its ``finished`` event.
 pub const Request = struct {
@@ -61,6 +103,86 @@ pub const Request = struct {
     think_budget: u32 = 0,
     think_close: []const u32 = &.{},
     think_end: ?u32 = null,
+    /// GLM-5.3: after every ``think_notice_every`` tokens of the think block (0: none), at the next line break,
+    /// ``think_notices[k - 1]`` (the k-th) goes into the reply as the model's own text, telling it how much it used.
+    think_notice_every: u32 = 0,
+    think_notices: []const []const u32 = &.{},
+    /// GLM-5.3: what the budget's cut writes, at the next line break (a closing sentence, then the think block's
+    /// end); empty: ``think_close``.
+    think_wrap: []const u32 = &.{},
+    /// GLM-5.3: the tokens holding a line break, sorted: a notice or the cut waits for one (at most 256 tokens).
+    think_breaks: []const u32 = &.{},
+    /// GLM-5.3: the think block folded once ``think_fold_window`` of its tokens are in the context past the last fold,
+    /// at a line break; the reply the client gets is unchanged, the context the model goes on from is shorter.
+    /// ``recent``: the block's first ``think_fold_head`` tokens and its last ``think_fold_keep``. ``checkpoint``: the
+    /// model first writes its conclusions (``think_fold_opens`` asks, ``think_fold_end`` sees the end marker, past
+    /// ``think_fold_cap`` tokens ``think_fold_closes`` ends it); then the head, ``think_fold_label`` and the checkpoint,
+    /// and ``think_fold_resumes`` goes on. The texts come by stage (``think_fold_stages`` of them, 1 to 3: organise,
+    /// converge, commit), picked by the folds so far and the thinking budget left. ``branch`` (Fiore-lab):
+    /// the summary is written beside the reply, not in it: the context so far, ``think_fold_opens[0]`` (the block
+    /// closed, a user turn asking for the summary, an answer begun without thinking) and the model's answer up to its
+    /// EOS (or ``think_fold_cap`` tokens) is the summary; the block then keeps its head, the summaries before, then
+    /// ``think_fold_label``, this one and ``think_fold_resumes[0]``, and goes on.
+    think_fold: Fold = .off,
+    think_fold_window: u32 = 0,
+    /// GLM-5.3: the folds a reply may make at most (0: no limit); past them, or when the summaries kept and the next
+    /// one would pass ``think_fold_region``, the block folds no more and closes as at the end of ``think_budget`` when
+    /// it fills the region.
+    think_fold_max: u32 = 0,
+    /// GLM-5.3: the thinking's room in the context, the share of what the prompt leaves (0: none). The
+    /// block folds once ``think_fold_window`` tokens came since the last fold or all its tokens in the context reach
+    /// this, whichever is first; the summaries stack in it.
+    think_fold_region: u32 = 0,
+    think_fold_keep: u32 = 0,
+    think_fold_head: u32 = 100,
+    think_fold_cap: u32 = 1024,
+    /// Above 0: a summary's tokens at most are this percent of the thinking it organises (at least 128), within
+    /// ``think_fold_cap`` (foldCapOf).
+    think_fold_cap_share: u8 = 0,
+    think_fold_stages: u8 = 1,
+    think_fold_opens: []const []const u32 = &.{},
+    think_fold_label: []const u32 = &.{},
+    think_fold_resumes: []const []const u32 = &.{},
+    think_fold_closes: []const []const u32 = &.{},
+    think_fold_end: ?Stop = null,
+    /// GLM-5.3, ``think_fold`` branch: the request after the block so far, the label the summary is kept under in the
+    /// block, and the line the thinking goes on after.
+    think_fold_branch_ask: []const u32 = &.{},
+    think_fold_branch_label: []const u32 = &.{},
+    think_fold_branch_resume: []const u32 = &.{},
+    /// GLM-5.3, ``think_fold`` branch: the turn and tool tokens that end the summary as its EOS does (such a token
+    /// stays out of the summary), and the think block's opening: the answer may think first (``<think>`` dropped,
+    /// what precedes a ``think_end`` its thinking), and the summary is then what follows the last close.
+    think_fold_branch_stops: []const u32 = &.{},
+    think_fold_branch_open: ?u32 = null,
+    /// GLM-5.3, ``thinking_fold_steps``: the midway step in place of the summary beside the reply (``think_fold`` branch);
+    /// the budget's step in place of ``think_wrap`` (it starts so that the block closes within the budget); the step at
+    /// the model's own close. The last two close the block after them. With them ``think_fold_cap`` 0 means no cap: a
+    /// result is at most the thinking it rewrites, and nothing is set aside of the budget ahead.
+    think_step_midway: ?ThinkStep = null,
+    think_step_budget: ?ThinkStep = null,
+    think_step_close: ?ThinkStep = null,
+    think_unclosed: Unclosed = .keep,
+    /// The budget's step starts this percent before the budget's end. Past it the model goes on until its thinking in
+    /// the context fills ``think_budget`` again, ``think_answer`` tokens of the context and the reply staying the answer's.
+    think_step_margin: u32 = 5,
+    think_answer: u32 = 0,
+    /// GLM-5.3: the summary at the think block's close. When the model closes the block with at least
+    /// ``think_fold_at_close`` of its tokens in the context past the last fold (0: never), the close waits: the model
+    /// first writes a checkpoint (``think_fold_close_open`` asks; the end marker, the model's own close or
+    /// ``think_fold_cap`` ends it), the block folds to its head, ``think_fold_label`` and that checkpoint and then
+    /// closes, so the answer and the next turns go on from the summary. Works with ``think_fold`` off too. When the
+    /// thinking budget's cut closes the block instead, ``think_fold_close_budget_open`` asks for the same summary in
+    /// place of ``think_wrap`` (empty: the cut writes ``think_wrap`` and closes at once). Either is asked for only when
+    /// it, a summary of ``think_fold_cap`` tokens and an answer as long still fit in ``max_tokens``.
+    think_fold_at_close: u32 = 0,
+    think_fold_close_open: []const u32 = &.{},
+    think_fold_close_budget_open: []const u32 = &.{},
+    /// Remakes the context's think ids where the engine edited it (folds, inserted texts, the close), so a client's
+    /// copy of the text renders to them next turn; null: the ids stay as they were made.
+    think_canon: ?Canon = null,
+    /// Reads tokens as bytes, to match a prompt with a kept slot past the first id that differs (TF_GLM53_BYTE_RESUME).
+    token_vocab: ?TokenVocab = null,
     /// The offered tools as JSON text, for drafters that propose a call's structure; empty: no tools.
     tools_json: []const u8 = "",
     /// Set only when ``Info`` says the engine enforces it.
@@ -70,7 +192,9 @@ pub const Request = struct {
     loop_guard: bool = false,
 };
 
-pub const Reason = enum { stop, length, cancelled, failed };
+/// `busy`: taken but refused for want of room (the engine's queue gave up on it): the client gets 503 / overloaded and
+/// may retry.
+pub const Reason = enum { stop, length, cancelled, failed, busy };
 
 /// What a finished reply's rounds did, for its runtime fields and /metrics.
 pub const Stats = struct {
@@ -93,6 +217,9 @@ pub const Stats = struct {
     queue_seconds: ?f64 = null,
     /// The drafter's own counters as a JSON object, or empty.
     telemetry_json: []const u8 = "",
+    /// The reply as the model's context held it at the end, when thinking folds made it differ from the tokens sent
+    /// (empty: the same); valid only during the call.
+    context_reply: []const u32 = &.{},
 };
 
 pub const Event = union(enum) {
@@ -166,9 +293,9 @@ pub const Opened = struct { engine: Engine, close: *const fn (ctx: *anyopaque) v
 pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0 };
 
 /// Fiore-lab: GET /v1/experts/usage?window=SECONDS, GET /v1/experts/recent?after=SEQ&max=N, GET /v1/memory,
-/// GET /v1/experts/swap (the last change of the experts' bits and its progress), or GET /v1/experts/prefill?after=SEQ&max=N
-/// (the prompt chunks' pick counts).
-pub const ExpertsQuery = union(enum) { usage: u32, recent: struct { after: ?u64, max: u32, text: ?TokenBytes = null }, memory: void, swap: void, prefill: struct { after: ?u64, max: u32 } };
+/// GET /v1/experts/swap (the last change of the experts' bits and its progress), GET /v1/experts/prefill?after=SEQ&max=N
+/// (the prompt chunks' pick counts), or GET /v1/pool (the KV pool's conversations and each block's owner).
+pub const ExpertsQuery = union(enum) { usage: u32, recent: struct { after: ?u64, max: u32, text: ?TokenBytes = null }, memory: void, swap: void, prefill: struct { after: ?u64, max: u32 }, pool: void };
 
 /// Fiore-lab (the control panel): a token's raw bytes for the pick log's text (`records[].text`), from the server's
 /// tokenizer: null for a special token, else the bytes (allocated in `a`; byte-level BPE: the vocabulary string mapped
@@ -185,6 +312,38 @@ pub const TokenBytes = struct {
 /// requests) or POST /v1/experts/save (a name for the bits in use).
 pub const ExpertsControl = union(enum) { swap: []const u8, save: []const u8 };
 pub const ControlError = error{ Unsupported, UnsupportedWithMulti, Busy, BadRequest, Exists, Failed, OutOfMemory };
+
+/// Fiore-lab: how TF_GLM53_MULTI shares the GPU's time between a prompt being computed and the live conversations'
+/// decode while both want it (GET / POST /v1/schedule, changed while the engine runs; the family's pace.zig).
+/// `decode_share`: the decode's percent of that time, 0 (the prompts first: no round inside a prefill, the queue
+/// admitted back to back) .. 100 (the decode first: a prompt waits while a conversation decodes). `measured`: the
+/// decode's percent over the last seconds both had work (kept after), null before they ever did; `contended`: both
+/// have work now. `short_prompt`: a prompt with at most this many rows to compute (past what the cache reuses) goes
+/// before the longer ones waiting and is not held by the decode share (0: none is short). `short_preempt`: a longer
+/// prefill running gives way to it too (its chunks done kept, resumed afterwards).
+/// `start`: the values the engine started with (MULTI_DECODE_SHARE, MULTI_SHORT_PROMPT, MULTI_SHORT_PREEMPT).
+pub const Schedule = struct { decode_share: u8 = 30, short_prompt: u32 = 8192, short_preempt: bool = false, measured: ?u8 = null, contended: bool = false, start: ?ScheduleStart = null };
+
+pub const ScheduleStart = struct { decode_share: u8 = 30, short_prompt: u32 = 8192, short_preempt: bool = false };
+
+/// Fiore-lab: where the RoCE proxy threads poll (TF_GLM53_ROCE_PROXY_CORES; /health "roce"). `world` 0: no RoCE.
+/// `proxies[rank]`: the world's proxy, then the DCP group's; `present` false: none; `cpu`: the one it polls on (`live`:
+/// read now, rank 0's; else where it was kept, null when the scheduler's); `core`: that CPU's kind.
+pub const Roce = struct {
+    mode: RoceMode = .os,
+    world: u8 = 0,
+    proxies: [roce_ranks][2]RoceProxy = @splat(@splat(.{})),
+};
+pub const RoceMode = enum { a725, x925, os };
+pub const CoreKind = enum { unknown, a725, x925 };
+pub const RoceProxy = struct { present: bool = false, cpu: ?u16 = null, core: CoreKind = .unknown, live: bool = false };
+pub const roce_ranks = 8;
+
+/// A change of the schedule (POST /v1/schedule): the fields given are set, the others kept.
+pub const ScheduleSet = struct { decode_share: ?u8 = null, short_prompt: ?u32 = null, short_preempt: ?bool = null };
+
+/// The largest `short_prompt` taken (rows).
+pub const short_prompt_max: u32 = 1 << 20;
 
 /// A backend's words for its own refusals (a request it cannot serve); null: the error's name.
 pub const Explain = struct {
@@ -237,10 +396,34 @@ pub const PoolStatus = struct {
     hash_seconds_total: f64 = 0,
 };
 
-/// Totals since the engine started, the running request's progress included, read under one lock so that each
-/// only grows; and the running request's own position.
+/// A request's stage: none running, its prompt, its reply.
+pub const Phase = enum { idle, prefill, decode };
+
+/// The requests a status can list one by one (an engine decoding several together lists up to this many).
+pub const max_requests = 4;
+
+/// One request running now: the slot of the decode window its conversation has (the `conv` of the expert records),
+/// its conversation's number in the prompt cache's pool (null without one, or before its plan), its stage, its
+/// prompt tokens, those a prompt cache resumed, those in the caches so far (resumed ones included), its reply tokens
+/// so far, and the milliseconds since it was admitted.
+pub const RequestProgress = struct {
+    conv: u16 = 0,
+    pool_id: ?u64 = null,
+    phase: Phase = .idle,
+    prompt: u64 = 0,
+    cached: u64 = 0,
+    prompt_done: u64 = 0,
+    generated: u64 = 0,
+    elapsed_ms: u64 = 0,
+    /// Fiore-lab: the time its prefill chunks computed so far (ms), the waits left out (the decode's rounds inside it,
+    /// a hold by the GPU split, the queue after it gave way); kept after its prefill. null before its first chunk.
+    prefill_ms: ?u64 = null,
+};
+
+/// Totals since the engine started, the running requests' progress included, read under one lock so that each
+/// only grows; and the running requests' own positions (the fields below `phase` tell the first of them).
 pub const Progress = struct {
-    phase: enum { idle, prefill, decode } = .idle,
+    phase: Phase = .idle,
     /// The running request: its prompt tokens, those a prompt cache resumed, those in the caches so far (resumed
     /// ones included), and the reply tokens so far.
     prompt: u64 = 0,
@@ -249,6 +432,10 @@ pub const Progress = struct {
     generated: u64 = 0,
     /// Prompt tokens of the requests waiting in the queue.
     queued_prompt: u64 = 0,
+    /// The requests waiting in the queue (not admitted yet: under TF_GLM53_MULTI also those waiting for room in the
+    /// KV pool) and how long the oldest of them has waited (ms).
+    waiting: u64 = 0,
+    waiting_ms: u64 = 0,
     /// Every request so far, the running one's progress included: prompt tokens (counted as its prefill starts),
     /// those resumed, those computed, reply tokens, prefill and decode seconds, decode rounds, drafts verified and
     /// drafts kept.
@@ -262,6 +449,20 @@ pub const Progress = struct {
     drafted_total: u64 = 0,
     accepted_total: u64 = 0,
     requests_total: u64 = 0,
+    /// Requests refused as busy: no room in the KV pool within TF_GLM53_MULTI_WAIT_S (503 / overloaded).
+    busy_total: u64 = 0,
+    /// TF_GLM53_MULTI: the conversations decoded together and the seconds a request may wait for room (0: no limit);
+    /// multi 0: one at a time (/health then leaves `multi` out).
+    multi: u8 = 0,
+    multi_wait_s: u64 = 0,
+    /// TF_GLM53_MULTI: the schedule in use now (GET / POST /v1/schedule).
+    multi_schedule: Schedule = .{},
+    /// Fiore-lab: where the RoCE proxies poll (world 0: no RoCE).
+    roce: Roce = .{},
+    /// The requests running now, the oldest admitted first: every conversation admitted when several decode
+    /// together, else the one running. Not the ones waiting for admission.
+    requests: [max_requests]RequestProgress = @splat(.{}),
+    n_requests: u8 = 0,
 };
 
 pub const SubmitError = error{ Closed, Busy };
@@ -287,7 +488,14 @@ pub const Engine = struct {
         experts: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, q: ExpertsQuery) ?[]u8 = null,
         /// Fiore-lab: a change of the experts' bits asked for, or the bits in use saved; a JSON body.
         experts_control: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, c: ExpertsControl) ControlError![]u8 = null,
+        /// Fiore-lab: TF_GLM53_MULTI's schedule, the fields of `set` given set first; the schedule in use after.
+        schedule: ?*const fn (ctx: *anyopaque, set: ScheduleSet) ControlError!Schedule = null,
     };
+
+    pub fn schedule(e: Engine, set: ScheduleSet) ControlError!Schedule {
+        const f = e.vtable.schedule orelse return error.Unsupported;
+        return f(e.ctx, set);
+    }
 
     pub fn expertsControl(e: Engine, a: std.mem.Allocator, c: ExpertsControl) ControlError![]u8 {
         const f = e.vtable.experts_control orelse return error.Unsupported;
@@ -360,4 +568,19 @@ test {
     _ = @import("prompt_cache.zig");
     _ = @import("prompt_imprint.zig");
     _ = @import("keepalive.zig");
+}
+
+/// A summary's tokens at most for `thinking` tokens organised: `cap`, or with `share` above 0 that percent of them (at
+/// least 128) within `cap`.
+pub fn foldCapOf(share: u8, cap: u32, thinking: u64) u64 {
+    if (share == 0) return cap;
+    return @min(@as(u64, cap), @max(128, thinking * share / 100));
+}
+
+test "foldCapOf: a percent of the thinking, at least 128, within the cap" {
+    const t = @import("std").testing;
+    try t.expectEqual(@as(u64, 4096), foldCapOf(0, 4096, 100_000));
+    try t.expectEqual(@as(u64, 50_000), foldCapOf(50, 200_000, 100_000));
+    try t.expectEqual(@as(u64, 128), foldCapOf(50, 200_000, 100));
+    try t.expectEqual(@as(u64, 60_000), foldCapOf(50, 60_000, 200_000));
 }

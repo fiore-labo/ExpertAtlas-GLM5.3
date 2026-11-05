@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! TensorFold's tokenizer for Hugging Face tokenizer.json files: encode equals tokenizers' encode(text, add_special_tokens=False).
 const std = @import("std");
 const unicode = @import("unicode.zig");
@@ -180,6 +181,14 @@ pub const Tokenizer = struct {
     }
 
     /// Text for `ids` through the decoder chain; unknown ids are skipped. Caller frees with `a`.
+    /// Fiore-lab: a token's raw bytes under a ByteLevel decoder; null: another decoder, or no such id.
+    pub fn tokenBytes(t: *const Tokenizer, a: Allocator, id: u32) Allocator.Error!?[]u8 {
+        const d = t.decoder orelse return null;
+        if (d != .byte_level) return null;
+        const token = t.id_to_token.get(id) orelse return null;
+        return try steps.byteLevelBytes(a, token);
+    }
+
     pub fn decode(t: *const Tokenizer, a: Allocator, ids: []const u32, skip_special_tokens: bool) Error![]u8 {
         var arena = std.heap.ArenaAllocator.init(a);
         defer arena.deinit();

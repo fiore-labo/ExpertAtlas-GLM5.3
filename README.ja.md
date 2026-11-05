@@ -3,19 +3,59 @@
 # 4 / 8 台のDGX Spark用　GLM-5.3-full
 
 
-フルサイズの GLM-5.3（755B、`glm_moe_dsa`）を、GB10 を 1 基ずつ搭載した NVIDIA DGX Spark 4 台または 8 台で、テンソル並列 4 または 8 で動かします。リクエストは一度に 1 件ずつ、高速に、エージェントやコーディング向けの長いコンテキストで処理します。エンジンは Zig と素の CUDA カーネルで書かれており、実行時に Python は不要です。
+フルサイズの GLM-5.3（755B、`glm_moe_dsa`）を、GB10 を 1 基ずつ搭載した NVIDIA DGX Spark 4 台または 8 台で、テンソル並列 4 または 8 で動かします。つなぎ方は RoCE スイッチ 1 台か、4 台なら直結のリングです。エージェントやコーディング向けの長いコンテキストを高速に処理します。リクエストは既定で一度に 1 件で、`MULTI` を使うと 4 会話までまとめて decode します。エンジンは Zig と素の CUDA カーネルで書かれており、実行時に Python は不要です。
 
 これは [TensorFold](https://github.com/ashhart/TensorFold) 1.0.2 から Fiore-lab が作った非公式の派生物であり、TensorFold プロジェクトのリリースではありません。TensorFold のコードを含み、フルサイズの GLM-5.3 用のエンジン（`zig/src/families/glm_moe_dsa/`、`zig/kernels/cuda/glm53/`）を追加し、TensorFold のドキュメントは除いています。それらのドキュメントは別のモデル、重み、マシンについて書かれたものだからです。TensorFold 自体については、そのリポジトリを参照してください。
 
-**AI アシスタントを使ってこのシステムを理解したり動かしたりする場合**は、[glm53/release/AI-GUIDE.ja.md](glm53/release/AI-GUIDE.ja.md)（リリースアーカイブでは `AI-GUIDE.ja.md`。英語版は `AI-GUIDE.md`）を渡してください。AI アシスタント向けに書いた 1 ページの説明で、システムの全体像、目的、準備と使い方、できることとできないこと（実測の数値つき）、詳細の置き場所をまとめています。
+## ドキュメント
+
+どのページも英語、日本語（`.ja.md`）、簡体字中国語（`.zh-CN.md`）があります。リリースアーカイブとイメージでは最上位にまとめて置いてあります。
+
+| ページ | 内容 |
+|---|---|
+| [QUICKSTART](glm53/release/QUICKSTART.ja.md) | 初めての起動: 重み、`docker run` 1 行、全オプション、よくある `STOP` |
+| [BEFORE-START](glm53/release/BEFORE-START.ja.md) | 初めての起動の前に決めること、後でよいこと |
+| [PANEL-GUIDE](glm53/release/PANEL-GUIDE.ja.md) | コントロールパネルの画面を項目ごとに |
+| [CONFIG](glm53/release/CONFIG.ja.md) | `glm53.conf` の全設定: 既定値、読む側、変更が効く時期 |
+| [RUNTIME](packaging/RUNTIME.ja.md) | アーカイブや手作業で動かす方法: 全コマンド、キャッシュ、Claude Code、障害 |
+| [T4](glm53/release/T4.ja.md) | 4 台: チェックポイント、設定、測定 |
+| [RING](glm53/release/RING.ja.md) | スイッチなしのリング 4 台: 配線、fence 入りの NCCL、測定 |
+| [AGENT-API](glm53/release/AGENT-API.ja.md) | AI エージェント向けの操作 API（ダッシュボードなし） |
+| [AI-GUIDE](glm53/release/AI-GUIDE.ja.md) | システム全体を 1 ページで。理解や運用を手伝う AI アシスタント向け |
+| [ATLAS-TESTS](glm53/release/ATLAS-TESTS.ja.md) | エキスパートの並べ替えの測定 |
+| [weights](glm53/weights/README.ja.md) | 重みのファイルをすべて Z.AI の公式 BF16 チェックポイントから自分で作る |
 
 ## できること
 
-- テンソル並列 8 または 4。KV キャッシュはランクのペアに分割します（decode コンテキスト並列 2）。エンジンとモデルは 1M（1,048,576 トークン）まで扱え、**8 台でも 4 台でも 1M に届きます**。8 台: 4 ビット KV キャッシュ（`KV=fp4`、`NEED_GB=100`）なら `CONTEXT=1048576` に加えて `STORE=1048576`（1 ノードあたり約 23 GiB の余裕）、8 ビットのキャッシュなら `STORE=589824`。4 台: コントロールパネルで routed expert の 70 % を 3 ビット、残りを 4 ビットにして `CONTEXT=1048576`（`KV=fp4`、`STORE` 512。1 ノードあたり約 7.5 GiB の余裕があり、動作中の並べ替えもできます）。4 台用チェックポイントだけなら `CONTEXT=819200` `STORE=18080` です。どれも約 1,019,000 トークンのプロンプト 1 本で実測しました。4 ビット KV キャッシュは精度が少し下がります（同じ重みで KL 0.0190、8 ビットのキャッシュでは 0.0156: [glm53/release/T4.ja.md](glm53/release/T4.ja.md)）。下の速度の 8 台は 8 ビットのキャッシュです。設定例は 819,200 と 737,280 になっています（KV プールは `CONTEXT` + `STORE` トークンを持ちます）。
+- テンソル並列 8 または 4。KV キャッシュはランクのペアに分割します（decode コンテキスト並列 2）。エンジンとモデルは context length 1M（1,048,576 トークン）まで扱え、**8 台でも 4 台でも 1M に届きます**。8 台: 4 ビット KV キャッシュ（`KV=fp4`、`NEED_GB=100`）なら `CONTEXT_LENGTH=1048576` で `KV_SIZE=2097152`（1 ノードあたり約 23 GiB の余裕）、8 ビットのキャッシュなら `KV_SIZE=1638400`。4 台: コントロールパネルで routed expert の 70 % を 3 ビット、残りを 4 ビットにして `CONTEXT_LENGTH=1048576`（`KV=fp4`、`KV_SIZE=1049088`: context length に 512 を足した、プールの最小。1 ノードあたり約 7.5 GiB の余裕があり、動作中の並べ替えもできます）。4 台用チェックポイントだけなら `CONTEXT_LENGTH=819200` `KV_SIZE=837280` です。どれも約 1,019,000 トークンのプロンプト 1 本で実測しました。4 ビット KV キャッシュは精度が少し下がります（同じ重みで KL 0.0190、8 ビットのキャッシュでは 0.0156: [glm53/release/T4.ja.md](glm53/release/T4.ja.md)）。下の速度の 8 台は 8 ビットのキャッシュです。設定例は context length が 819,200 と 737,280、KV サイズが 1,638,400 と 837,280 です（KV サイズは KV キャッシュ全体で、すべての会話が共有する 1 つのプールです。1 件のリクエストが context length まで使い、残りは前の会話の KV を空いているブロックに残します）。
 - 長いプロンプトはシーケンス並列で分割して読み込みます。decode ステップの集団通信は RoCE 上で行います。
 - すべての会話で 1 つの会話キャッシュを使い、256 トークンのブロック単位で保持します。リクエストは、どの会話のものであってもキャッシュにある最も長い先頭部分から再開します。同じように始まる会話（エージェントのシステムプロンプト、そのサブエージェント）は、共通のブロックを 1 回だけ保持します。
 - ラウンドごとにドラフトをモデルが検証します。ドラフトを作るのは、既定では GLM-5.3 自身の MTP 層、またはオプションの DFlash2 drafter です。どの場合も、応答はモデル自身が選んだものです。
+- 思考が長くなりすぎないようにします。上限は応答の上限に対する割合で決め、長い思考は途中や終わりに整理できます。リクエストごとにも、エンジンの動作中にも設定できます。
 - `/metrics`（Prometheus のテキスト）と `/health` は実行中のリクエストの分も数えるので、モニタはリクエストの実行中にも prefill と decode の速さ、キャッシュのヒット、ドラフトの受理を読めます。`METRICS_LISTEN` を設定すると、別のホストのモニタ向けに、この 2 つを専用のアドレスで読み取り専用で開きます。
+
+## r3.3-102 で変わったこと
+
+**対応が必要な変更:**
+
+- **3 ビットのバンクが必ず要ります。** チェックポイントと一緒に用意します。計画なしの起動は全エキスパートを 3 ビットで読みます。`BITS` や保存した割り当てで別の幅を選ぶと、その幅のバンクも要ります。
+- **設定の名前が変わりました。** `CONTEXT` と `STORE` に代わって `CONTEXT_LENGTH`（1 リクエストの最長）と `KV_SIZE`（KV キャッシュ全体）を使います。古い `glm53.conf` もそのまま読めます。
+- **応答の既定の上限**は、4,096 トークンから context length の 70 %（`MAX_TOKENS_SHARE`）に変わりました。クライアントの `max_tokens` が優先します。
+- **設定の選択肢を整理しました。** `CACHE` は `pool`、`DCP` は 2、`ROCE_PROXY_CORES` は `a725` か `os` です。
+- **`./tf-glm53 up` はコントロールパネルだけを起動します。** エンジンはパネルか `./tf-glm53 start` で起動します。手で起動するときは `./tf-glm53 engine-up` です。
+
+**新しいこと:**
+
+- **1 行でエンジンが動きます。** `docker run ... IMAGE up` は、1 台目のノードにリリースを書き出し、ノードと重みを探し、エンジンを起動して、1 件リクエストを送ります。最後は、アドレスを示す `READY` か、次にすることを示す `STOP`、`FIX`、`THEN` です。どの設定も `-e NAME=VALUE` で指定できます（[QUICKSTART](glm53/release/QUICKSTART.ja.md)）。
+- **スイッチなし、リングの 4 台**（[RING](glm53/release/RING.ja.md)）。
+- **AArch64 の fence を入れた NCCL をイメージに:** スイッチでもリングでも使います。NVIDIA/nccl#2393 の修正で、NCCL のリリースにはまだ入っていません。これがないと、Arm の通信スレッドがエラーなしで止まることがあります（[RING](glm53/release/RING.ja.md)「fence 入りの NCCL」）。
+- **ノード確認:** 配線からリングまたはスイッチのノードを見つけ、確認して登録します（`glm53.nodes.conf`）。`TOPOLOGY`、`SOCKET_IFNAME`、`IB_HCA` を書く必要はありません。
+- **Reasoning Control:** 応答の上限に対する割合で決める思考の上限、中間整理、思考完了時整理を、エンジンの動作中にパネルや `POST /v1/thinking` で変えられます（[CONFIG](glm53/release/CONFIG.ja.md)）。
+- **複数の会話を同時に:** `MULTI`（1〜4）が MTP 層でも動くようになりました。動作中はパネルや `POST /v1/schedule` で prefill と decode の GPU 配分を決められ、短いプロンプトを先に通せます。
+- **Byte Resume**（既定でオン）: モデルがトークナイザーと違う位置で文字列を切ると、次のターンのプロンプトでは同じバイトが別のトークン ID になります。キャッシュは、残りを計算し直さず、その先から再開するようになりました。
+- **パネル:** エンジン設定画面、重みの場所とその確認（[ WEIGHTS ]）、起動の流れの画面、円の上の KV プール、各ノードの温度。
+- **AI エージェント向けの操作 API:** ダッシュボードなしで、エンジンの起動、停止、設定ができます（[AGENT-API](glm53/release/AGENT-API.ja.md)）。
+- **速く、低い温度で:** 重みを並列に読みます（リングでの測定で、準備完了が 366 秒から 127 秒に）。MTP はドラフトの信頼度が下がるとそのラウンドのドラフトを打ち切ります（`TF_GLM53_MTP_CONF`、既定 0.7）。RoCE プロキシのスレッドを Cortex-A725 コアに留めます（`ROCE_PROXY_CORES`）。同じ速さで SoC が 5〜16 °C 下がりました。
 
 ## r3.2-102 で変わったこと
 
@@ -34,11 +74,11 @@
 GLM-5.3 はトークンごとに、1 層 256 個の routed expert から 8 個を選びます。expert によって選ばれる頻度は大きく違います。Expert Atlas は 19,200 個の routed expert（層 3〜77）を、それぞれ自分の幅（2・3・4・5 ビット）で読み込み、限られたメモリの中で、よく使われる expert ほど多くのビットを持たせます。
 
 - **バンク**: 各幅の routed expert で、Hugging Face にあります。[fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit)、[-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit)、[-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit)、[-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit)。パネルが選ばせるのは、全ノードにそろっている幅です。
-- **コントロールパネル**: ランチャー（`./tf-glm53 launcher`）が出すページです。起動の前には幅を計画し、各ノードのメモリ、計画が収まるか、KV キャッシュに残る量を表示します。エンジンの起動と停止もここから行います。稼働中は、各トークンが選ぶ expert、選ばれた expert の平均の幅、速さを表示します。
+- **コントロールパネル**: ランチャー（`./tf-glm53 up` で起動）が出すページです。起動の前には幅を計画し、各ノードのメモリ、計画が収まるか、計画が残す KV サイズを表示します。エンジンの起動と停止もここから行います。稼働中は、各トークンが選ぶ expert、選ばれた expert の平均の幅、速さを表示します。
 - **利用記録**: エンジンは、プロンプトの各行と decode の各トークンが選ぶ expert を数えます。保存した割り当ては保存元の稼働の利用記録を持ち、記録は割り当てと一緒に動きます。開いてもう一度稼働させると、その稼働の分が記録に加わります。計画はこの記録で expert を並べます（記録の無い計画は、Fiore-lab が測ってページに同梱した回数で並べます）。自動では何も保存しません。停止時に、割り当てとその記録に名前を付けて保存します。
 - **エキスパート最適化**: 幅ごとの expert の個数はそのままで、稼働の利用記録で読み込み済みの expert を並べ替えます。同じメモリで、モデルが実際に選ぶ expert の平均の幅が上がります。稼働中のエンジンで使えます（4 台で 75 層全部の変更に 83〜90 秒、リクエストの合間に行います）。結果は必要なときに名前を付けて保存し、後の起動で開きます。
 
-コントロールパネルは 4 台または 8 台で動き、台数は起動画面で選びます。`./tf-glm53 up` はこれまでどおりチェックポイントの幅で起動します。詳しくは `packaging/RUNTIME.ja.md`（「コントロールパネル」）と `glm53/release/T4.ja.md` にあります。
+コントロールパネルは 4 台または 8 台で動き、台数は起動画面で選びます。パネルを使わないときは、`./tf-glm53 start` と `./tf-glm53 engine-up` が直前の起動の計画か、全エキスパート 3 ビットで起動します。詳しくは [PANEL-GUIDE](glm53/release/PANEL-GUIDE.ja.md)、`packaging/RUNTIME.ja.md`（「コントロールパネル」）、`glm53/release/T4.ja.md` にあります。
 
 ## Hugging Face の重み
 
@@ -47,22 +87,23 @@ GLM-5.3 はトークンごとに、1 層 256 個の routed expert から 8 個�
 | 8 台用チェックポイント：すべての重み（routed expert は 4 bit） | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | 8 台での起動。4 台・8 台のコントロールパネル（4 bit のバンクも兼ねる） |
 | 4 台用チェックポイント：使われ方の少ない半分の routed expert を 3 bit に | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | コントロールパネルを使わない 4 台での起動 |
 | エキスパートのバンク 2 bit | [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit) | 187.3 GB | コントロールパネル |
-| エキスパートのバンク 3 bit | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | コントロールパネル（4 台で文脈を最大まで取るときに必要） |
+| エキスパートのバンク 3 bit | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | コントロールパネル（4 台で context length を最大まで取るときに必要） |
 | エキスパートのバンク 4 bit | [fiore-lab/GLM-5.3-EXL3-Experts-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) | 368.5 GB | コントロールパネル（8 台用チェックポイントがないノードで） |
 | エキスパートのバンク 5 bit | [fiore-lab/GLM-5.3-EXL3-Experts-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit) | 459.1 GB | コントロールパネル |
 
-バンクは、19,200 個の routed expert を 1 つの幅でそろえたものです。コントロールパネルは、エキスパートごとに、計画で決めた幅の
-バンクから読み込みます。**バンクは、使いたい幅の分だけダウンロードすれば足ります**（パネルが選ばせるのは、全ノードにそろって
-いる幅です）。4 台でコントロールパネルを使うなら、8 台用チェックポイントと 3 bit のバンク（合わせて 668 GB）で足ります。
+バンクは、19,200 個の routed expert を 1 つの幅でそろえたものです。エンジンは、エキスパートごとに、計画で決めた幅の
+バンクから読み込みます。**どの起動にも、ノード数に合ったチェックポイントと 3 bit のバンクが要ります。ほかのバンクは、使いたい幅の分だけダウンロードすれば足ります**（パネルが選ばせるのは、全ノードにそろって
+いる幅です）。4 台なら、4 台用チェックポイントと 3 bit のバンクで、合わせて 622.5 GB です。
 どのノードにも、同じファイルを同じパスに置きます。1 台でダウンロードして、ほかのノードに写します。例:
 
 ```sh
 python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
-~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks --local-dir ~/models/GLM-5.3-EXL3-8x-DGX-Sparks
+~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks --local-dir ~/models/GLM-5.3-EXL3-4x-DGX-Sparks
+~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-Experts-3bit --local-dir ~/models/GLM-5.3-EXL3-Experts-3bit
 ```
 
-ほかのノードへの写し方と照合（`./tf-glm53 verify`、`./tf-glm53 verify-banks`）は [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)
-にあります。
+ほかのノードへの写し方は [QUICKSTART](glm53/release/QUICKSTART.ja.md) に、照合（`./tf-glm53 verify`、`./tf-glm53 verify-banks`）は
+[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md) にあります。
 
 ## 重みを自分で作る
 
@@ -74,25 +115,28 @@ Fiore-lab のものと形が同じで、同じように読み込まれます。
 
 ## 必要なもの
 
-- 1 つの RoCE v2 ネットワークでつながった DGX Spark（GB10）4 台または 8 台。どのノードにも 1 台目からパスワードなしの ssh で接続できること。4 台なら、各ノードに 100 Gb/s のポートが 1 つあれば足ります。
-- DGX OS（Ubuntu 24.04）、NVIDIA ドライバ 580 以降、cuBLAS 13。
-- 全ノードに NCCL 2.30.7。NVIDIA の `nvidia-nccl-cu13` wheel を pip で展開したものです（`packaging/RUNTIME.md`）。
+- 1 つの RoCE v2 ネットワークでつながった DGX Spark（GB10）4 台または 8 台、またはリングでつないだ 4 台。1 台目から全ノードと自分自身へ、パスフレーズのない鍵で ssh できること。スイッチの 4 台なら、各ノードに 100 Gb/s のポートが 1 つあれば足ります。
+- イメージを使う場合: 各ノードに Docker と NVIDIA Container Toolkit（DGX OS には両方あります）と `python3`。起動の前に各ノードで約 115 GiB の空きメモリ。
+- アーカイブを使う場合: DGX OS（Ubuntu 24.04）、NVIDIA ドライバ 580 以降、cuBLAS 13。全ノードに NCCL 2.30.7（NVIDIA の `nvidia-nccl-cu13` wheel を pip で展開したもの。`packaging/RUNTIME.ja.md`）。
+- アーカイブでは、AArch64 の fence を入れた NCCL を、スイッチでは推奨、リングでは必須とします。NVIDIA の wheel にはありません（[RING](glm53/release/RING.ja.md)）。イメージには入っています。
 - ノード数に合った Fiore-lab の EXL3 チェックポイント（Hugging Face）。全ノードの同じパスに置きます。8 台では [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks)（390 GB）、4 台では [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks)（344.6 GB）です。4 台用のチェックポイントは、層 3〜77 の routed expert のうち使用頻度の低い半分を 3 ビット、残りを 4 ビットで持ち、それ以外は 8 台用のチェックポイントと同じです。
 - 重みのファイルはどれも、Fiore-lab のファイルを使わずに、Z.AI の公式 BF16 チェックポイントから自分で作ることもできます（[glm53/weights](glm53/weights/README.ja.md)）。
-- コントロールパネルには、使う幅の expert のバンク。4 台では 3 ビットと 4 ビットのバンク（277.9 GB と 368.5 GB。8 台用のチェックポイントを 4 ビットのバンクとして使えます。4 ビットだけでは文脈が短くなります）と、ランチャー用に各ノードの `python3`。
+- 3 ビットのバンク（277.9 GB）。全ノードの同じパスに置きます。どの起動にも要ります。ほかのバンクは使う幅の分だけです（8 台用のチェックポイントを 4 ビットのバンクとして使えます。4 ビットだけでは context length が短くなります）。
+- ランチャーとログ係のために、各ノードの `python3`。
 
 ## 実行
 
-リリースは、コンテナイメージと、同じファイルを持つアーカイブの 2 つの形で配布します。おすすめはイメージです。イメージを使う場合、各ノードに要るのは Docker と NVIDIA Container Toolkit（DGX OS には両方あります）だけで、サーバーのライブラリは要りません。
+リリースは、コンテナイメージと、同じファイルを持つアーカイブの 2 つの形で配布します。おすすめはイメージです。重みを置いてあれば、1 台目のノードで次の 1 行を実行するとエンジンが起動します。
 
 ```sh
-docker pull ghcr.io/fiore-labo/expertatlas-glm5.3:r3.2-102            # 各ノードで
-mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/expertatlas-glm5.3:r3.2-102 install /out
+docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3-102 up
 ```
 
-そのあと `glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定し、以下と同じように進めます（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3.2-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。4 台でも 8 台でも、同じアーカイブと起動スクリプトを使います。`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーし、ノード、ネットワーク名、NCCL、重み、drafter を記入してから、`./tf-glm53 deploy` と `./tf-glm53 up` を実行します。サーバーは既定で全アドレス（`HOST=0.0.0.0`）で OpenAI chat API を提供します。API にキーはないので、届く人なら誰でも使えます。閉じたネットワーク内に留めるか、前段に TLS とアクセス制御を置いてください（`HOST=127.0.0.1` にすると 1 台目のノードからだけになります）。
+最後に `READY` とアドレスが出ます。API は `http://FIRST-NODE:8000/v1`、コントロールパネルは `http://FIRST-NODE:8010/panel` です。足りないものがあると `STOP` で止まり、することと次に実行する行を示します。手順と全オプションは [QUICKSTART](glm53/release/QUICKSTART.ja.md) にあります。
 
-`./tf-glm53 up` の代わりにコントロールパネルから使うときは、1 台目のノードで `./tf-glm53 launcher` を実行し、`http://FIRST-NODE:LAUNCHER_PORT/panel`（4 台の例ではポート 8010）を開きます。エンジンの起動と停止はそこで行います（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コントロールパネル」）。`glm53.conf` の全設定項目、読む側、変更が効く時期は [glm53/release/CONFIG.ja.md](glm53/release/CONFIG.ja.md) にあります。
+同じことを手で行う場合、イメージなら、全ノードで `docker pull` し、`mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out` を実行して、`glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定します（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3.3-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。どちらも、`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーして必要な項目を記入し、`./tf-glm53 deploy` と `./tf-glm53 up`（コントロールパネルを起動します）を実行して、パネルでエンジンを起動します。`./tf-glm53 start` は直前の起動の計画で起動し、`./tf-glm53 down` で停止します。
+
+サーバーは既定で全アドレス（`HOST=0.0.0.0`）で OpenAI chat API と、Claude Code 向けの Anthropic Messages API を提供します。API にもコントロールパネルにもキーはないので、届く人なら誰でも使えます。ノードを閉じたネットワーク内に留めるか、前段に TLS とアクセス制御を置いてください（`HOST=127.0.0.1` と `LAUNCHER_HOST=127.0.0.1` にすると 1 台目のノードからだけになります）。
 
 ## Drafter
 
@@ -100,11 +144,11 @@ mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out g
 - `dflash2`: incoai/GLM-5.3-DFlash2。**ライセンス上の理由で、このリポジトリにもアーカイブにも同梱していません**。モデルカードには CC BY-NC-ND 4.0（非営利利用のみ、改変禁止）、研究と評価のため、と記載されています。商用ライセンスは Inco AI が提供しています。その利用がこのライセンスの範囲内であれば、[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md#dflash2-を使う手順) の「DFlash2 を使う手順」に従ってください。固定した版で一度だけダウンロードし、全ノードの同じパスにコピーしてコピーを確認してから、`DRAFTER_KIND=dflash2` と `DRAFTER` を設定します。エンジンは起動時にメモリ上でこれを 4 ビットに量子化し、ディスクには何も書き出しません。decode はさらに速くなります（「速度」）。
 - `none`: ドラフトなし。
 
-`glm53.conf` の `DRAFTER_KIND` で選びます。`./tf-glm53 -d KIND up` なら、その起動だけ選べます。
+`glm53.conf` の `DRAFTER_KIND` で選びます。起動画面か `./tf-glm53 -d KIND start`（または `engine-up`）なら、その起動だけ選べます。
 
 ## 速度
 
-**全ノードで GPU クロックを 2.1 GHz（2,100 MHz）に制限して測定しています**。まだキャッシュにないコーディング用のプロンプトで、リクエストは一度に 1 件（reasoning effort low、応答は最大 4,000 トークン）。このアーカイブを `glm53.conf.example`（8 台、FP8 KV キャッシュ）と `glm53.t4.conf.example`（4 台、4 ビット KV キャッシュ）の設定で使い、Fiore-lab が公開しているチェックポイントで測りました。実際の数値はチェックポイント、プロンプト、クロックによって変わります。測定条件の詳細は `packaging/RUNTIME.md` に記載しています。
+**リリース r2-102 で、全ノードの GPU クロックを 2.1 GHz（2,100 MHz）に制限して測定しました**。その後エンジンは変わっており、このリリースでは測り直していません。まだキャッシュにないコーディング用のプロンプトで、リクエストは一度に 1 件（reasoning effort low、応答は最大 4,000 トークン）。`glm53.conf.example`（8 台、FP8 KV キャッシュ）と `glm53.t4.conf.example`（4 台、4 ビット KV キャッシュ）の設定で、Fiore-lab が公開しているチェックポイントを使いました。速度は環境によって違います（チェックポイント、プロンプト、クロックなど）。数値は目安です。測定条件の詳細は `packaging/RUNTIME.ja.md` に記載しています。
 
 | ノード数 | プロンプト | MTP（k=3）: 最初のトークンまでの時間 / decode | DFlash2: 最初のトークンまでの時間 / decode |
 |---|---|---|---|
@@ -131,7 +175,7 @@ Zig 0.17.0 が `PATH` 上にあり（または `build_libs.sh` には `ZIG=` で
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so
-zig build dist -Dversion=r3.2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.3-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 
@@ -139,9 +183,10 @@ zig build dist -Dversion=r3.2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-pla
 
 ## 制限
 
-- GB10 システム 4 台または 8 台のみに対応します。他の GPU や他のランク数には対応していません。
-- 同時に実行するリクエストは 1 件です。他のリクエストは 32 件まで到着順に待ち（チャットのタイトル作成は最後）、それを超えるとサーバーは断ります（503、ストリーミングではエラーイベント）。サブエージェントを並列に動かすエージェントでは、サブエージェントを別のモデルに向けるほうが適しています。
-- その他の制限は `packaging/RUNTIME.md` に記載しています。
+- GB10 システム 4 台または 8 台に対応します。2 台と 3 台の構成はテスト中です。他の GPU や他のランク数には対応していません。
+- 既定では、同時に実行するリクエストは 1 件です。他のリクエストは 32 件まで到着順に待ち（チャットのタイトル作成は最後）、それを超えるとサーバーは断ります（503、ストリーミングではエラーイベント）。`MULTI` を使うと 4 件までまとめて decode できますが、ノードのメモリが要ります。それ以外の場合、サブエージェントを並列に動かすエージェントでは、サブエージェントを別のモデルに向けるほうが適しています。
+- コントロールパネルの画面は英語と日本語だけです。
+- その他の制限は `packaging/RUNTIME.ja.md` に記載しています。
 
 ## ライセンスとクレジット
 
@@ -153,6 +198,8 @@ zig build dist -Dversion=r3.2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-pla
 - [MiaAI-Lab の GLM-5.3-Flash on 2x DGX Spark](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold): そのプロンプト処理用カーネルを参考に、GLM-5.3 のプロンプト処理用カーネルを書きました。
 - [MiaAI-Lab の GLM-5.3 EXL3 on 3x DGX Spark](https://github.com/MiaAI-Lab/GLM-5.3-EXL3-3x-DGX-Sparks-TensorFold): 4 ビット KV キャッシュはそのレイアウトを採用し、このエンジン独自のコードで実装しました。
 - [ExLlamaV3](https://github.com/turboderp-org/exllamav3): チェックポイントはこれで量子化しており、エンジンはその EXL3 形式を読み込みます。
+- [gr8 のレシピ](https://github.com/knapcio/GLM-5.3-gr8-4x-DGX-Spark-TP4)と[エンジン](https://github.com/kindlingai/gr8): decode の高速化のいくつかはその考え方を採り、このエンジン独自のコードで実装しました。
+- [ollama/ollama#12375](https://github.com/ollama/ollama/issues/12375): Byte Resume の考え方はこの報告から採りました。
 
 ## TensorFold のコントリビューター
 

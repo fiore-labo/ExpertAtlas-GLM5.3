@@ -81,12 +81,41 @@ struct Region {
     int world, rank, slots, hcas, flag_stride;
 };
 
+// TF_GLM53_L2PF (gr8's paced L2 prefetch, here in the wait itself): up to 4 byte ranges the next kernels read
+// TF_GLM53_L2PF (gr8 のペースを決めた L2 の先読みを、ここでは待ちの中で): 次のカーネルが読む最大 4 つのバイト範囲
+struct Pf {
+    uint64_t p[4];
+    uint32_t n[4];
+    int count;
+};
+
+// while the peers' data is on the way, the warps from `skip` (none of the polling threads) ask the L2 for pf's 128-byte
+// lines, spread over every block, and stop once the block's pollers have all seen their flags (`arrived` reaches
+// `want`, checked every 4 lines): the collective waits for no prefetch. Nothing is written, so its bytes are unchanged
+// peer のデータが届く間に、`skip` からの warp (poll するスレッドを含まない) が pf の 128 バイトの行を L2 に求め
+// (全ブロックに分ける)、ブロックの poll がすべてフラグを見たら (`arrived` が `want` に届いたら。4 行ごとに見る)
+// やめる: 集団通信は先読みを待たない。何も書かないので、集団通信のバイトは変わらない
+__device__ __forceinline__ void l2_prefetch(const Pf& pf, int skip, const volatile int* arrived, int want) {
+    if (pf.count == 0 || (int)threadIdx.x < skip) return;
+    const long long per = (long long)blockDim.x - skip, stride = (long long)gridDim.x * per;
+    long long line = (long long)blockIdx.x * per + ((int)threadIdx.x - skip), base = 0;
+    int n = 0;
+    for (int r = 0; r < pf.count && r < 4; r++) {
+        const long long lines = ((long long)pf.n[r] + 127) / 128;
+        for (; line - base < lines; line += stride) {
+            if ((n++ & 3) == 0 && *arrived >= want) return;
+            asm volatile("prefetch.global.L2 [%0];" ::"l"(pf.p[r] + (uint64_t)(line - base) * 128));
+        }
+        base += lines;
+    }
+}
+
 // stage into send[seq & 1], ring the doorbell (nbytes, then seq), wait on every peer's per-HCA flag (a timeout
-// poisons the runtime); returns seq and whether the data phase may run
+// poisons the runtime), the other threads prefetching pf meanwhile; returns seq and whether the data phase may run
 // send[seq & 1] に書き込み、doorbell を鳴らし (nbytes、次に seq)、各 peer の HCA ごとのフラグを待つ (タイムアウトで
 // ランタイムを poison する)。seq と、データの段に進んでよいかを返す
 __device__ __forceinline__ bool stage_and_wait(const Region& g, const uint8_t* in, int packs, uint32_t nbytes,
-                                               uint32_t& seq) {
+                                               uint32_t& seq, const Pf& pf) {
     const uint32_t epoch = ld_relaxed_gpu(g.epoch);
     seq = epoch + 1;
     const uint64_t slot = seq & 1u;
@@ -94,6 +123,10 @@ __device__ __forceinline__ bool stage_and_wait(const Region& g, const uint8_t* i
     const int index = blockIdx.x * blockDim.x + threadIdx.x, stride = gridDim.x * blockDim.x;
     if (ld_relaxed_gpu(g.poison) != 0) return false;
     for (int i = index; i < packs; i += stride) st_v4(send_slot + (uint64_t)i * 16, ld_v4(in + (uint64_t)i * 16));
+    // the block's pollers that have seen their flag (the prefetch's stop, l2_prefetch)
+    // フラグを見終えたブロックの poll の数 (先読みの止め、l2_prefetch)
+    __shared__ int arrived;
+    if (threadIdx.x == 0) arrived = 0;
     __syncthreads();
     uint32_t* ctrl = (uint32_t*)g.ctrl;
     if (threadIdx.x == 0) {
@@ -106,6 +139,7 @@ __device__ __forceinline__ bool stage_and_wait(const Region& g, const uint8_t* i
             st_relaxed_sys(ctrl, seq);
         }
     }
+    l2_prefetch(pf, (g.world * g.hcas + 31) & ~31, &arrived, (g.world - 1) * g.hcas);
     if ((int)threadIdx.x < g.world * g.hcas) {
         const int peer = threadIdx.x / g.hcas, hca = threadIdx.x - peer * g.hcas;
         if (peer != g.rank) {
@@ -116,6 +150,7 @@ __device__ __forceinline__ bool stage_and_wait(const Region& g, const uint8_t* i
                 st_relaxed_sys(ctrl + 2, seq);
                 st_release_gpu(g.poison, seq);
             }
+            if (pf.count != 0) atomicAdd(&arrived, 1);
         }
     }
     __syncthreads();
@@ -176,10 +211,10 @@ __device__ __forceinline__ uint4 sum_pack(const Region& g, const uint8_t* in, ui
 }
 
 template <bool BF16>
-__device__ void allreduce(const uint8_t* in, uint8_t* out, int packs, uint32_t nbytes, Region g) {
+__device__ void allreduce(const uint8_t* in, uint8_t* out, int packs, uint32_t nbytes, Region g, const Pf& pf) {
     uint32_t seq;
     if (ld_relaxed_gpu(g.poison) != 0) return;    // poisoned: no stage, no tail / poison 済み: stage も tail もしない
-    const bool ok = stage_and_wait(g, in, packs, nbytes, seq);
+    const bool ok = stage_and_wait(g, in, packs, nbytes, seq, pf);
     if (ok) {
         const uint64_t slot = seq & 1u;
         const int index = blockIdx.x * blockDim.x + threadIdx.x, stride = gridDim.x * blockDim.x;
@@ -199,7 +234,8 @@ template <bool BF16>
 __device__ void reducescatter(const uint8_t* in, uint8_t* mid, int packs, uint32_t nbytes, Region g) {
     uint32_t seq;
     if (ld_relaxed_gpu(g.poison) != 0) return;
-    const bool ok = stage_and_wait(g, in, packs, nbytes | ROCE_SHARES, seq);
+    const Pf none = {};
+    const bool ok = stage_and_wait(g, in, packs, nbytes | ROCE_SHARES, seq, none);
     if (ok) {
         const uint64_t slot = seq & 1u;
         const int share = packs / g.world;
@@ -215,13 +251,13 @@ __device__ void reducescatter(const uint8_t* in, uint8_t* mid, int packs, uint32
 }  // namespace
 
 extern "C" __global__ void tf_glm53_roce_allreduce_f32(const uint8_t* in, uint8_t* out, int packs, uint32_t nbytes,
-                                                        Region g) {
-    allreduce<false>(in, out, packs, nbytes, g);
+                                                        Region g, Pf pf) {
+    allreduce<false>(in, out, packs, nbytes, g, pf);
 }
 
 extern "C" __global__ void tf_glm53_roce_allreduce_bf16(const uint8_t* in, uint8_t* out, int packs, uint32_t nbytes,
-                                                         Region g) {
-    allreduce<true>(in, out, packs, nbytes, g);
+                                                         Region g, Pf pf) {
+    allreduce<true>(in, out, packs, nbytes, g, pf);
 }
 
 extern "C" __global__ void tf_glm53_roce_reducescatter_f32(const uint8_t* in, uint8_t* mid, int packs, uint32_t nbytes,
@@ -237,10 +273,10 @@ extern "C" __global__ void tf_glm53_roce_reducescatter_bf16(const uint8_t* in, u
 // Shard s lands at column block s of every output row (rows of row_packs 16-byte packs).
 // shard s は各出力行の列ブロック s に入る (行は 16 バイトの pack が row_packs 個)。
 extern "C" __global__ void tf_glm53_roce_allgather(const uint8_t* in, uint8_t* out, int packs, uint32_t nbytes,
-                                                    int row_packs, Region g) {
+                                                    int row_packs, Region g, Pf pf) {
     uint32_t seq;
     if (ld_relaxed_gpu(g.poison) != 0) return;
-    const bool ok = stage_and_wait(g, in, packs, nbytes, seq);
+    const bool ok = stage_and_wait(g, in, packs, nbytes, seq, pf);
     if (ok) {
         const uint64_t slot = seq & 1u;
         const int index = blockIdx.x * blockDim.x + threadIdx.x, stride = gridDim.x * blockDim.x;

@@ -67,10 +67,16 @@ const Ctx = struct {
         std.debug.print("RESULT {s} {s}\n", .{ name, std.fmt.bytesToHex(digest, .lower) });
     }
 
+    /// On the collectives' stream: a plain upload (the legacy stream) may still be copying when the non-blocking
+    /// stream's next operation reads the buffer.
+    /// 集団通信の stream で: 普通の upload (既定の stream) は、non-blocking の stream の次の操作が読むときにまだコピー中のことがある。
     fn input(c: Ctx, kind: Kind, op: u64, n: usize) !cuda.DeviceBuffer {
         const bytes = try fill(c.gpa, kind, seedOf(op, c.g.rank), n);
         defer c.gpa.free(bytes);
-        return cuda.DeviceBuffer.fromHost(c.d, bytes);
+        var b = try cuda.DeviceBuffer.alloc(c.d, bytes.len);
+        errdefer b.free();
+        try b.uploadAsync(0, bytes, c.stream.handle);
+        return b;
     }
 };
 
@@ -116,6 +122,50 @@ fn allToAll(c: Ctx, op: u64, n: usize) !void {
     try c.result("alltoall_bf16", recv, n * 2 * c.g.world);
 }
 
+/// TF_TP_RING4=1 (four ranks in ring order, glm53/R3RT-102.md): allToAll and allToAll2 are refused, allToAllRelay
+/// leaves recv as a direct exchange does (the same RESULT alltoall_bf16), and small and odd counts are checked block by
+/// block against the senders' inputs.
+/// TF_TP_RING4=1 (リング順の 4 ランク): allToAll と allToAll2 は断られ、allToAllRelay の recv は直接の交換と同じ
+/// (同じ RESULT alltoall_bf16)。小さい数と奇数の数はブロックごとに送り手の入力と照合する。
+fn allToAllRing4(c: Ctx, op: u64, n: usize) !void {
+    const W = c.g.world;
+    var send = try c.input(.bf16, op, n * W);
+    defer send.free();
+    var recv = try cuda.DeviceBuffer.alloc(c.d, n * 2 * W);
+    defer recv.free();
+    var relay = try cuda.DeviceBuffer.alloc(c.d, n * 2);
+    defer relay.free();
+    if (c.g.allToAll(send.ptr, recv.ptr, n, .bf16, c.stream.handle)) |_| return error.Ring4GuardMissing else |e| if (e != error.Ring4NeedsRelay) return e;
+    if (c.g.allToAll2(send.ptr, recv.ptr, n, .bf16, send.ptr, recv.ptr, n, .bf16, c.stream.handle)) |_| return error.Ring4GuardMissing else |e| if (e != error.Ring4Unsupported) return e;
+    if (c.g.allToAllRelay(send.ptr, recv.ptr, n, .bf16, relay.ptr, n * 2 - 2, c.stream.handle)) |_| return error.Ring4GuardMissing else |e| if (e != error.Ring4RelaySpace) return e;
+    try c.g.allToAllRelay(send.ptr, recv.ptr, n, .bf16, relay.ptr, relay.len, c.stream.handle);
+    try c.result("alltoall_bf16", recv, n * 2 * W);
+    for ([_]usize{ 0, 1, 2, 3, 7, 65, 4097 }) |m| {
+        const o = op + 100 + m;
+        var s = try c.input(.bf16, o, m * W);
+        defer s.free();
+        var r = try cuda.DeviceBuffer.alloc(c.d, m * 2 * W);
+        defer r.free();
+        var a = try cuda.DeviceBuffer.alloc(c.d, m * 2);
+        defer a.free();
+        try c.g.allToAllRelay(s.ptr, r.ptr, m, .bf16, a.ptr, a.len, c.stream.handle);
+        try c.stream.synchronize();
+        const got = try c.gpa.alloc(u8, m * 2 * W);
+        defer c.gpa.free(got);
+        if (m > 0) try r.download(0, got);
+        for (0..W) |j| {
+            // rank j's input, its block for this rank
+            const theirs = try fill(c.gpa, .bf16, seedOf(o, @intCast(j)), m * W);
+            defer c.gpa.free(theirs);
+            if (!std.mem.eql(u8, got[j * m * 2 ..][0 .. m * 2], theirs[c.g.rank * m * 2 ..][0 .. m * 2])) {
+                std.debug.print("FAIL alltoall_ring4 count {d}: block from rank {d} differs\n", .{ m, j });
+                return error.Ring4Mismatch;
+            }
+        }
+        std.debug.print("CHECK alltoall_ring4 count {d}: {d} blocks equal\n", .{ m, W });
+    }
+}
+
 fn timed(c: Ctx, name: []const u8, n: usize, reps: usize) !void {
     var send = try c.input(.bf16, 99, n);
     defer send.free();
@@ -153,13 +203,15 @@ pub fn main(init: std.process.Init) !u8 {
     std.debug.print("INFO rank {d}/{d} nccl {d}\n", .{ rank, world, try lib.version() });
     var g = try cuda.tp.Group.init(&lib, rank, world, master);
     defer g.deinit();
+    const ring4 = if (std.c.getenv("TF_TP_RING4")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
+    if (ring4) g.topology = .ring4;
     const c: Ctx = .{ .gpa = init.gpa, .d = &driver, .g = &g, .stream = try cuda.Stream.init(&driver, true) };
     try allReduce(c, "allreduce_f32", .f32, 1, 1 << 20);
     try allReduce(c, "allreduce_bf16", .bf16, 2, 1 << 20);
     try allReduce(c, "allreduce_bf16_window8", .bf16, 3, 8 * 6144);
     try allGather(c, 4, 1 << 18);
     try reduceScatter(c, 5, 1 << 18);
-    try allToAll(c, 6, 1 << 16);
+    if (ring4) try allToAllRing4(c, 6, 1 << 16) else try allToAll(c, 6, 1 << 16);
     var pair = try g.split(rank / 2, rank % 2);
     defer pair.deinit();
     const pc: Ctx = .{ .gpa = init.gpa, .d = &driver, .g = &pair, .stream = c.stream };

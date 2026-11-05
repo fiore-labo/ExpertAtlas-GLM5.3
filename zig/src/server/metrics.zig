@@ -209,6 +209,9 @@ fn renderProgress(w: *std.Io.Writer, snap: *const Metrics, p: api.Progress, pool
     try gauge(w, "prompt_tokens_cached_running", "gauge", "Of them, the tokens resumed from the prompt cache.", p.cached);
     try gauge(w, "prefill_tokens_remaining", "gauge", "Prompt tokens the running prefill has still to compute.", if (p.phase == .prefill) p.prompt -| @max(p.prompt_done, p.cached) else 0);
     try gauge(w, "queued_prompt_tokens", "gauge", "Prompt tokens of the requests waiting in the queue.", p.queued_prompt);
+    try gauge(w, "requests_waiting_ms", "gauge", "How long the oldest request waiting in the queue has waited (ms).", p.waiting_ms);
+    try gauge(w, "requests_busy_total", "counter", "Requests refused as busy: no room in the KV pool within TF_GLM53_MULTI_WAIT_S.", p.busy_total);
+    try gauge(w, "multi", "gauge", "Conversations decoded together (TF_GLM53_MULTI; 0: one at a time).", p.multi);
     try gauge(w, "requests_rejected_total", "counter", "Requests refused with 503 because the engine's queue was full.", snap.rejected);
     try histogram(w, "queue_wait_seconds", "Seconds a finished request waited in the engine's queue before it ran.", snap.queue);
     if (pool) |ps| {

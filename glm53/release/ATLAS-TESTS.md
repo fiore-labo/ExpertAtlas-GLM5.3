@@ -1,3 +1,5 @@
+English | [日本語](ATLAS-TESTS.ja.md) | [简体中文](ATLAS-TESTS.zh-CN.md)
+
 # Expert Atlas: which picks to re-sort the experts by
 
 The control panel's **Expert optimisation** re-sorts the routed experts between the widths an allocation holds: the

@@ -10,10 +10,25 @@ NODES=(192.0.2.11 192.0.2.12 192.0.2.13 192.0.2.14 192.0.2.15 192.0.2.16 192.0.2
 # the port the cable is in, e.g. enp1s0f0np0 / rocep1s0f0 or enp1s0f1np1 / rocep1s0f1.
 SOCKET_IFNAME=enp1s0f1np1
 IB_HCA=rocep1s0f1
+# Four nodes cabled as a ring without a switch (each node's port 0 to the next node's port 1, one /24 a link a PCIe
+# half; glm53/R3RT-102.md): TOPOLOGY=ring4, NODES in ring order (addresses on the management network, which also
+# carries the rendezvous: SOCKET_IFNAME), the four RDMA devices in IB_HCA, and NCCL 2.30.7 with the AArch64 send fence
+# (NVIDIA/nccl#2393) in NCCL_LIB (its sha256 in NCCL_SHA256; RUNTIME=host) or in the image (RUNTIME=docker, RING.md). check confirms the order and the crossing
+# (a link is one node's port 0 and the next node's port 1, two subnets, none to the opposite node).
+# TOPOLOGY=auto judges the cabling at each check and start instead (`tf-glm53 topology` shows it): a ring takes ring4
+# with NODES in ring order, IB_HCA and SOCKET_IFNAME found; a switch takes full. Anything else is refused (CONFIG.md).
+#TOPOLOGY=ring4
+#NODES=(192.0.2.10 192.0.2.11 192.0.2.13 192.0.2.12)
+#SOCKET_IFNAME=enP7s7
+#IB_HCA=rocep1s0f0,roceP2p1s0f0,rocep1s0f1,roceP2p1s0f1
+#RING_CHANNELS=4
+#NCCL_LIB=$HOME/nccl-fenced/libnccl.so.2
+#NCCL_SHA256=<the sha256 of that file: check refuses another>
 # The RoCE v2 GID index; empty: found on each node (the last RoCE v2 entry with an IPv4 address).
 GID_INDEX=
 
-# NCCL 2.30.7 on every node at this path: NVIDIA's wheel, unpacked on each node by
+# NCCL 2.30.7 on every node at this path (RUNTIME=host; the build with the AArch64 send fence is recommended, RING.md):
+# NVIDIA's wheel, unpacked on each node by
 #   pip3 install --no-deps --target ~/nccl-2.30.7 nvidia-nccl-cu13==2.30.7
 NCCL_LIB=~/nccl-2.30.7/nvidia/nccl/lib/libnccl.so.2
 
@@ -22,7 +37,7 @@ NCCL_LIB=~/nccl-2.30.7/nvidia/nccl/lib/libnccl.so.2
 # node needs Docker and the NVIDIA container toolkit, and the libraries are the image's, so NCCL_LIB is not used).
 # RUNTIME.md, "Running in containers".
 #RUNTIME=docker
-#IMAGE=glm53-tensorfold:r3.2-102
+#IMAGE=glm53-tensorfold:r3.3-102
 
 # The checkpoint for eight ranks, the same path on every node (RUNTIME.md: fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks).
 WEIGHTS=~/models/GLM-5.3-EXL3-8x-DGX-Sparks
@@ -34,7 +49,8 @@ WEIGHTS=~/models/GLM-5.3-EXL3-8x-DGX-Sparks
 #            states CC BY-NC-ND 4.0 (non-commercial use without derivatives). Obtain it yourself (RUNTIME.md,
 #            "Getting DFlash2") and check that your use is covered.
 #   none     no drafts.
-# `tf-glm53 -d KIND up` picks the drafter for one start instead of DRAFTER_KIND.
+# `tf-glm53 -d KIND start` (or -d KIND engine-up) picks the drafter for one start instead of DRAFTER_KIND, as the
+# control panel's launch screen does.
 DRAFTER_KIND=mtp
 MTP_K=3
 DRAFTER=
@@ -52,15 +68,16 @@ PORT=8000
 #METRICS_LISTEN=0.0.0.0:9894
 #LOG_LISTEN=0.0.0.0:9895
 
-# Positions a request may reach (prompt + reply), and the positions kept beyond them for earlier conversations.
-# CACHE=pool (the default) keeps CONTEXT + STORE positions in blocks of 256 that every conversation shares: a request
-# resumes from the longest cached prefix of any conversation, and conversations that start alike (one system prompt)
-# hold its blocks once. CACHE=slots keeps one store of STORE positions per conversation.
-# With the 4-bit KV cache (KV=fp4: a little less accurate, T4.md) eight nodes take CONTEXT=1048576 and
-# STORE=1048576 with NEED_GB=100 (measured: about 94 GiB a node in use, 23 GiB to spare).
-CONTEXT=819200
-STORE=819200
-CACHE=pool
+# CONTEXT_LENGTH: the positions one request may reach (prompt + reply), the model's 1,048,576 at most. KV_SIZE: the
+# whole KV in positions. The KV pool keeps KV_SIZE positions in blocks of 256 that every conversation shares: a
+# request resumes from the longest cached prefix of any conversation, and conversations that start alike (one system
+# prompt) hold its blocks once; KV_SIZE is CONTEXT_LENGTH + 512 at least. (CONTEXT and STORE, the names before, still
+# read when these are absent: KV_SIZE is then CONTEXT + STORE.) A start from the control panel sizes the KV itself:
+# all the room its plan leaves.
+# With the 4-bit KV cache (KV=fp4: a little less accurate, T4.md) eight nodes take CONTEXT_LENGTH=1048576 and
+# KV_SIZE=2097152 with NEED_GB=100 (measured: about 94 GiB a node in use, 23 GiB to spare).
+CONTEXT_LENGTH=819200
+KV_SIZE=1638400
 
 # Rank 0's port for the NCCL rendezvous, and seconds to wait for the server.
 MASTER_PORT=29551
@@ -73,10 +90,78 @@ READY_TIMEOUT=900
 # SP_PARTS: the parts a prompt chunk of ROWS rows is split into (default 4). Parts wider than 2,048 rows
 # (e.g. ROWS=12288 with SP_PARTS=3) run the routed experts on more rows a pass, at the memory of wider buffers.
 #SP_PARTS=4
+# ROCE_PROXY_CORES: the cores the RoCE proxy threads poll on (they spin while the decode runs): a725 (default: GB10's
+# Cortex-A725 cores 0 and 10, so they do not heat the fast X925 cores), x925 (cores 5 and 15), os (the scheduler's).
+#ROCE_PROXY_CORES=a725
+# MAX_TOKENS_SHARE: a reply's max_tokens when the request names none, as a percent of CONTEXT_LENGTH (1 to 100; default
+# 70). MAX_TOKENS: the same as a token count; it comes first when set.
+# THINKING_SHARE: the percent of a reply's max_tokens, at most of what the prompt leaves of CONTEXT_LENGTH, its thinking
+# may use (0: no limit); the rest is the answer's. There, at the next line break (at most 256 tokens later), the engine
+# writes a closing sentence and </think>; the answer follows in the rest. With THINKING_FOLD the thinking goes on past
+# it instead (below). A request's thinking_budget (Anthropic: thinking.budget_tokens) comes first.
+# THINKING_NOTICE: every this many thinking tokens (from 256; 0: none), at the next line break, the engine writes a line
+# into the thinking telling the model how many thinking tokens it used and how many are left (part of the reasoning the
+# client gets). Each costs a short re-admission: the cache resumes all but the line.
+#MAX_TOKENS_SHARE=70
+#MAX_TOKENS=65536
+#THINKING_SHARE=50
+#THINKING_NOTICE=8192
+# THINKING_BUDGET: a reply's thinking tokens at most, as a count (with THINKING_FOLD a virtual length that may pass
+# CONTEXT_LENGTH, since the folded thinking leaves the context); 0 (default): THINKING_SHARE decides. A request's
+# thinking_budget comes first.
+#THINKING_BUDGET=0
+# THINKING_FOLD: a long thinking folded in the model's context, so its KV stays bounded (the client still gets all of
+# the reasoning): off (default), recent (the thinking's first 100 tokens and its last THINKING_FOLD_KEEP kept, the
+# rest dropped), checkpoint (the engine asks the model for its conclusions so far, what was ruled out, what is open and
+# what comes next; those replace the reasoning before, and it thinks on only about what is open), branch (the engine
+# sets the reply aside and asks the model, in an answer beside it, for a summary of the reasoning since its last one;
+# an answer ends at its EOS, where a checkpoint written in the thinking seldom writes its end marker; the summaries
+# stack in the thinking under "(My reasoning grew long, so I summarized it once ...)"). It folds when the
+# thinking fills its THINKING_SHARE of what the prompt leaves of the context (all of it with THINKING_SHARE=0), less
+# the summary's room; the thinking then goes on past the context, up to max_tokens less the answer's part.
+# The summaries stack in that share. THINKING_FOLD_MAX: a reply's folds at most (0: no limit); past them, or when the
+# summaries kept and one more would pass the share, the thinking folds no more and closes, as at its budget's end, when
+# it fills the share. THINKING_FOLD_SHARE (a percent of each reply's max_tokens, at least 1024
+# tokens), below 100, makes it fold earlier. A request may set
+# thinking_fold, thinking_fold_window, thinking_fold_max and thinking_fold_keep.
+#THINKING_FOLD=off
+#THINKING_FOLD_SHARE=100
+#THINKING_FOLD_MAX=0
+#THINKING_FOLD_KEEP=0
+# THINKING_FOLD_AT_CLOSE_SHARE: when the model closes a thinking with at least this percent of the thinking's limit in the context
+# (past the last fold), it first writes a checkpoint of what the reasoning learned (facts and results, conditional
+# results, every idea ruled out with its reason, mistakes corrected, hypotheses still open, the plan of its answer, the
+# points to keep right), which replaces the thinking; the answer is written from it and the next turns get it too.
+# When the thinking budget ends the thinking instead, the same summary takes the place of the budget's closing
+# sentence (also recording where the thinking stopped and, for each point left unsettled, its best answer so far,
+# how sure it is and what the answer does about it). Asked for only when it and an answer as long still fit in
+# max_tokens. 0: never; 1 to 100. Works with THINKING_FOLD=off too; a request may set thinking_fold_at_close, in tokens.
+#THINKING_FOLD_AT_CLOSE_SHARE=0
+# THINKING_FOLD_CAP_SHARE: a summary's tokens at most (a fold's checkpoint and the summary at the close), as a percent of
+# the thinking it organises, 10 to 100, at least 128 tokens. A request's thinking_fold_cap (tokens) comes first.
+#THINKING_FOLD_CAP_SHARE=70
+# THINKING_SHARE, THINKING_FOLD, THINKING_FOLD_AT_CLOSE_SHARE, THINKING_FOLD_SHARE and THINKING_FOLD_MAX change while the
+# engine runs too (POST /v1/thinking, the control panel's [ REASONING CONTROL ]); a change made there through the launcher is
+# written here.
 #NEED_GB=112
 
-# Several conversations decoded together: off by default (requests run one at a time, as in r2-102). To keep up to
-# 4 conversations live and decode them in one window a round, set EXTRA_ENV="TF_GLM53_MULTI=4" (needs CACHE=pool,
-# DCP=2 and DFlash2 or no drafter; MTP is not batched). It costs node memory: check the available memory with 4 long
-# conversations before using it.
-#EXTRA_ENV="TF_GLM53_MULTI=4"
+# Several conversations decoded together: off by default (requests run one at a time). MULTI=N keeps up to N (1 .. 4)
+# conversations live and decodes them in one window a round. It works with the MTP layer, DFlash2 (DRAFT_SAVES of 1 or
+# more) or no drafter; it is not offered on 3 nodes yet (tf-glm53 refuses that before the start). It costs node memory:
+# check the available memory with N long conversations before using it.
+# MULTI_WAIT: seconds a request may wait for room in the conversation cache beside the conversations in flight; past it
+# the request is refused as busy (503 / overloaded_error, an overloaded error event in a stream begun) so the client can
+# retry (0: no limit).
+# MULTI_DECODE_SHARE: the decode's percent of the GPU's time while a prompt waits or is computed beside conversations
+# that are decoding (0: the prompts first, 100: the decode first). The value at start; POST /v1/schedule
+# {"decode_share": N} changes it while the engine runs, a prefill already running included.
+# MULTI_SHORT_PROMPT: a prompt with at most this many tokens to compute past the conversation cache (a long
+# conversation's next turn counts its new part) goes before the longer ones waiting, is not held by the share, runs
+# its prefill without pauses (0: none). The value at start; POST /v1/schedule {"short_prompt": N} changes it.
+# MULTI_SHORT_PREEMPT=1: a longer prefill running gives way to a short prompt too, resuming afterwards from the chunks
+# it finished (a chunk given up midway is computed again). Default 0; POST /v1/schedule {"short_preempt": true}.
+#MULTI=4
+#MULTI_WAIT=600
+#MULTI_DECODE_SHARE=30
+#MULTI_SHORT_PROMPT=8192
+#MULTI_SHORT_PREEMPT=0

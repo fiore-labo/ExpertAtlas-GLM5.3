@@ -146,6 +146,18 @@ pub fn main(init: std.process.Init) !u8 {
     const rank = try std.fmt.parseInt(u32, args[1], 10);
     const world = try std.fmt.parseInt(u32, args[2], 10);
     const ckpt = args[4];
+    // TF_GLM53_TOPOLOGY=ring4 as the host takes it (glm53_host.zig): refused before the rendezvous when the ring
+    // cannot hold it (four ranks, DCP 1 or 2, PREFILL_REDUCE=ring); the engine checks again
+    // TF_GLM53_TOPOLOGY=ring4 はホストと同じ扱い: リングに合わない設定は待ち合わせの前に断る (エンジンも再び確かめる)
+    const topology = if (std.c.getenv("TF_GLM53_TOPOLOGY")) |v| std.mem.span(v) else "full";
+    if (!std.mem.eql(u8, topology, "full") and !std.mem.eql(u8, topology, "ring4")) return error.BadTopology;
+    const ring4 = std.mem.eql(u8, topology, "ring4");
+    if (ring4) {
+        if (world != 4) return error.Ring4World;
+        if (envInt("TF_GLM53_DCP", 1) > 2) return error.Ring4Dcp;
+        const reduce = if (std.c.getenv("TF_GLM53_PREFILL_REDUCE")) |v| std.mem.span(v) else "ring";
+        if (!std.mem.eql(u8, reduce, "ring")) return error.Ring4PrefillReduce;
+    }
 
     var driver = try cuda.Driver.open();
     defer driver.close();
@@ -155,6 +167,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer nccl.close();
     var group = try cuda.tp.Group.init(&nccl, rank, world, try cuda.tp.parseMaster(args[3]));
     defer group.deinit();
+    if (ring4) group.topology = .ring4;
     const t0 = std.Io.Clock.awake.now(io);
     const eng = try glm.engine.Engine.create(gpa, io, &driver, &ctx, &group, glm.engine.withEnv(.{
         .ckpt = ckpt,

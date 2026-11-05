@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! OpenAI's Responses API: each request runs as its chat completion, translated item by item and event by event.
 const std = @import("std");
 const json = @import("json.zig");
@@ -439,8 +440,12 @@ const Reply = struct {
         const message = if (problem == .object) problem.get("message") else null;
         const kind = if (problem == .object) problem.get("type") else null;
         const is_request = kind != null and kind.? == .string and std.mem.eql(u8, kind.?.string, "invalid_request_error");
+        // capacity (busy, no room in the cache: code overloaded): the Responses codes' retry-later one, so that a client
+        // tells it from a failure / 混雑 (busy、キャッシュの空きなし: code overloaded): Responses の code のうち後で再試行するもの
+        const code = if (problem == .object) problem.get("code") else null;
+        const overloaded = code != null and code.? == .string and std.mem.eql(u8, code.?.string, "overloaded");
         const e = try r.obj();
-        try r.put(e, "code", .{ .string = if (is_request) "invalid_prompt" else "server_error" });
+        try r.put(e, "code", .{ .string = if (is_request) "invalid_prompt" else if (overloaded) "rate_limit_exceeded" else "server_error" });
         const text = if (problem == .string) problem.string else if (message != null and message.?.truthy()) (if (message.? == .string) message.?.string else "the reply failed") else "the reply failed";
         try r.put(e, "message", .{ .string = text });
         const final = json.copyObject(r.a, r.base) catch return error.Closed;

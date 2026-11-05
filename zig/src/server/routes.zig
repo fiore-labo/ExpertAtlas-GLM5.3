@@ -37,15 +37,15 @@ pub fn unknown(conn: *Conn, a: Allocator) void {
 }
 
 /// Fiore-lab: TF_QUIET_POLLS=1 leaves the access line out for the GETs a monitor or the control panel repeats
-/// (/health, /metrics, /v1/experts/*, /v1/memory: several a second while the page is open), so a log kept in memory
-/// stays small. tf-glm53 sets it.
+/// (/health, /metrics, /v1/experts/*, /v1/memory, /v1/pool: several a second while the page is open), so a log kept
+/// in memory stays small. tf-glm53 sets it.
 fn quietPolls() bool {
     const v = std.c.getenv("TF_QUIET_POLLS") orelse return false;
     return std.mem.eql(u8, std.mem.span(v), "1");
 }
 
 fn polled(route: []const u8) bool {
-    for ([_][]const u8{ "", "/health", "/v1/health", "/metrics", "/v1/metrics", "/v1/memory" }) |r| if (std.mem.eql(u8, route, r)) return true;
+    for ([_][]const u8{ "", "/health", "/v1/health", "/metrics", "/v1/metrics", "/v1/memory", "/v1/pool" }) |r| if (std.mem.eql(u8, route, r)) return true;
     return std.mem.startsWith(u8, route, "/v1/experts/");
 }
 
@@ -56,8 +56,10 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
     if (std.mem.eql(u8, route, "/metrics") or std.mem.eql(u8, route, "/v1/metrics")) return status.metrics(srv, conn, a);
     if (std.mem.eql(u8, route, "/dashboard")) return status.dashboard(srv, conn, a);
     if (std.mem.eql(u8, route, "/stats")) return status.stats(srv, conn, a);
-    if (std.mem.startsWith(u8, route, "/v1/experts/") or std.mem.eql(u8, route, "/v1/memory")) return status.experts(srv, conn, a, route);
+    if (std.mem.startsWith(u8, route, "/v1/experts/") or std.mem.eql(u8, route, "/v1/memory") or std.mem.eql(u8, route, "/v1/pool")) return status.experts(srv, conn, a, route);
     if (std.mem.eql(u8, route, "/panel")) return status.panel(srv, conn, a);
+    if (std.mem.eql(u8, route, "/v1/schedule")) return status.schedule(srv, conn, a, false);
+    if (std.mem.eql(u8, route, "/v1/thinking")) return status.thinking(srv, conn, a, false);
     if (route.len == 0 or std.mem.eql(u8, route, "/health") or (srv.info.cuda_fields and std.mem.eql(u8, route, "/v1/health"))) return status.health(srv, conn, a) catch {};
     if (std.mem.endsWith(u8, route, "/models")) return status.models(srv, conn, a) catch {};
     unknown(conn, a);
@@ -85,6 +87,8 @@ pub fn discardBody(conn: *Conn, a: Allocator) void {
 fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
     if (std.mem.startsWith(u8, route, "/v1/experts/")) return status.expertsPost(srv, conn, a, route);
+    if (std.mem.eql(u8, route, "/v1/schedule")) return status.schedule(srv, conn, a, true);
+    if (std.mem.eql(u8, route, "/v1/thinking")) return status.thinking(srv, conn, a, true);
     if (std.mem.endsWith(u8, route, "/decisions")) return decisions.post(srv, conn, a);
     if (anthropic.route(conn.path)) return anthropic.post(srv, conn, a);
     if (responses.route(route)) |rid| if (rid.len == 0) return responses.post(srv, conn, a);

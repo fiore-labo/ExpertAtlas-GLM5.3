@@ -456,7 +456,7 @@ const DecodeRun = struct {
 
 /// The RoCE settings the engine reads (B12X_ROCE_HCA / NCCL_IB_HCA, GID index, spin limit, proxy library).
 /// エンジンが読む RoCE の設定 (B12X_ROCE_HCA / NCCL_IB_HCA、GID index、spin の上限、proxy ライブラリ)。
-const RoceEnv = struct { names: [2][:0]const u8, nh: usize, gid: u32, spin: u32, lib: []const u8 };
+const RoceEnv = struct { names: [4][:0]const u8, nh: usize, gid: i32, spin: u32, lib: []const u8 };
 
 fn roceEnv(gpa: std.mem.Allocator) !RoceEnv {
     const F = struct {
@@ -469,12 +469,12 @@ fn roceEnv(gpa: std.mem.Allocator) !RoceEnv {
     var r: RoceEnv = .{ .names = undefined, .nh = 0, .gid = 3, .spin = 20000000, .lib = "./libroce_proxy.so" };
     var it = std.mem.tokenizeScalar(u8, F.env("B12X_ROCE_HCA", "NCCL_IB_HCA") orelse return error.RoceNoHca, ',');
     while (it.next()) |h| {
-        if (r.nh == 2) break;
+        if (r.nh == 4) break;
         const name = std.mem.trimStart(u8, h, "=^");
         r.names[r.nh] = try gpa.dupeSentinel(u8, name[0 .. std.mem.indexOfScalar(u8, name, ':') orelse name.len], 0);
         r.nh += 1;
     }
-    r.gid = try std.fmt.parseInt(u32, F.env("B12X_ROCE_GID_INDEX", "NCCL_IB_GID_INDEX") orelse "3", 10);
+    r.gid = try std.fmt.parseInt(i32, F.env("B12X_ROCE_GID_INDEX", "NCCL_IB_GID_INDEX") orelse "3", 10);
     r.spin = try std.fmt.parseInt(u32, F.env("B12X_ROCE_SPIN_LIMIT", "B12X_ROCE_SPIN_LIMIT") orelse "20000000", 10);
     r.lib = F.env("TF_ROCE_PROXY_LIB", "TF_ROCE_PROXY_LIB") orelse r.lib;
     return r;
@@ -881,9 +881,9 @@ pub fn main(init: std.process.Init) !u8 {
     if (listHas(modes, "dual")) {
         const RT = @typeInfo(@typeInfo(@FieldType(forward.Ctx, "fast")).optional.child).pointer.child;
         const re = try roceEnv(gpa);
-        var fast2 = try RT.init(gpa, &driver, &group, &e.rk, re.lib, re.names[0..re.nh], re.gid, re.spin, e.stream);
+        var fast2 = try RT.init(gpa, &driver, &group, &e.rk, re.lib, re.names[0..re.nh], re.gid, re.spin, group.topology == .ring4, e.stream);
         var dfast2: ?RT = null;
-        if (e.dfast != null) dfast2 = try RT.init(gpa, &driver, &e.dgroup.?, &e.rk, re.lib, re.names[0..re.nh], re.gid, re.spin, e.stream);
+        if (e.dfast != null) dfast2 = try RT.init(gpa, &driver, &e.dgroup.?, &e.rk, re.lib, re.names[0..re.nh], re.gid, re.spin, false, e.stream);
         const made2 = try Decode.make(gpa, &driver, e, wrows, keys, &inv, &had, fm, cp, rows);
         var dl2 = made2.dl;
         dl2.fast = &fast2;

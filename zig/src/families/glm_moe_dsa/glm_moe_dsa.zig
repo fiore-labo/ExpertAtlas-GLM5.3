@@ -18,7 +18,9 @@ pub const memory_live = @import("memory_live.zig");
 pub const expert_swap = @import("expert_swap.zig");
 pub const expert_plan = @import("expert_plan.zig");
 pub const load_progress = @import("load_progress.zig");
+pub const load_pipe = @import("load_pipe.zig");
 pub const lockstep = @import("lockstep.zig");
+pub const pace = @import("pace.zig");
 pub const slots = @import("slots.zig");
 pub const slots_serve = @import("slots_serve.zig");
 pub const pool_serve = @import("pool_serve.zig");
@@ -27,6 +29,7 @@ pub const draft_weights = @import("draft_weights.zig");
 pub const qmm = @import("qmm.zig");
 pub const drafter = @import("drafter.zig");
 pub const mtp = @import("mtp.zig");
+pub const roce = @import("roce.zig");
 
 test {
     _ = config;
@@ -42,9 +45,11 @@ test {
     _ = moe;
     _ = engine;
     _ = lockstep;
+    _ = pace;
     _ = q4;
     _ = draft_weights;
     _ = qmm;
     _ = drafter;
     _ = mtp;
+    _ = load_pipe;
 }

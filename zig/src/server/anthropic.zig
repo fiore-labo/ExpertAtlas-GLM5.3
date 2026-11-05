@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! Anthropic's Messages routes over the chat handler: typed SSE events, tool_use blocks, count_tokens.
 const std = @import("std");
 const json = @import("json.zig");
@@ -252,7 +253,9 @@ const Reply = struct {
             const problem = p.get("error").?;
             const message = if (problem.get("message")) |m| (if (m == .string) m.string else "generation failed") else "generation failed";
             const kind = problem.get("type");
-            const status: u16 = if (kind != null and kind.? == .string and std.mem.eql(u8, kind.?.string, "invalid_request_error")) 400 else 500;
+            const code = problem.get("code");
+            const overloaded = code != null and code.? == .string and std.mem.eql(u8, code.?.string, "overloaded");
+            const status: u16 = if (kind != null and kind.? == .string and std.mem.eql(u8, kind.?.string, "invalid_request_error")) 400 else if (overloaded) 503 else 500;
             const e = errorValue(r.a, message, status) catch return error.Closed;
             try r.send("error", e.object);
             r.finished = true;

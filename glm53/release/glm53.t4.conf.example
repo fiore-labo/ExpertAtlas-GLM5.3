@@ -10,7 +10,8 @@ SOCKET_IFNAME=enp1s0f1np1
 IB_HCA=rocep1s0f1
 GID_INDEX=
 
-# NCCL 2.30.7 at this path on every node (RUNTIME.md, "Before the first start").
+# NCCL 2.30.7 at this path on every node (RUNTIME=host; RUNTIME.md, "Before the first start"; the build with the AArch64
+# send fence is recommended, RING.md).
 NCCL_LIB=~/nccl-2.30.7/nvidia/nccl/lib/libnccl.so.2
 
 # How the ranks run: host (the default: from this directory, with cuBLAS 13, libibverbs and NCCL on every node) or
@@ -18,7 +19,7 @@ NCCL_LIB=~/nccl-2.30.7/nvidia/nccl/lib/libnccl.so.2
 # node needs Docker and the NVIDIA container toolkit, and the libraries are the image's, so NCCL_LIB is not used).
 # RUNTIME.md, "Running in containers".
 #RUNTIME=docker
-#IMAGE=glm53-tensorfold:r3.2-102
+#IMAGE=glm53-tensorfold:r3.3-102
 
 # The four-node checkpoint, fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks on Hugging Face (the 3 / 4-bit expert mix, T4.md),
 # the same path on every node.
@@ -46,35 +47,38 @@ PORT=8000
 # The measured configuration: 737,280 positions a request (prompt + reply), 100,000 more kept for earlier
 # conversations (the pool holds 837,280 positions in blocks of 256 that every conversation shares), decode context
 # parallelism 2, prompt chunks of 16,384 rows in 4 sequence-parallel parts, the 4-bit KV cache.
-# From the control panel four nodes reach a context of 1,048,576: 3 bits for 70 % of the routed experts, 4 bits for
-# the rest, STORE 512 (about 7.5 GiB a node to spare, enough for a live re-sort).
-CONTEXT=737280
-STORE=100000
-CACHE=pool
+# From the control panel four nodes reach a context length of 1,048,576: 3 bits for 70 % of the routed experts, 4 bits for
+# the rest, a KV of 1,049,088 (about 7.5 GiB a node to spare, enough for a live re-sort).
+CONTEXT_LENGTH=737280
+KV_SIZE=837280
 DCP=2
 ROWS=16384
 SP_PARTS=4
 KV=fp4
 # The memory a node must have available before the start: tf-glm53 check asks NEED_GB minus 2.7 GiB for each
-# 100,000 positions of STORE below 819,200 (the eight-node measure), plus 3 with DFlash2; 131 makes it 112 GiB here
-# (115 with DFlash2), what four nodes use.
-NEED_GB=131
+# 100,000 positions KV_SIZE is below 1,638,400 (the eight-node measure), plus 3 with DFlash2; 133 makes
+# it 112 GiB here (115 with DFlash2), what four nodes use.
+NEED_GB=133
 
 MASTER_PORT=29551
 READY_TIMEOUT=900
 
-# Several conversations decoded together: off by default (requests run one at a time, as in r2-102). To keep up to
-# 4 conversations live and decode them in one window a round, set EXTRA_ENV="TF_GLM53_MULTI=4" (needs CACHE=pool,
-# DCP=2 and DFlash2 or no drafter; MTP is not batched). It costs node memory: check the available memory with 4 long
-# conversations before using it.
-#EXTRA_ENV="TF_GLM53_MULTI=4"
+# Several conversations decoded together: off by default (requests run one at a time). MULTI=N keeps up to N (1 .. 4)
+# conversations live and decodes them in one window a round. It works with the MTP layer, DFlash2 (DRAFT_SAVES of 1 or
+# more) or no drafter; it is not offered on 3 nodes yet (tf-glm53 refuses that before the start). It costs node memory:
+# check the available memory with N long conversations before using it.
+# MULTI_WAIT: seconds a request may wait for room in the conversation cache beside the conversations in flight; past it
+# the request is refused as busy (503 / overloaded_error, an overloaded error event in a stream begun) so the client can
+# retry (0: no limit).
+#MULTI=4
+#MULTI_WAIT=300
 
-# The control panel, Expert Atlas (RUNTIME.md, "The control panel"): `./tf-glm53 launcher` serves it at
+# The control panel, Expert Atlas (RUNTIME.md, "The control panel"): `./tf-glm53 up` starts it, served at
 # http://LAUNCHER_HOST:LAUNCHER_PORT/panel, and starts and stops the engine with the routed experts' widths chosen
 # there, from the banks listed in expert-plan/banks.json. LAUNCHER_HOST 0.0.0.0 serves the panel to the network with no
 # key: anyone who reaches it can start, stop and change the engine (127.0.0.1 keeps it to this node; another machine then
 # uses an ssh tunnel, ssh -L 8010:127.0.0.1:8010 FIRST-NODE). ATLAS_DIR keeps the saved allocations (default: atlas/
-# in this directory). With TF_GLM53_MULTI the engine changes no expert's width while it runs; expert optimisation then
+# in this directory). With MULTI set the engine changes no expert's width while it runs; expert optimisation then
 # saves the allocation for the next start.
 LAUNCHER_HOST=0.0.0.0
 LAUNCHER_PORT=8010

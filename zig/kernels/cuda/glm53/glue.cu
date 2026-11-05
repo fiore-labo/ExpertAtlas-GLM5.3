@@ -196,6 +196,36 @@ __global__ void tf_glm53_pick(const float* __restrict__ all, int world, int n, l
     tok[r] = id;
 }
 
+// TF_GLM53_MTP_CONF: beside each row's argmax (tf_glm53_row_argmax's 16-byte row, its value in slot 0), this rank's
+// softmax mass of the row into slot 2: the sum over its vocabulary share of exp((x - value) * inv_t), in a fixed order
+// (each thread's elements, the warp's shuffles, then the warps in order). A row whose value is not finite gets 0. The
+// gather the pick already does then carries every rank's (value, mass), so the pick's probability needs no other
+// exchange: 1 / sum_r mass_r exp((value_r - max) inv_t) (mtp.pickProb). One block a row, whole warps.
+// TF_GLM53_MTP_CONF: 各行の argmax (tf_glm53_row_argmax の 16 バイトの行。値は枠 0) の横に、このランクの行の softmax
+// の質量を枠 2 へ書く: 受け持つ語彙で exp((x - value) * inv_t) を足したもの。足す順は決まっている (スレッドごとの要素、
+// warp 内の shuffle、warp の順)。値が有限でない行は 0。pick がすでに行う gather で全ランクの (値, 質量) が届くので、
+// 選んだトークンの確率はほかの交換なしに出る: 1 / sum_r mass_r exp((value_r - max) inv_t) (mtp.pickProb)。
+// 1 行 1 ブロック、warp 単位。
+__global__ void tf_glm53_row_lse(const float* __restrict__ logits, float* __restrict__ amax, int V, float inv_t) {
+    __shared__ float ws[32];
+    const float* row = logits + (long long)blockIdx.x * V;
+    float* out = amax + 4 * blockIdx.x;
+    const float v = out[0];
+    float s = 0.0f;
+    if (fabsf(v) < __int_as_float(0x7f800000)) {
+        for (int i = threadIdx.x; i < V; i += blockDim.x) s += expf((row[i] - v) * inv_t);
+    }
+    for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xFFFFFFFFu, s, o);
+    const int lane = threadIdx.x & 31, wid = threadIdx.x >> 5, nw = blockDim.x >> 5;
+    if (lane == 0) ws[wid] = s;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float t = 0.0f;
+        for (int w = 0; w < nw; ++w) t += ws[w];
+        out[2] = t;
+    }
+}
+
 }  // extern "C"
 
 // One int32 written by a kernel (the decode position before a graph replay; a memset there is a copy-engine op).
@@ -1337,6 +1367,36 @@ extern "C" __global__ void tf_glm53_round_bf16(float* __restrict__ x, long long 
         // __float2bfloat16_rn と同じ (NaN / inf はそのまま)
         if ((u & 0x7F800000u) != 0x7F800000u) u += 0x7FFFu + ((u >> 16) & 1u);
         x[i] = __uint_as_float(u & 0xFFFF0000u);
+    }
+}
+
+// The split q_a / kv_a front of a decode window (TF_GLM53_SPLIT_QA) back into rows: rank s's chunk of recv
+// (R * (sq + skv) bf16) holds its q_a blocks [R, sq] (sq = qnb / W blocks), then its kv_a blocks [R, kw_s] (kv_a's knb
+// blocks shared as linear.share does: the first knb % W ranks one more; skv the most a rank holds). qa [R, q_ld] and
+// kva [R, kv_ld] get every rank's columns in place; exact copies.
+// decode ウィンドウの q_a / kv_a の分担 (TF_GLM53_SPLIT_QA) を行に戻す: recv のランク s の分 (R * (sq + skv) bf16) は
+// その q_a のブロック [R, sq] (sq = qnb / W ブロック)、続いて kv_a のブロック [R, kw_s] (kv_a の knb ブロックは
+// linear.share と同じ分け方: 先頭の knb % W ランクが 1 つ多い。skv は 1 ランクの最大)。qa [R, q_ld] と kva [R, kv_ld]
+// の各列を元の位置に置く。値はそのまま写す。
+extern "C" __global__ void tf_glm53_split_unpack(const unsigned short* __restrict__ recv, int R, int W, int qnb, int knb,
+                                                 unsigned short* __restrict__ qa, int q_ld,
+                                                 unsigned short* __restrict__ kva, int kv_ld) {
+    const int sq = (qnb / W) * 128, skv = ((knb + W - 1) / W) * 128;
+    const int chunk = R * (sq + skv), cols = (qnb + knb) * 128;
+    const int kbase = knb / W, kextra = knb % W;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < R * cols; i += gridDim.x * blockDim.x) {
+        const int r = i / cols;
+        int c = i % cols;
+        if (c < qnb * 128) {
+            const int s = c / sq;
+            qa[(long long)r * q_ld + c] = recv[(long long)s * chunk + r * sq + (c - s * sq)];
+        } else {
+            c -= qnb * 128;
+            const int blk = c / 128;
+            const int s = blk < kextra * (kbase + 1) ? blk / (kbase + 1) : kextra + (blk - kextra * (kbase + 1)) / kbase;
+            const int b0 = s * kbase + min(s, kextra), kw = (kbase + (s < kextra)) * 128;
+            kva[(long long)r * kv_ld + c] = recv[(long long)s * chunk + R * sq + r * kw + (c - b0 * 128)];
+        }
     }
 }
 

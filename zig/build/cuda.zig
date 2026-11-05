@@ -122,6 +122,11 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     glm53_run.addImport("cuda", cuda);
     glm53_run.addImport("glm_moe_dsa", glm);
     b.installArtifact(b.addExecutable(.{ .name = "tf-glm53-run", .root_module = glm53_run }));
+    // Fiore-lab: the RoCE one-shot runtime between ranks without a model (R3RT-102: the ring's relays)
+    const roce_runner = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/roce_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    roce_runner.addImport("cuda", cuda);
+    roce_runner.addImport("glm_moe_dsa", glm);
+    b.installArtifact(b.addExecutable(.{ .name = "tf-roce-test", .root_module = roce_runner }));
     b.installArtifact(b.addExecutable(.{ .name = "tf-glm53-test", .root_module = glm53_runner }));
     const glm53_lock = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/glm53_lock.zig"), .target = target, .optimize = optimize, .link_libc = true });
     glm53_lock.addImport("cuda", cuda);

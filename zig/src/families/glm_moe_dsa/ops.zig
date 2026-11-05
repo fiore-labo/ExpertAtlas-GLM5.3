@@ -241,14 +241,14 @@ pub const Ops = struct {
 
     /// q_nope x W_UK into qlat and the q RoPE into qrot.
     /// q_nope x W_UK を qlat に、q の RoPE を qrot に書く。
-    pub fn absorb(o: Ops, q: u64, wk: u64, inv: u64, qa: u64, qr: u64, pos: u64, r: u32, h: u32) !void {
-        return o.k.absorb(o.stream, q, wk, inv, qa, qr, pos, r, h, 512, 64);
+    pub fn absorb(o: Ops, q: u64, wk: u64, sc: u64, inv: u64, qa: u64, qr: u64, pos: u64, r: u32, h: u32) !void {
+        return o.k.absorb(o.stream, q, wk, sc, inv, qa, qr, pos, r, h, 512, 64);
     }
 
     /// `absorb` straight into the packed queries [R, H, 576] (latent 512, then the RoPE 64).
     /// pack した query [R, H, 576] (latent 512、続いて RoPE 64) へ直接書く `absorb`。
-    pub fn absorbPacked(o: Ops, q: u64, wk: u64, inv: u64, qpack: u64, pos: u64, r: u32, h: u32) !void {
-        return o.k.absorb(o.stream, q, wk, inv, qpack, qpack + 512 * 2, pos, r, h, 576, 576);
+    pub fn absorbPacked(o: Ops, q: u64, wk: u64, sc: u64, inv: u64, qpack: u64, pos: u64, r: u32, h: u32) !void {
+        return o.k.absorb(o.stream, q, wk, sc, inv, qpack, qpack + 512 * 2, pos, r, h, 576, 576);
     }
 
     /// `qrope` into the packed queries' RoPE part.
@@ -259,8 +259,8 @@ pub const Ops = struct {
 
     /// ol x W_UV into o [R, H * v].
     /// ol x W_UV を o [R, H * v] に書く。
-    pub fn expand(o: Ops, ol: u64, wv: u64, out: u64, r: u32, h: u32) !void {
-        return o.k.expand(o.stream, ol, wv, out, r, h);
+    pub fn expand(o: Ops, ol: u64, wv: u64, sc: u64, out: u64, r: u32, h: u32) !void {
+        return o.k.expand(o.stream, ol, wv, sc, out, r, h);
     }
 
     /// The dense chunks' partials of each row and head into ol (bf16).

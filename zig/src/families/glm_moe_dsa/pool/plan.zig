@@ -343,25 +343,18 @@ fn lessOld(a: *const Slot, b: *const Slot) bool {
 /// `m` 上の `prompt` (n トークン、1 <= n < capacity) の要求のプラン。`m` は変えない。`resume_ok` が false なら
 /// キャッシュを使わない (どの c_S も 0)。
 pub fn makePlan(m: *const Meta, prompt: []const i64, max_tokens: i64, resume_ok: bool) Error!Plan {
-    return makePlanBusy(m, prompt, max_tokens, resume_ok, &.{});
+    return makePlanOwn(m, prompt, max_tokens, resume_ok, &.{}, null);
 }
 
-/// `makePlan` beside the slots in `busy` (TF_GLM53_MULTI: conversations being prefilled or decoded): none of them is
-/// a candidate to continue or share from (their sequences grow until their commit), and none is evicted or shrunk.
-/// error.Invariant: the blocks the others can give up are too few (the caller waits for a conversation to end).
-/// `busy` のスロット (TF_GLM53_MULTI: prefill 中・decode 中の会話) と並ぶ `makePlan`: どれも続き・共有の候補にしない
-/// (確定までは列が伸びる)。追い出しも縮めもしない。error.Invariant: ほかが手放せるブロックが足りない (呼び出し側は
-/// 会話が終わるのを待つ)。
-pub fn makePlanBusy(m: *const Meta, prompt: []const i64, max_tokens: i64, resume_ok: bool, busy: []const u64) Error!Plan {
-    const gpa = m.gpa;
-    const cfg = m.cfg;
-    const n: u64 = prompt.len;
-    if (n < 1 or n >= cfg.capacity) return error.BadRequest;
-    const want = wantTokens(cfg.capacity, n, max_tokens);
-    const write_hi = @min(n + want + vrows, cfg.capacity);
-    const d: u64 = @intFromBool(cfg.mtp);
-    const cap_n: u64 = if (n > tail) n - tail else 0;
+/// 4.1's choice for `prompt` beside `busy`: the slot whose cache the request would reuse (null: none), its exact match
+/// h, its c, the position the request would really resume from, e (the plan's resume_end), and whether it continues
+/// that slot. `prompt`: i64 or u32 tokens (the scheduler's estimate reads the request's own).
+/// `busy` の横の `prompt` での 4.1 の選択: 要求がキャッシュを再利用するスロット (null はなし)、その正確な一致 h、c、
+/// 実際に再開する位置 e (プランの resume_end)、そのスロットを続けるか。`prompt` は i64 か u32 のトークン (スケジューラの
+/// 見積もりは要求そのものを読む)。
+const Best = struct { i: ?usize = null, h: u64 = 0, c: u64 = 0, e: u64 = 0, cont: bool = false };
 
+fn bestSlot(m: *const Meta, prompt: anytype, busy: []const u64, own: ?u64) Best {
     // 4.1: every slot's exact match h_S, c_S = min(h_S - d, max(0, n - TAIL), kv_end) and the position the request
     // would really resume from with it, e_S (4.2 / 4.3: c_S if the slot is continued, c_S rounded down to 256 when
     // the branch block is shared; c_S rounded down for a SHARE; 0 for a NEW); the largest e_S wins (comparing c_S
@@ -373,18 +366,28 @@ pub fn makePlanBusy(m: *const Meta, prompt: []const i64, max_tokens: i64, resume
     // 前の c_S で比べると、MTP で 768 からの SHARE が 871 からの CONTINUE に勝った: POOL.md 12.2e の見つかったこと 3)。
     // 同点は、要求がそのまま続けられるスロット (同じ中身の別スロットから SHARE すると同じ行を 2 組持つ)、c の大きい方、
     // h の長い方、tick の新しい方、id の小さい方
+    const d: u64 = @intFromBool(m.cfg.mtp);
+    const n: u64 = prompt.len;
+    const cap_n: u64 = if (n > tail) n - tail else 0;
     var best: ?usize = null;
     var best_h: u64 = 0;
     var best_c: u64 = 0;
     var best_e: u64 = 0;
     var best_cont = false;
-    if (resume_ok) for (m.slots.items, 0..) |*s, i| {
-        if (std.mem.indexOfScalar(u64, busy, s.id) != null) continue;
+    for (m.slots.items, 0..) |*s, i| {
+        // a busy slot: a SHARE source only (its complete blocks below its resume point, see makePlanBusy)
+        // 処理中のスロット: SHARE の元にだけなる (再開位置より手前の完全なブロック。makePlanBusy を参照)
+        const in_flight = std.mem.indexOfScalar(u64, busy, s.id) != null;
         const seq = s.seq.items;
-        const lim = @min(seq.len, prompt.len);
-        const h: u64 = std.mem.findDiff(i64, seq[0..lim], prompt[0..lim]) orelse lim;
+        const h = matchLen(seq, prompt);
         const c: u64 = @min(if (h > d) h - d else 0, cap_n, s.kv_end);
-        const cont = c >= (if (s.prompt_end > tail) s.prompt_end - tail else 0);
+        // Fiore-lab: `own`, the slot the same reply wrote before it was re-admitted (a fold or a remade think block
+        // changed its context): continued from c wherever c is, for what it held past c is that reply's own and
+        // stale (POOL.md 4.2: the condition is a policy of what to keep, not of safety)
+        // Fiore-lab: `own` は同じ応答が受け入れ直し (畳み込みや思考の id の作り直しで文脈が変わった) の前に書いたスロット。
+        // c がどこでも c から続ける。c より後ろはその応答自身の古いものだから (POOL.md 4.2: 条件は残す方針で、安全の条件ではない)
+        const mine = own != null and s.id == own.? and c > 0;
+        const cont = !in_flight and (mine or c >= (if (s.prompt_end > tail) s.prompt_end - tail else 0));
         const e: u64 = if (cont) blk: {
             const j = c / block;
             const shared = c % block != 0 and j < s.blocks.items.len and m.ref[s.blocks.items[j]] >= 2;
@@ -406,7 +409,59 @@ pub fn makePlanBusy(m: *const Meta, prompt: []const i64, max_tokens: i64, resume
             best_e = e;
             best_cont = cont;
         }
-    };
+    }
+    return .{ .i = best, .h = best_h, .c = best_c, .e = best_e, .cont = best_cont };
+}
+
+fn matchLen(seq: []const i64, prompt: anytype) u64 {
+    const lim = @min(seq.len, prompt.len);
+    if (@TypeOf(prompt) == []const i64) return std.mem.findDiff(i64, seq[0..lim], prompt[0..lim]) orelse lim;
+    for (seq[0..lim], prompt[0..lim], 0..) |a, b, i| if (a != b) return i;
+    return lim;
+}
+
+/// TF_GLM53_MULTI's scheduler: where a request for `prompt` would resume beside `busy` now (makePlanBusy's resume_end
+/// for a prompt that fits, 0 for one that does not), without making the plan. `prompt`: i64 or u32 tokens.
+/// TF_GLM53_MULTI のスケジューラ用: `prompt` の要求が今 `busy` の横でどこから再開するか (収まる prompt なら
+/// makePlanBusy の resume_end、収まらなければ 0)。プランは作らない。`prompt` は i64 か u32 のトークン。
+pub fn resumeEnd(m: *const Meta, prompt: anytype, busy: []const u64) u64 {
+    if (prompt.len < 1 or prompt.len >= m.cfg.capacity) return 0;
+    return bestSlot(m, prompt, busy, null).e;
+}
+
+/// `makePlan` beside the slots in `busy` (TF_GLM53_MULTI: conversations being prefilled or decoded): none of them is
+/// continued (its sequence grows until its commit), evicted or shrunk, but each is a source to SHARE from: until its
+/// commit it holds only what its request reused (apply cut its seq and kv_end to the resume point), and that request
+/// writes only from there on, so its complete blocks below the resume point are fixed; the SHARE's rounding down to
+/// 256 takes only those. error.Invariant: the blocks the others can give up are too few (the caller waits for a
+/// conversation to end).
+/// `busy` のスロット (TF_GLM53_MULTI: prefill 中・decode 中の会話) と並ぶ `makePlan`: どれも続けない (確定までは列が
+/// 伸びる)。追い出しも縮めもしない。ただし共有 (SHARE) の元にはなる: 確定までのそのスロットは要求が再利用した分だけを
+/// 持ち (apply が seq と kv_end を再開位置で切った)、その要求はそこから先にしか書かないので、再開位置より手前の完全な
+/// ブロックは変わらない。SHARE の 256 への切り下げはそれだけを取る。error.Invariant: ほかが手放せるブロックが足りない
+/// (呼び出し側は会話が終わるのを待つ)。
+pub fn makePlanBusy(m: *const Meta, prompt: []const i64, max_tokens: i64, resume_ok: bool, busy: []const u64) Error!Plan {
+    return makePlanOwn(m, prompt, max_tokens, resume_ok, busy, null);
+}
+
+/// Fiore-lab: `makePlanBusy` for a re-admission of a reply that wrote slot `own` (null: none), which it continues from
+/// its match wherever that falls (bestSlot).
+/// Fiore-lab: スロット `own` に書いた応答の受け入れ直しの `makePlanBusy` (null はなし)。一致がどこで終わってもそこから続ける
+/// (bestSlot)。
+pub fn makePlanOwn(m: *const Meta, prompt: []const i64, max_tokens: i64, resume_ok: bool, busy: []const u64, own: ?u64) Error!Plan {
+    const gpa = m.gpa;
+    const cfg = m.cfg;
+    const n: u64 = prompt.len;
+    if (n < 1 or n >= cfg.capacity) return error.BadRequest;
+    const want = wantTokens(cfg.capacity, n, max_tokens);
+    const write_hi = @min(n + want + vrows, cfg.capacity);
+
+    // 4.1 (bestSlot)
+    const b0: Best = if (resume_ok) bestSlot(m, prompt, busy, own) else .{};
+    const best = b0.i;
+    const best_h = b0.h;
+    const best_c = b0.c;
+    const best_cont = b0.cont;
 
     // 4.2: the action, in order on c
     // 4.2: 動作。c で上から順に判定する

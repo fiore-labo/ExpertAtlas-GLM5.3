@@ -8,7 +8,9 @@ const std = @import("std");
 const plan = @import("plan.zig");
 
 test {
+    _ = @import("byte_resume.zig");
     _ = @import("devmap.zig");
+    _ = @import("live.zig");
 }
 
 const Meta = plan.Meta;
@@ -26,10 +28,21 @@ fn toks(comptime n: usize, base: i64) [n]i64 {
 fn step(m: *Meta, prompt: []const i64, max_tokens: i64) !plan.Plan {
     var p = try plan.makePlan(m, prompt, max_tokens, true);
     errdefer p.deinit(gpa);
+    try expectResume(m, prompt, &.{}, p.resume_end);
     try plan.apply(m, &p, prompt);
     try m.check(p.X);
     for (p.table[p.resume_end / plan.block ..]) |b| try t.expectEqual(@as(u32, 1), m.ref[b]);
     return p;
+}
+
+/// The scheduler's estimate (plan.resumeEnd) is the plan's resume point, from the prompt as i64 and as u32 tokens.
+/// スケジューラの見積もり (plan.resumeEnd) はプランの再開位置と同じ。prompt が i64 でも u32 のトークンでも。
+fn expectResume(m: *const Meta, prompt: []const i64, busy: []const u64, want: u64) !void {
+    try t.expectEqual(want, plan.resumeEnd(m, prompt, busy));
+    const ids = try gpa.alloc(u32, prompt.len);
+    defer gpa.free(ids);
+    for (ids, prompt) |*d, x| d.* = std.math.cast(u32, x) orelse return;
+    try t.expectEqual(want, plan.resumeEnd(m, @as([]const u32, ids), busy));
 }
 
 /// commit prompt ++ out[: -1] with kv_end = V.
@@ -82,6 +95,60 @@ test "NEW, then CONTINUE at the previous prompt end, then a resend resumes n - 1
     try t.expectEqual(@as(u64, 683), p3.resume_end);
 }
 
+test "Fiore-lab: a fold's re-admission continues its own slot from the fold, where any other prompt would SHARE" {
+    var m = try Meta.init(gpa, .{ .n_blocks = 40, .capacity = 4096, .max_slots = 8, .mtp = false });
+    defer m.deinit();
+    // a reply of 1,500 thinking tokens to a 600-token prompt, then a text inserted (its re-admission extends the
+    // context: CONTINUE as always)
+    // 600 トークンの prompt への 1,500 の思考、続いて差し込んだ文 (受け入れ直しは文脈を伸ばすだけ: いつもどおり CONTINUE)
+    const a = toks(600, 1000);
+    const out1 = toks(1500, 5000);
+    var p1 = try step(&m, &a, 2000);
+    defer p1.deinit(gpa);
+    try finish(&m, &p1, &a, &out1);
+    var b: [2150]i64 = undefined;
+    @memcpy(b[0..600], &a);
+    @memcpy(b[600..2100], &out1);
+    for (b[2100..], 0..) |*x, i| x.* = 9000 + @as(i64, @intCast(i));
+    var p2 = try step(&m, &b, 2000);
+    defer p2.deinit(gpa);
+    try t.expectEqual(plan.Action.CONTINUE, p2.action);
+    try finish(&m, &p2, &b, &toks(300, 7000));
+    // the fold: the prompt, the thinking's first 100 tokens, then its checkpoint; the match ends at 700, far below the
+    // slot's prompt end 2,150: as any prompt, a SHARE from 512 into a new slot
+    // 畳み込み: prompt、思考の先頭 100、続いてチェックポイント。一致は 700 で、スロットの prompt の終わり 2,150 よりずっと手前:
+    // ふつうの prompt としては 512 からの SHARE で新しいスロット
+    var c: [900]i64 = undefined;
+    @memcpy(c[0..700], b[0..700]);
+    for (c[700..], 0..) |*x, i| x.* = 20000 + @as(i64, @intCast(i));
+    var q0 = try plan.makePlanOwn(&m, &c, 2000, true, &.{}, null);
+    defer q0.deinit(gpa);
+    try t.expectEqual(plan.Action.SHARE, q0.action);
+    try t.expectEqual(@as(u64, 512), q0.resume_end);
+    // as the same reply's re-admission (own = slot 0): CONTINUE at 700, no new slot, the stale thinking's blocks
+    // written over
+    // 同じ応答の受け入れ直し (own = スロット 0) なら 700 から CONTINUE。新しいスロットは作らず、古い思考のブロックに上書きする
+    var q = try plan.makePlanOwn(&m, &c, 2000, true, &.{}, 0);
+    defer q.deinit(gpa);
+    try t.expectEqual(plan.Action.CONTINUE, q.action);
+    try t.expectEqual(@as(u64, 0), q.X);
+    try t.expectEqual(@as(u64, 700), q.resume_end);
+    try t.expectEqual(@as(usize, 0), q.evicted.len);
+    try plan.apply(&m, &q, &c);
+    try m.check(q.X);
+    try finish(&m, &q, &c, &toks(50, 30000));
+    try t.expectEqual(@as(usize, 1), m.slots.items.len);
+    try t.expectEqual(@as(u64, 949), m.slots.items[0].validEnd());
+    // a slot that is not its own keeps the policy: own = 7 (none such) plans as null
+    // 自分のでないスロットは方針のまま: own = 7 (存在しない) は null と同じ計画
+    var q2 = try plan.makePlanOwn(&m, b[0..800], 10, true, &.{}, 7);
+    defer q2.deinit(gpa);
+    var q3 = try plan.makePlan(&m, b[0..800], 10, true);
+    defer q3.deinit(gpa);
+    try t.expectEqual(q3.action, q2.action);
+    try t.expectEqual(q3.resume_end, q2.resume_end);
+}
+
 test "G5: h = n = 260 against prompt_end 1000 is NEW (c = 243 would fall through in v3); the 260 slot is continued after it" {
     var m = try Meta.init(gpa, .{ .n_blocks = 40, .capacity = 4096, .max_slots = 8, .mtp = false });
     defer m.deinit();
@@ -129,6 +196,99 @@ test "SHARE shares the full blocks below c; the branch block is recomputed from 
     try t.expectEqualSlices(u32, p1.table[0..3], p2.table[0..3]);
     for (p2.table[0..3]) |b| try t.expectEqual(@as(u32, 2), m.ref[b]);
     try finish(&m, &p2, &sub, &.{ 5, 6 });
+}
+
+/// TF_GLM53_MULTI: plan beside the busy slots, apply, check with them and X in flight; the caller frees the plan.
+/// TF_GLM53_MULTI: 処理中のスロットの横でプランを立て、適用し、それらと X を処理中として確かめる。
+fn stepBusy(m: *Meta, prompt: []const i64, max_tokens: i64, busy: []const u64) !plan.Plan {
+    var p = try plan.makePlanBusy(m, prompt, max_tokens, true, busy);
+    errdefer p.deinit(gpa);
+    try expectResume(m, prompt, busy, p.resume_end);
+    try plan.apply(m, &p, prompt);
+    var xs: [8]u64 = undefined;
+    @memcpy(xs[0..busy.len], busy);
+    xs[busy.len] = p.X;
+    try m.checkBusy(xs[0 .. busy.len + 1]);
+    return p;
+}
+
+test "MULTI: a busy slot SHAREs its complete blocks below its resume point; its own blocks from there stay its own" {
+    var m = try Meta.init(gpa, .{ .n_blocks = 40, .capacity = 4096, .max_slots = 8, .mtp = false });
+    defer m.deinit();
+    var sys: [1100]i64 = undefined;
+    for (&sys, 0..) |*x, i| x.* = @intCast(i);
+    var p0 = try step(&m, &sys, 4);
+    defer p0.deinit(gpa);
+    try finish(&m, &p0, &sys, &.{ 1, 2, 3, 4 }); // slot 0: 1103 committed
+    // A continues slot 0 (its next turn) and is in flight: slot 0 holds 1103, A writes from 1103 on
+    var pa_prompt: [1403]i64 = undefined;
+    @memcpy(pa_prompt[0..1100], &sys);
+    pa_prompt[1100] = 1;
+    pa_prompt[1101] = 2;
+    pa_prompt[1102] = 3;
+    for (pa_prompt[1103..], 0..) |*x, i| x.* = 70000 + @as(i64, @intCast(i));
+    var pa = try stepBusy(&m, &pa_prompt, 50, &.{});
+    defer pa.deinit(gpa);
+    try t.expectEqual(plan.Action.CONTINUE, pa.action);
+    try t.expectEqual(@as(u64, 1103), pa.resume_end);
+    // B shares the system prompt while A runs: h = 1000, c = 1000, SHARE at 768 from busy slot 0
+    var pb_prompt: [1200]i64 = undefined;
+    @memcpy(pb_prompt[0..1000], sys[0..1000]);
+    for (pb_prompt[1000..], 0..) |*x, i| x.* = 50000 + @as(i64, @intCast(i));
+    var pb = try stepBusy(&m, &pb_prompt, 4, &.{0});
+    defer pb.deinit(gpa);
+    try t.expectEqual(plan.Action.SHARE, pb.action);
+    try t.expectEqual(@as(?u64, 0), pb.S);
+    try t.expectEqual(@as(u64, 768), pb.resume_end);
+    try t.expectEqualSlices(u32, pa.table[0..3], pb.table[0..3]);
+    for (pa.table[0..3]) |b| try t.expectEqual(@as(u32, 2), m.ref[b]);
+    // A's block holding its resume point (1024 .. 1279) and every block after it stay A's alone
+    for (pa.table[4..]) |b| try t.expectEqual(@as(u32, 1), m.ref[b]);
+    for (pb.table[3..]) |b| try t.expect(std.mem.indexOfScalar(u32, pa.table, b) == null);
+    // A commits first (B still in flight), then B; the shared blocks keep both references
+    const a_seq = try std.mem.concat(gpa, i64, &.{ &pa_prompt, &[_]i64{ 9, 9, 9 } });
+    defer gpa.free(a_seq);
+    try plan.commit(&m, &pa, a_seq, pa_prompt.len, a_seq.len);
+    try m.checkBusy(&.{pb.X});
+    try finish(&m, &pb, &pb_prompt, &.{ 5, 6 });
+    for (pa.table[0..3]) |b| try t.expectEqual(@as(u32, 2), m.ref[b]);
+}
+
+test "MULTI: a resend of a busy conversation is never continued; it SHAREs the busy slot's committed blocks" {
+    var m = try Meta.init(gpa, .{ .n_blocks = 40, .capacity = 4096, .max_slots = 8, .mtp = true });
+    defer m.deinit();
+    var sys: [1100]i64 = undefined;
+    for (&sys, 0..) |*x, i| x.* = @intCast(i);
+    var p0 = try step(&m, &sys, 4);
+    defer p0.deinit(gpa);
+    try finish(&m, &p0, &sys, &.{ 1, 2, 3, 4 }); // slot 0: 1103 committed
+    var turn: [1403]i64 = undefined;
+    @memcpy(turn[0..1100], &sys);
+    turn[1100] = 1;
+    turn[1101] = 2;
+    turn[1102] = 3;
+    for (turn[1103..], 0..) |*x, i| x.* = 70000 + @as(i64, @intCast(i));
+    var pa = try stepBusy(&m, &turn, 50, &.{});
+    defer pa.deinit(gpa);
+    try t.expectEqual(plan.Action.CONTINUE, pa.action);
+    // MTP (d = 1): A resumed at 1102 (h 1103 - 1); the same turn sent again while A runs: slot 0 holds 1102, so
+    // h = 1102, c = 1101, not continued (busy): SHARE at 1024, four blocks
+    try t.expectEqual(@as(u64, 1102), pa.resume_end);
+    var pb = try stepBusy(&m, &turn, 50, &.{0});
+    defer pb.deinit(gpa);
+    try t.expectEqual(plan.Action.SHARE, pb.action);
+    try t.expectEqual(@as(u64, 1024), pb.resume_end);
+    try t.expect(pb.X != pa.X);
+    try t.expectEqualSlices(u32, pa.table[0..4], pb.table[0..4]);
+    for (pa.table[0..4]) |b| try t.expectEqual(@as(u32, 2), m.ref[b]);
+    try t.expectEqual(@as(u32, 1), m.ref[pa.table[4]]);
+    // without the busy slot as a source this was a NEW from 0 (the whole turn computed again)
+    const a_seq = try std.mem.concat(gpa, i64, &.{ &turn, &[_]i64{ 9, 9 } });
+    defer gpa.free(a_seq);
+    try plan.commit(&m, &pb, a_seq, turn.len, a_seq.len - 1);
+    try m.checkBusy(&.{pa.X});
+    try plan.commit(&m, &pa, a_seq, turn.len, a_seq.len - 1);
+    try m.check(null);
 }
 
 test "POOL.md 4.3: a shared block mid-resume is rounded down; the other slot keeps it" {
@@ -410,6 +570,7 @@ fn commitKv(m: *Meta, p: *const plan.Plan, seq: []const i64, prompt_end: u64, kv
 fn stepOpt(m: *Meta, prompt: []const i64, max_tokens: i64, resume_ok: bool) !plan.Plan {
     var p = try plan.makePlan(m, prompt, max_tokens, resume_ok);
     errdefer p.deinit(gpa);
+    if (resume_ok) try expectResume(m, prompt, &.{}, p.resume_end);
     try plan.apply(m, &p, prompt);
     try m.check(p.X);
     for (p.table[p.resume_end / plan.block ..]) |b| try t.expectEqual(@as(u32, 1), m.ref[b]);

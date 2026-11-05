@@ -10,6 +10,7 @@ const lanes = @import("lanes");
 const dw = @import("draft_weights.zig");
 const roce = @import("roce.zig");
 const qmm = @import("qmm.zig");
+const q4 = @import("q4.zig");
 const forward = @import("forward.zig");
 const ops_mod = @import("ops.zig");
 
@@ -64,6 +65,9 @@ pub const Target = struct {
     /// TF_GLM53_ROCE: the world's RoCE one-shot runtime for the drafter's gathers (data only: the same bits)
     /// TF_GLM53_ROCE: drafter の gather に使う RoCE one-shot ランタイム (データを運ぶだけなので bit は同じ)
     fast: ?*const roce.Runtime = null,
+    /// TF_GLM53_DFLASH_HEAD4: the block pass's head on 4-bit records of lm_head (Drafter.head4)
+    /// TF_GLM53_DFLASH_HEAD4: block pass の head を lm_head の 4 bit の記録で計算する (Drafter.head4)
+    head4: bool = false,
 };
 
 pub const Drafter = struct {
@@ -73,6 +77,13 @@ pub const Drafter = struct {
     qk: qmm.Kernels,
     layers: []Layer,
     fc: qmm.Matrix,
+    /// TF_GLM53_DFLASH_HEAD4 (gr8's G6_DFL_HEAD_I4): this rank's lm_head share as 4-bit records made at the start
+    /// (q4, 64-groups; 134 MB instead of 476 MB read a block pass): the drafts' candidates only, every committed token
+    /// stays the target's. null: the bf16 share.
+    /// TF_GLM53_DFLASH_HEAD4 (gr8 の G6_DFL_HEAD_I4): このランクの lm_head の分を起動時に 4 bit の記録にしたもの
+    /// (q4、64 個の group。block pass ごとに読むのは 476 MB ではなく 134 MB): draft の候補だけに使い、確定する
+    /// トークンはすべて target のもの。null は bf16 の分。
+    head4: ?qmm.Matrix = null,
     hidden_norm: Buf,
     norm: Buf,
     hproj: Buf,
@@ -234,6 +245,16 @@ pub const Drafter = struct {
             .host_proj = try gpa.alloc(u16, c.block * c.selector_rank),
         };
         freePacked(gpa, &w.fc);
+        if (t.head4) {
+            const nv: usize = t.vshare;
+            const host = try gpa.alloc(u16, nv * D);
+            defer gpa.free(host);
+            const lm: cuda.DeviceBuffer = .{ .d = d, .ptr = t.lm_head, .len = nv * D * 2 };
+            try lm.download(0, std.mem.sliceAsBytes(host));
+            var p = try q4.quantize(gpa, host, nv, D);
+            defer p.deinit(gpa);
+            e.head4 = try qmm.Matrix.upload(d, p);
+        }
         var mask: [16]i32 = undefined;
         @memset(mask[0..c.block], @intCast(c.mask_id));
         try e.ids.upload(0, std.mem.sliceAsBytes(mask[0..c.block]));
@@ -501,7 +522,9 @@ pub const Drafter = struct {
         for (e.layers) |*L| try e.layer(L, n);
         const m = n - 1;
         try e.rms(try e.x.at(D * 2), e.norm.ptr, e.normed.ptr, m);
-        try e.t.ops.router(e.normed.ptr, D, e.t.lm_head, e.rpart.ptr, e.logits.ptr, m, D, e.t.vshare);
+        if (e.head4) |*h| {
+            try e.mm(e.normed.ptr, m, h, null, e.logits.ptr, true);
+        } else try e.t.ops.router(e.normed.ptr, D, e.t.lm_head, e.rpart.ptr, e.logits.ptr, m, D, e.t.vshare);
         try e.t.glue.draftTopk(e.t.stream, e.logits.ptr, e.packed_mine.ptr, m, e.t.vshare, @intCast(c.top_k), e.t.rank * e.t.vshare);
         const lib = e.t.group.lib;
         const words = m * 2 * @as(u32, @intCast(c.top_k));

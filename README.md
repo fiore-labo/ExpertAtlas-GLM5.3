@@ -3,39 +3,98 @@ English | [日本語](README.ja.md) | [简体中文](README.zh-CN.md) | [한국�
 # Full GLM-5.3 on four or eight DGX Sparks
 
 Full GLM-5.3 (755B, `glm_moe_dsa`) served by four or eight NVIDIA DGX Spark systems, one GB10 each, with tensor
-parallelism 4 or 8: one request at a time, fast, with a long context for agents and coding. The engine is written in
-Zig with plain CUDA kernels and needs no Python at run time.
+parallelism 4 or 8, on one RoCE switch or, for four nodes, a ring of direct cables: fast, with a long context for
+agents and coding. One request runs at a time by default; `MULTI` decodes up to four conversations together. The
+engine is written in Zig with plain CUDA kernels and needs no Python at run time.
 
 This is Fiore-lab's unofficial derivative of [TensorFold](https://github.com/ashhart/TensorFold) 1.0.2, not a release
 of the TensorFold project. It carries TensorFold's code, adds the engine for full GLM-5.3
 (`zig/src/families/glm_moe_dsa/`, `zig/kernels/cuda/glm53/`) and leaves out TensorFold's documents, which describe
 other models, weights and machines. For TensorFold itself, see its repository.
 
-**Using an AI assistant to understand or run this system?** Give it [glm53/release/AI-GUIDE.md](glm53/release/AI-GUIDE.md)
-(`AI-GUIDE.md` in the release archive; Japanese: `AI-GUIDE.ja.md`): one page written for AI assistants that describes
-the whole system, its purpose, how to set it up and use it, what it can and cannot do with the measured numbers, and
-where the details are.
+## Documents
+
+Each page is in English, Japanese (`.ja.md`) and Simplified Chinese (`.zh-CN.md`). In the release archive and the image they
+sit together at the top level.
+
+| Page | What it gives |
+|---|---|
+| [QUICKSTART](glm53/release/QUICKSTART.md) | The first start: the weights, one `docker run` line, every option, the common `STOP` messages |
+| [BEFORE-START](glm53/release/BEFORE-START.md) | What to decide before the first start, and what can wait |
+| [PANEL-GUIDE](glm53/release/PANEL-GUIDE.md) | The control panel's screens, item by item |
+| [CONFIG](glm53/release/CONFIG.md) | Every setting of `glm53.conf`: its default, who reads it, when a change takes effect |
+| [RUNTIME](packaging/RUNTIME.md) | Running it from the archive or by hand: every command, the cache, Claude Code, failures |
+| [T4](glm53/release/T4.md) | Four nodes: the checkpoint, the settings, the measurements |
+| [RING](glm53/release/RING.md) | Four nodes as a ring without a switch: the cabling, the fenced NCCL, the measurements |
+| [AGENT-API](glm53/release/AGENT-API.md) | The control API for an AI agent, with no dashboard |
+| [AI-GUIDE](glm53/release/AI-GUIDE.md) | The whole system on one page, for an AI assistant that helps you understand or run it |
+| [ATLAS-TESTS](glm53/release/ATLAS-TESTS.md) | The expert re-sort's measurements |
+| [weights](glm53/weights/README.md) | Making every weight file yourself from Z.AI's official BF16 checkpoint |
 
 ## What it does
 
 - Tensor parallelism 8 or 4 with the KV cache split across rank pairs (decode context parallelism 2). The engine and
-  the model take up to 1M tokens (1,048,576), and **both node counts reach 1M**. Eight nodes: `CONTEXT=1048576` with
-  `STORE=1048576` beside it on the 4-bit KV cache (`KV=fp4`, `NEED_GB=100`; about 23 GiB a node to spare), or
-  `STORE=589824` on the 8-bit one. Four nodes: `CONTEXT=1048576` from the control panel with 3 bits for 70 % of the
-  routed experts and 4 bits for the rest (`KV=fp4`, `STORE` 512; about 7.5 GiB a node to spare, enough for a live
-  re-sort); the four-node checkpoint alone takes `CONTEXT=819200` `STORE=18080`. Each was measured with one prompt of
-  about 1,019,000 tokens. The 4-bit KV cache costs some accuracy (KL 0.0190 against 0.0156 with the 8-bit cache, same
+  the model take a context length of up to 1M tokens (1,048,576), and **both node counts reach 1M**. Eight nodes:
+  `CONTEXT_LENGTH=1048576` with `KV_SIZE=2097152` on the 4-bit KV cache (`KV=fp4`, `NEED_GB=100`; about 23 GiB a node
+  to spare), or `KV_SIZE=1638400` on the 8-bit one. Four nodes: `CONTEXT_LENGTH=1048576` from the control panel with
+  3 bits for 70 % of the routed experts and 4 bits for the rest (`KV=fp4`, `KV_SIZE=1049088`: the context length and
+  512 more, the least the pool takes; about 7.5 GiB a node to spare, enough for a live re-sort); the four-node
+  checkpoint alone takes `CONTEXT_LENGTH=819200` `KV_SIZE=837280`. Each was measured with one prompt of about
+  1,019,000 tokens. The 4-bit KV cache costs some accuracy (KL 0.0190 against 0.0156 with the 8-bit cache, same
   weights: [glm53/release/T4.md](glm53/release/T4.md)); the speeds below are with the 8-bit cache on eight nodes. The
-  conf examples ship with 819,200 and 737,280 (the KV pool holds `CONTEXT` + `STORE` positions).
+  conf examples ship with context lengths of 819,200 and 737,280 and KV sizes of 1,638,400 and 837,280 (the KV size is
+  the whole KV cache, one pool every conversation shares: a request takes up to the context length, and the rest keeps
+  earlier conversations' KV in whatever blocks are free).
 - Long prompts read in sequence-parallel parts; decode-step collectives over RoCE.
 - One conversation cache for all conversations, in blocks of 256 positions: a request resumes from the longest cached
   prefix of any conversation, and conversations that begin alike (an agent's system prompt, its sub-agents) hold the
   blocks they share once.
 - Drafts checked by the model in each round: by GLM-5.3's own MTP layer by default, or by the optional DFlash2 drafter.
   The reply is the model's own choice in every case.
+- The thinking kept in bounds: a limit as a share of the reply's, and organizing a long thinking midway or at its close, set
+  per request or while the engine runs.
 - `/metrics` (Prometheus text) and `/health` count the running request too, so a monitor reads prefill and decode
   speed, cache hits and draft acceptance while a request runs. `METRICS_LISTEN` serves the two read-only on an address
   of their own, for a monitor on another host.
+
+## New in r3.3-102
+
+**Changes that need something from you:**
+
+- **The 3-bit bank is always needed**, beside the checkpoint, and a start with no plan loads every expert at 3 bits.
+  `BITS` or a saved allocation chooses other widths, whose banks are then needed too.
+- **Settings renamed:** `CONTEXT_LENGTH` (one request's longest) and `KV_SIZE` (the whole KV cache) replace `CONTEXT` and
+  `STORE`. An older `glm53.conf` is still read.
+- **A reply's default limit** was 4,096 tokens and is now 70 % of the context length (`MAX_TOKENS_SHARE`). A client's
+  `max_tokens` comes first.
+- **Fewer choices in the settings:** `CACHE` is `pool`, `DCP` is 2 and `ROCE_PROXY_CORES` is `a725` or `os`.
+- **`./tf-glm53 up` starts the control panel only;** the engine is started from the panel, or with `./tf-glm53 start`.
+  `./tf-glm53 engine-up` starts it by hand.
+
+**New:**
+
+- **One line to a running engine:** `docker run ... IMAGE up` writes the release to the first node, finds the nodes,
+  looks for the weights, starts the engine and sends one request. It ends in `READY` with the addresses, or in `STOP`,
+  `FIX` and `THEN`, which say what to do next. Every setting is a `-e NAME=VALUE` option
+  ([QUICKSTART](glm53/release/QUICKSTART.md)).
+- **Four nodes as a ring**, with no switch ([RING](glm53/release/RING.md)).
+- **NCCL with the AArch64 fence** in the image, on a switch and on a ring: NVIDIA/nccl#2393, which no NCCL release has
+  yet. Without it a proxy thread on Arm can hang with no error ([RING](glm53/release/RING.md), "The fenced NCCL").
+- **The node check** finds a ring or a switch's nodes from the cabling, checks them and registers them
+  (`glm53.nodes.conf`), so `TOPOLOGY`, `SOCKET_IFNAME` and `IB_HCA` need no writing.
+- **Reasoning Control:** the thinking's limit as a share of the reply's limit, organizing midway and at the close, changed while
+  the engine runs from the panel or `POST /v1/thinking` ([CONFIG](glm53/release/CONFIG.md)).
+- **Several conversations at once:** `MULTI` (1 to 4) now works with the MTP layer too. While they run, the panel or
+  `POST /v1/schedule` sets the GPU's split between prefill and decode, and a short prompt can go first.
+- **Byte Resume** (on by default): when a model cuts a text differently from the tokenizer, the next turn's prompt holds
+  the same bytes under other token ids; the cache now resumes past that place instead of computing the rest again.
+- **The panel:** an engine settings screen, where the weights are and a check of them ([ WEIGHTS ]), the startup flow,
+  the KV pool on the circle, each node's temperatures.
+- **The control API for an AI agent:** start, stop and set the engine with no dashboard
+  ([AGENT-API](glm53/release/AGENT-API.md)).
+- **Faster and cooler:** the weights load in parallel (ready in 127 s instead of 366 s, measured on the ring). MTP stops a
+  round's drafts when their confidence falls (`TF_GLM53_MTP_CONF`, 0.7 by default). The RoCE proxy threads stay on the
+  Cortex-A725 cores (`ROCE_PROXY_CORES`), which ran the SoC 5 to 16 °C cooler at the same speed.
 
 ## New in r3.2-102
 
@@ -69,8 +128,8 @@ experts in most use get the most bits for the memory there is:
 
 - **Banks**: the routed experts at each width, on Hugging Face: [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit), [-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit),
   [-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) and [-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit). The panel offers the widths every node holds.
-- **The control panel**: a page served by the launcher (`./tf-glm53 launcher`). Before a start it plans the widths
-  and shows each node's memory, whether the plan fits and the KV cache left; it starts and stops the engine. While
+- **The control panel**: a page served by the launcher (`./tf-glm53 up`). Before a start it plans the widths
+  and shows each node's memory, whether the plan fits and the KV size it leaves; it starts and stops the engine. While
   the engine runs it shows the experts each token picks, the mean width of the picked experts and the speeds.
 - **Usage records**: the engine counts the experts every prompt row and decoded token picks. A saved allocation keeps
   the usage record of the runs it was saved from, so its data travels with it: opened and run again, its record grows
@@ -81,9 +140,10 @@ experts in most use get the most bits for the memory there is:
   change took 83 to 90 s on four nodes, between requests); the result is saved under a name when wanted and opened
   for later starts.
 
-The control panel runs on four or eight nodes, the count chosen on its launch screen; `./tf-glm53 up` still starts
-them with the checkpoint's widths. `packaging/RUNTIME.md` ("The control panel") and `glm53/release/T4.md` give the
-details.
+The control panel runs on four or eight nodes, the count chosen on its launch screen. Without it, `./tf-glm53 start`
+and `./tf-glm53 engine-up` start them with the last start's plan, or every expert at 3 bits.
+[PANEL-GUIDE](glm53/release/PANEL-GUIDE.md), `packaging/RUNTIME.md` ("The control panel") and `glm53/release/T4.md` give
+the details.
 
 ## Weights on Hugging Face
 
@@ -92,22 +152,24 @@ details.
 | Eight-node checkpoint: every weight, the routed experts at 4 bits | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | eight nodes; the control panel on four or eight nodes (it serves as the 4-bit bank too) |
 | Four-node checkpoint: the least used half of the routed experts at 3 bits | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | four nodes without the control panel |
 | Expert bank, 2 bits | [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit) | 187.3 GB | the control panel |
-| Expert bank, 3 bits | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | the control panel (on four nodes, for the full context) |
+| Expert bank, 3 bits | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | the control panel (on four nodes, for the full context length) |
 | Expert bank, 4 bits | [fiore-lab/GLM-5.3-EXL3-Experts-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) | 368.5 GB | the control panel, on a node without the eight-node checkpoint |
 | Expert bank, 5 bits | [fiore-lab/GLM-5.3-EXL3-Experts-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit) | 459.1 GB | the control panel |
 
-A bank holds the 19,200 routed experts at one width; the control panel loads each expert from the bank of the width
-its plan gives it. **Download only the banks of the widths you want to use**: the panel offers the widths every node
-holds. For the control panel on four nodes, the eight-node checkpoint and the 3-bit bank (668 GB together) are
-enough. Every node needs the same files at the same paths. Download once and copy to the other nodes, for example:
+A bank holds the 19,200 routed experts at one width; the engine loads each expert from the bank of the width its plan
+gives it. **Every start needs the checkpoint for the node count and the 3-bit bank; download the other banks only for the widths you
+want to use**: the panel offers the widths every node holds. For four nodes that is the four-node checkpoint and the
+3-bit bank, 622.5 GB together. Every node needs the same files at the same paths. Download once and copy to the other
+nodes, for example:
 
 ```sh
 python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
-~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks --local-dir ~/models/GLM-5.3-EXL3-8x-DGX-Sparks
+~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks --local-dir ~/models/GLM-5.3-EXL3-4x-DGX-Sparks
+~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-Experts-3bit --local-dir ~/models/GLM-5.3-EXL3-Experts-3bit
 ```
 
-[packaging/RUNTIME.md](packaging/RUNTIME.md) has the copy to the other nodes and the checks (`./tf-glm53 verify`,
-`./tf-glm53 verify-banks`).
+[QUICKSTART](glm53/release/QUICKSTART.md) has the copy to the other nodes, [packaging/RUNTIME.md](packaging/RUNTIME.md)
+the checks (`./tf-glm53 verify`, `./tf-glm53 verify-banks`).
 
 ## Making the weights yourself
 
@@ -120,44 +182,51 @@ have the same layout as Fiore-lab's and load the same way.
 
 ## What you need
 
-- Four or eight DGX Spark systems (GB10) on one RoCE v2 network, each reachable from the first over ssh without a
-  password. For four nodes, one 100 Gb/s port a node is enough.
-- DGX OS (Ubuntu 24.04) with the NVIDIA driver 580 or later and cuBLAS 13.
-- NCCL 2.30.7 on every node: NVIDIA's `nvidia-nccl-cu13` wheel, unpacked by pip (`packaging/RUNTIME.md`).
+- Four or eight DGX Spark systems (GB10) on one RoCE v2 network, or four cabled as a ring. The first reaches every
+  node, and itself, over ssh with a key that has no passphrase. For four nodes on a switch, one 100 Gb/s port a node is
+  enough.
+- With the image: Docker and the NVIDIA container toolkit (DGX OS has both) and `python3` on every node, and about
+  115 GiB free on each before the start.
+- With the archive instead: DGX OS (Ubuntu 24.04) with the NVIDIA driver 580 or later and cuBLAS 13, and NCCL 2.30.7 on
+  every node: NVIDIA's `nvidia-nccl-cu13` wheel, unpacked by pip (`packaging/RUNTIME.md`).
+- With the archive, NCCL with an AArch64 fence, which NVIDIA's wheel lacks, is recommended on a switch and required on a
+  ring ([RING](glm53/release/RING.md)). The image holds it.
 - Fiore-lab's EXL3 checkpoint for the number of nodes, on Hugging Face, at the same path on every node:
   [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) (390 GB) for eight nodes, [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) (344.6 GB)
   for four. The four-node checkpoint holds the routed experts of layers 3 to 77 at 3 bits for the least used half and
   at 4 bits for the rest; everything else is as in the eight-node checkpoint.
 - Every weight file can also be made yourself from Z.AI's official BF16 checkpoint, without any of Fiore-lab's files:
   [glm53/weights](glm53/weights/README.md).
-- For the control panel: the expert banks of the widths it uses, on four nodes the 3- and 4-bit banks (277.9 and
-  368.5 GB; the eight-node checkpoint can serve as the 4-bit bank; with 4 bits alone the context is shorter), and
-  `python3` on the nodes for the launcher.
+- The 3-bit bank (277.9 GB), at the same path on every node: every start needs it. The other banks only for the
+  widths you use (the eight-node checkpoint can serve as the 4-bit bank; with 4 bits alone the context length is shorter).
+- `python3` on the nodes for the launcher and the log keeper.
 
 ## Run
 
 The release comes as a container image and as an archive with the same files; the image is the way we recommend. With
-the image, every node needs Docker and the NVIDIA container toolkit (DGX OS has both) and nothing else of the
-server's libraries:
+the weights in place, one line on the first node starts the engine:
 
 ```sh
-docker pull ghcr.io/fiore-labo/expertatlas-glm5.3:r3.2-102            # on every node
-mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/expertatlas-glm5.3:r3.2-102 install /out
+docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3-102 up
 ```
 
-then set `RUNTIME=docker` and `IMAGE` in `glm53.conf` and go on as below ([packaging/RUNTIME.md](packaging/RUNTIME.md),
-"Running in containers"). Without Docker: download the release archive `tensorfold-r3.2-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
-([packaging/RUNTIME.md](packaging/RUNTIME.md) here). The same archive and launcher serve four or eight nodes: copy
-`glm53.conf.example` (eight nodes) or `glm53.t4.conf.example` (four nodes, see
-[glm53/release/T4.md](glm53/release/T4.md)) to `glm53.conf`, fill in the nodes, network names, NCCL, weights and
-drafter, then `./tf-glm53 deploy` and `./tf-glm53 up`. The server speaks the OpenAI chat API on every address
-(`HOST=0.0.0.0`) by default. The API has no key, so anyone who can reach it can use it: keep it on a closed network
-or put TLS and access control in front (`HOST=127.0.0.1` keeps it to the first node).
+It ends in `READY` with the addresses: the API at `http://FIRST-NODE:8000/v1` and the control panel at
+`http://FIRST-NODE:8010/panel`. If something is missing it ends in `STOP`, with what to do and the line to run next.
+[QUICKSTART](glm53/release/QUICKSTART.md) gives the steps and every option.
 
-To work from the control panel instead of `./tf-glm53 up`, run `./tf-glm53 launcher` on the first node and open
-`http://FIRST-NODE:LAUNCHER_PORT/panel` (port 8010 in the four-node example): the engine starts and stops there
-([packaging/RUNTIME.md](packaging/RUNTIME.md), "The control panel"). Every setting of `glm53.conf`, who reads it
-and when a change takes effect: [glm53/release/CONFIG.md](glm53/release/CONFIG.md).
+To the same end by hand, with the image: `docker pull` it on every node, run
+`mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out`, and set
+`RUNTIME=docker` and `IMAGE` in `glm53.conf` ([packaging/RUNTIME.md](packaging/RUNTIME.md), "Running in containers").
+Without Docker: download the release archive `tensorfold-r3.3-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
+([packaging/RUNTIME.md](packaging/RUNTIME.md) here). Either way, copy `glm53.conf.example` (eight nodes) or
+`glm53.t4.conf.example` (four nodes, see [glm53/release/T4.md](glm53/release/T4.md)) to `glm53.conf`, fill in what it
+asks for, then `./tf-glm53 deploy` and `./tf-glm53 up`, which starts the control panel, and start the engine there.
+`./tf-glm53 start` starts it with the last start's plan, and `./tf-glm53 down` stops it.
+
+The server speaks the OpenAI chat API, and Anthropic's Messages API for Claude Code, on every address (`HOST=0.0.0.0`)
+by default. Neither the API nor the control panel has a key, so anyone who can reach them can use them: keep the nodes on
+a closed network or put TLS and access control in front (`HOST=127.0.0.1` and `LAUNCHER_HOST=127.0.0.1` keep them to the
+first node).
 
 ## Drafters
 
@@ -171,15 +240,15 @@ and when a change takes effect: [glm53/release/CONFIG.md](glm53/release/CONFIG.m
   4 bits in memory at the start and writes nothing to disk. Decode is faster still (Speed).
 - `none`: no drafts.
 
-`DRAFTER_KIND` in `glm53.conf` picks one; `./tf-glm53 -d KIND up` picks one for a single start.
+`DRAFTER_KIND` in `glm53.conf` picks one; the launch screen, or `./tf-glm53 -d KIND start` (or `engine-up`), picks one
+for a single start.
 
 ## Speed
 
-**Measured with the GPU clock capped at 2.1 GHz (2,100 MHz) on every node.** One request at a time with a coding prompt
-not yet cached (reasoning effort low, up to 4,000 reply tokens), this archive with the settings of
-`glm53.conf.example` (eight nodes, FP8 KV cache) and `glm53.t4.conf.example` (four nodes, 4-bit KV cache), and
-Fiore-lab's published checkpoints. Your numbers depend on the checkpoint, the prompt and the clocks.
-`packaging/RUNTIME.md` gives the conditions in full.
+**Measured with release r2-102, with the GPU clock capped at 2.1 GHz (2,100 MHz) on every node.** The engine has changed
+since, and these numbers have not been measured again for this release. One request at a time with a coding prompt not
+yet cached (reasoning effort low, up to 4,000 reply tokens), the settings of `glm53.conf.example` (eight nodes, FP8 KV
+cache) and `glm53.t4.conf.example` (four nodes, 4-bit KV cache), and Fiore-lab's published checkpoints. Speeds differ with the environment (the checkpoint, the prompt, the clocks): take these numbers as a guide. `packaging/RUNTIME.md` gives the conditions in full.
 
 | Nodes | Prompt | MTP (k=3): time to first token / decode | DFlash2: time to first token / decode |
 |---|---|---|---|
@@ -216,7 +285,7 @@ libibverbs headers (`libibverbs-dev`):
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so
-zig build dist -Dversion=r3.2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.3-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 
@@ -224,10 +293,12 @@ The archive lands in `zig-out/dist/`.
 
 ## Limits
 
-- Four or eight GB10 systems only; other GPUs and other rank counts are not supported.
-- One request runs at a time; up to 32 others wait in arrival order, chat-title requests last, and past 32 the server
-  refuses them (a 503, or an error event in a stream). Agents that run sub-agents in parallel are better served by
-  pointing the sub-agents at another model.
+- Four or eight GB10 systems. Two- and three-node forms are being tested. Other GPUs and other rank counts are not
+  supported.
+- By default one request runs at a time; up to 32 others wait in arrival order, chat-title requests last, and past 32 the
+  server refuses them (a 503, or an error event in a stream). `MULTI` decodes up to four together, at a cost in node
+  memory. Agents that run sub-agents in parallel are otherwise better served by pointing the sub-agents at another model.
+- The control panel's screen is in English and Japanese only.
 - `packaging/RUNTIME.md` lists the rest.
 
 ## License and credits
@@ -250,6 +321,9 @@ their own license (GLM-5.3 License); the optional DFlash2 drafter keeps its own.
   4-bit KV cache takes its layout, implemented with this engine's own code.
 - [ExLlamaV3](https://github.com/turboderp-org/exllamav3): the checkpoints are quantized with it, and the engine reads
   its EXL3 format.
+- The [gr8 recipe](https://github.com/knapcio/GLM-5.3-gr8-4x-DGX-Spark-TP4) and [engine](https://github.com/kindlingai/gr8):
+  several decode speed-ups take their ideas, implemented with this engine's own code.
+- [ollama/ollama#12375](https://github.com/ollama/ollama/issues/12375): Byte Resume takes its idea from this report.
 
 ## TensorFold's contributors
 

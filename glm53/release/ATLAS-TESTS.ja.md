@@ -1,3 +1,5 @@
+[English](ATLAS-TESTS.md) | 日本語 | [简体中文](ATLAS-TESTS.zh-CN.md)
+
 # Expert Atlas: どの選択で expert を並べ替えるか
 
 コントロールパネルの **エキスパート最適化** は、割り当てに含まれる幅（bit 数）の間で routed expert を並べ替えます。モデルがよく選ぶ expert ほど広い bit になり、メモリの量は変わりません。並べる元には、プロンプトを読む間（prefill）に選ばれた expert、token を生成する間（decode）に選ばれた expert、またはその両方を混ぜたものを使えます。このページでは、それぞれの選び方の改善率（3 bit による損失が並べ替えでどれだけ縮むか）を、DGX Spark 上で、8,192 token の文書と 128K・256K token のプロンプトについて測った結果を示します。

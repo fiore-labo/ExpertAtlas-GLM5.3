@@ -1,25 +1,41 @@
 #!/usr/bin/env bash
 # tf-glm53: full GLM-5.3 on eight, four or two DGX Sparks (tensor parallel 8, 4 or 2) from this release directory;
-# three nodes (TP=3) are checked and deployed, not started yet.
+# three nodes (TP=3) are checked and deployed, not started yet. An AI assistant: AI-GUIDE.md, AGENT-API.md.
 #
 #   tf-glm53 [-c CONF] deploy     copy this directory to every node (same path) and check SHA256SUMS there
 #   tf-glm53 [-c CONF] check      nodes, files, weights, libraries, RDMA devices, GPUs and memory, before a start
 #   tf-glm53 [-c CONF] verify     the weights against their SHA256SUMS on every node at once (a few minutes)
 #   tf-glm53 [-c CONF] verify-banks [BITS...]   the expert banks' layer files against their manifests' sha256
-#   tf-glm53 [-c CONF] up         check, start the last rank .. rank 0, wait for the server, run the smoke test
-#   tf-glm53 [-c CONF] down       stop every rank (TERM, then KILL after 30 s)
+#   tf-glm53 [-c CONF] up         the control panel first: start this lane's launcher and print the panel's address;
+#                                 the engine is started from the panel (or with start)
+#   tf-glm53 [-c CONF] start      start the engine through the launcher, as the panel's start does, with the plan of
+#                                 the last start (none yet: every expert at 3 bits); wait until it runs
+#   tf-glm53 [-c CONF] down       stop the engine: through the launcher when it runs (as the panel's stop does), else
+#                                 every rank directly
+#   tf-glm53 [-c CONF] engine-up  check, start the last rank .. rank 0, wait for the server, run the smoke test. The
+#                                 launcher's start runs this with its plan; by hand it is start, every expert at 3
+#                                 bits (TF_GLM53_CHECKPOINT_WIDTHS=1: the checkpoint's own widths, for a test)
+#   tf-glm53 [-c CONF] engine-down   every rank stopped directly (TERM, then KILL after 30 s)
 #   tf-glm53 [-c CONF] status     ranks, free memory, the conversation cache, the server's /health and METRICS_LISTEN
 #   tf-glm53 [-c CONF] smoke      three requests whose answers are checked, the last one reusing the cached prompt
 #   tf-glm53 [-c CONF] logs [R]   follow rank R's log (default 0; R.prev: the start before; watch, launcher), in memory
 #   tf-glm53 [-c CONF] launcher [stop|status]   the control panel's launcher on this node, always on (start / stop /
 #                                 status); it serves /panel and /v1/launch/* on LAUNCHER_PORT (glm53/launcher)
 #   tf-glm53 [-c CONF] pull       RUNTIME=docker: docker pull IMAGE on every node, then each node's image compared
-#   -d KIND, before the command: the drafter for this start (mtp, dflash2 or none) instead of DRAFTER_KIND in CONF
+#   tf-glm53 [-c CONF] quickstart [OPTIONS]   a fresh install to a running engine through the launcher: nodes, image,
+#                                 weights, plan, start, one request; what to fix when it cannot go on (OPTIONS:
+#                                 tools/quickstart.py --help). `docker run ... IMAGE up` runs this over ssh on the host
+#   tf-glm53 [-c CONF] topology [--json]   how NODES are cabled (a ring of four, a switch, one link), judged from each
+#                                 node's RDMA devices and LLDP; the mode TOPOLOGY=auto takes (--json: the whole judgment)
+#   -d KIND, before the command: the drafter for this start (start or engine-up: mtp, dflash2 or none) instead of
+#                                 DRAFTER_KIND in CONF
 #
 # Run it on the first node of NODES (rank 0). Settings: glm53.conf next to this script (every setting: CONFIG.md; see glm53.conf.example;
-# glm53.t4.conf.example and T4.md for four nodes). RUNTIME=docker runs each rank in a container of IMAGE (this
-# release as an image, docker/Dockerfile) instead of from this directory: the nodes need Docker and the NVIDIA
-# container toolkit instead of cuBLAS, libibverbs and NCCL.
+# glm53.t4.conf.example and T4.md for four nodes). The lane's nodes: glm53.nodes.conf beside it once the control
+# panel's node check wrote it (TOPOLOGY, NODES, SOCKET_IFNAME, IB_HCA; read after CONF, so it wins; NODES_CONF names
+# another file, NODES_CONF= none). RUNTIME=docker runs each rank in a container of IMAGE (this release as an image,
+# docker/Dockerfile) instead of from this directory: the nodes need Docker and the NVIDIA container toolkit instead of
+# cuBLAS, libibverbs and NCCL.
 set -uo pipefail
 PKG=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SELF="$PKG/$(basename "${BASH_SOURCE[0]}")"
@@ -38,14 +54,21 @@ done
 for a in "$@"; do case $a in -h|--help) usage; exit 0 ;; esac; done
 [ $# -eq 0 ] && { usage; exit 1; }
 case "${1:-}" in
-  deploy|check|verify|up|down|status|smoke|watch|pull) [ $# -le 1 ] || { echo "$1 takes no arguments (got: ${*:2})"; exit 2; } ;;
+  deploy|check|verify|up|start|down|engine-up|engine-down|status|smoke|watch|pull) [ $# -le 1 ] || { echo "$1 takes no arguments (got: ${*:2})"; exit 2; } ;;
   logs) [ $# -le 2 ] && [[ ${2:-0} =~ ^([0-9]+(\.prev)?|watch|launcher)(\.prev)?$ ]] || { echo "logs [R]: a rank number (R.prev: the start before), watch or launcher"; exit 2; } ;;
   verify-banks) for a in "${@:2}"; do [[ $a =~ ^[2-5]$ ]] || { echo "verify-banks [BITS...]: widths 2 to 5 (got: $a)"; exit 2; }; done ;;
   launcher) [ $# -le 2 ] || { echo "launcher [start|stop|status]"; exit 2; } ;;
+  topology) [ $# -le 2 ] && [ "${2:---json}" = --json ] || { echo "topology [--json]"; exit 2; } ;;
 esac
 [ -f "$CONF" ] || { echo "no settings file $CONF: copy glm53.conf.example to glm53.conf and edit it"; exit 2; }
 # shellcheck source=/dev/null
 . "$CONF"
+# the lane's nodes as the control panel's node check wrote them (TOPOLOGY, NODES, SOCKET_IFNAME, IB_HCA; the launcher
+# writes the file, whole, once a check passed on those nodes): read after CONF, so its lines win. ${CONF%.conf}.nodes.conf
+# beside CONF (glm53.nodes.conf); NODES_CONF names another file, NODES_CONF= (empty) reads none
+NODES_CONF=${NODES_CONF-${CONF%.conf}.nodes.conf}
+# shellcheck source=/dev/null
+if [ -n "$NODES_CONF" ] && [ -f "$NODES_CONF" ]; then . "$NODES_CONF"; fi
 [ -n "$DRAFTER_KIND_ARG" ] && DRAFTER_KIND=$DRAFTER_KIND_ARG
 
 NAME=${NAME:-glm-5.3}
@@ -56,7 +79,17 @@ DRAFTER_KIND=${DRAFTER_KIND:-mtp}
 MTP_K=${MTP_K:-3}
 DRAFTER=${DRAFTER:-}
 NCCL_LIB=${NCCL_LIB:-$HOME/nccl-2.30.7/nvidia/nccl/lib/libnccl.so.2}
+# CONTEXT_LENGTH: one request's longest (prompt and reply); KV_SIZE: the whole KV in positions, shared by every
+# conversation with CACHE=pool (with CACHE=slots, KV_SIZE less CONTEXT_LENGTH is each conversation's store). CONTEXT and
+# STORE, the names before, read when the new ones are absent (KV_SIZE then CONTEXT + STORE); the new ones win. Inside,
+# the engine still takes the context (--context) and the store beyond it (TF_GLM53_PREFIX_STORE)
+[ -n "${CONTEXT_LENGTH:-}" ] && CONTEXT=$CONTEXT_LENGTH
 CONTEXT=${CONTEXT:-819200}
+if [ -n "${KV_SIZE:-}" ]; then
+  [[ $KV_SIZE =~ ^[0-9]+$ && $CONTEXT =~ ^[0-9]+$ ]] && [ "$KV_SIZE" -ge "$CONTEXT" ] \
+    || { echo "KV_SIZE ($KV_SIZE) must be positions, CONTEXT_LENGTH ($CONTEXT) or more"; exit 2; }
+  STORE=$((KV_SIZE - CONTEXT))
+fi
 STORE=${STORE:-819200}
 CACHE=${CACHE:-pool}       # pool: every conversation's KV in shared blocks of 256; slots: one store per conversation
 KV=${KV:-fp8}              # the KV cache's format: fp8, or fp4 (four nodes)
@@ -68,9 +101,37 @@ ROWS=${ROWS:-8192}
 SP_PARTS=${SP_PARTS:-4}
 MASTER_PORT=${MASTER_PORT:-29551}
 GID_INDEX=${GID_INDEX:-}
+TOPOLOGY=${TOPOLOGY:-full}   # full: a switch or one link; ring4: four nodes cabled as a ring, NODES in ring order; auto: judged at each start
+RING_CHANNELS=${RING_CHANNELS:-4}  # ring4: NCCL channels (4: both PCIe halves of each link)
 READY_TIMEOUT=${READY_TIMEOUT:-900}
+MULTI=${MULTI:-0}           # 1 .. 4: up to that many conversations decoded together (CACHE=pool, DCP=2); 0: one at a time
+MULTI_WAIT=${MULTI_WAIT:-600}  # with MULTI: seconds a request may wait for room in the pool before 503 (0: no limit)
+MULTI_DECODE_SHARE=${MULTI_DECODE_SHARE:-30}  # with MULTI: the decode's % of the GPU while a prompt waits or is computed (0: prompts first, 100: decode first; POST /v1/schedule changes it)
+MULTI_SHORT_PROMPT=${MULTI_SHORT_PROMPT:-8192}  # with MULTI: a prompt with at most this many tokens to compute past the cache goes first, not held by the share (0: none; POST /v1/schedule changes it)
+MULTI_SHORT_PREEMPT=${MULTI_SHORT_PREEMPT:-0}  # with MULTI: 1: a longer prefill running gives way to a short prompt too, resuming afterwards (POST /v1/schedule changes it)
+ROCE_PROXY_CORES=${ROCE_PROXY_CORES:-a725}  # the cores the RoCE proxy threads poll on: a725 (GB10's 0 and 10), x925 (5 and 15), os (the scheduler's)
+MAX_TOKENS=${MAX_TOKENS:-}          # a reply's max_tokens when the request names none, as a count (empty: MAX_TOKENS_SHARE decides)
+MAX_TOKENS_SHARE=${MAX_TOKENS_SHARE:-70}  # the same as a percent of CONTEXT_LENGTH, 1 to 100
+THINKING_SHARE=${THINKING_SHARE:-90}   # the % of a reply's max_tokens (at most what the prompt leaves of CONTEXT_LENGTH) its thinking may use, the rest the answer's; there, at a line break, a closing sentence and </think> are written and the answer follows (0: no limit; a request's thinking_budget comes first). With THINKING_FOLD the thinking goes on past it (its budget max_tokens less the answer's part) and folds when it fills that % of the context
+THINKING_BUDGET=${THINKING_BUDGET:-0}  # a reply's thinking tokens at most, as a count (with folds a virtual length that may pass CONTEXT_LENGTH); 0: THINKING_SHARE decides. A request's thinking_budget comes first
+THINKING_NOTICE=${THINKING_NOTICE:-0} # every this many thinking tokens, at a line break, a line telling the model what it used and what is left goes into its thinking (0: none; from 256)
+THINKING_FOLD=${THINKING_FOLD:-off}   # a long thinking folded in the model's context (the client still gets all of it): off, recent (its start and last THINKING_FOLD_KEEP tokens kept), checkpoint (the model writes its conclusions so far, which replace the rest), branch (the model summarizes the reasoning since its last summary in an answer beside the reply, ended by its EOS; the summaries stack in the thinking)
+THINKING_FOLD_SHARE=${THINKING_FOLD_SHARE:-100}  # with THINKING_FOLD: the same as a percent of each reply's max_tokens (at least 1024 tokens; 100: no earlier than the limit); POST /v1/thinking changes it
+THINKING_FOLD_MAX=${THINKING_FOLD_MAX:-0}  # with THINKING_FOLD: a reply's folds at most (0: no limit); past them a thinking that fills its share again closes as at its budget's end; POST /v1/thinking changes it
+THINKING_FOLD_AT_BUDGET=${THINKING_FOLD_AT_BUDGET:-1}  # 1: near the end of the thinking budget the model organises its thoughts, the rewrite takes the thinking's place and the model goes on until the thinking fills its memory again; 0: the block just closes at the end; POST /v1/thinking changes it
+THINKING_FOLD_MARGIN=${THINKING_FOLD_MARGIN:-10}  # how far before the budget's end that starts, a percent of the budget (0 to 50); POST /v1/thinking changes it
+THINKING_FOLD_PROMPT=${THINKING_FOLD_PROMPT:-}  # what the model is asked there, percent-encoded (empty: the built-in text); the settings screen writes it; POST /v1/thinking changes it
+THINKING_CLOSE_PROMPT=${THINKING_CLOSE_PROMPT:-}  # what the model is asked at its own close when THINKING_FOLD_AT_CLOSE_SHARE is on, the same way
+THINKING_FOLD_KEEP=${THINKING_FOLD_KEEP:-0}  # with THINKING_FOLD=recent: the last thinking tokens kept (0: half the window)
+THINKING_FOLD_CAP_SHARE=${THINKING_FOLD_CAP_SHARE:-70}  # a summary's tokens at most (a fold's and the one at the close), as a percent of the thinking it organises, 10 to 100
+THINKING_FOLD_CAP=${THINKING_FOLD_CAP:-}  # the same as a count, 128 to 16384; when set it comes first
+THINKING_FOLD_AT_CLOSE_SHARE=${THINKING_FOLD_AT_CLOSE_SHARE:-0}  # a thinking the model closes, or the thinking budget ends, with at least this percent of the thinking's limit in the context (past the last fold) is summarized first, and the answer is written from the summary (0: never; with THINKING_FOLD=off too)
+# from the launcher (the environment, not CONF): the launch screen's choice of both, over CONF's (DESIGN-multi-start.md)
+MULTI=${LAUNCH_MULTI:-$MULTI}
+MULTI_WAIT=${LAUNCH_MULTI_WAIT:-$MULTI_WAIT}
 EXTRA_ENV=${EXTRA_ENV:-}
 LAUNCH_ENV=${LAUNCH_ENV:-}  # from the launcher (the environment, not CONF): the expert plan and the progress file
+CHECK_ITEMS=${CHECK_ITEMS:-}  # from the launcher: check also prints an "item" line an item a node (the panel's CHECK)
 # from the launcher too: the KV format the launch screen chose, and the context and store that format holds (over CONF's)
 KV=${LAUNCH_KV:-$KV}
 CONTEXT=${LAUNCH_CONTEXT:-$CONTEXT}
@@ -91,7 +152,8 @@ KEEPER_UP="$KEEP start ${LOG_LISTEN:+--listen $LOG_LISTEN} --keep $LOG_KEEP_MB"
 BIN=$PKG/bin/tensorfold-native
 # where a rank finds the release's library and NCCL: this directory and NCCL_LIB, or the image's own
 RUN_PKG=$PKG; RUN_NCCL=$NCCL_LIB
-[ "$RUNTIME" = docker ] && { RUN_PKG=/opt/glm53; RUN_NCCL=/opt/nccl/nvidia/nccl/lib/libnccl.so.2; }
+# (the image's: NCCL's AArch64 send fence, NVIDIA/nccl#2393, on a ring and on a switch alike)
+[ "$RUNTIME" = docker ] && { RUN_PKG=/opt/glm53; RUN_NCCL=/opt/nccl-fenced/libnccl.so.2; }
 CN=glm53-p$PORT-r           # RUNTIME=docker: rank R's container is $CN$R (the port tells lanes on one node apart)
 # 2 nodes (TP=2), 3 (TP=3), 4 (TP=4) or 8 (TP=8); the checkpoint keeps the experts cut for 8 either way
 # (TF_GLM53_STORED_WORLD=8: 2, 4 and 8 ranks join 8 / world of each expert's shares, 3 ranks hold 3 / 3 / 2 of them)
@@ -106,7 +168,66 @@ DCP=${DCP:-2}
 [[ $DCP =~ ^[1-8]$ ]] && [ $((WORLD % DCP)) -eq 0 ] || { echo "DCP=$DCP does not divide $WORLD nodes"; exit 2; }
 [ "$CACHE" = pool ] && [ "$DCP" -gt 2 ] && { echo "CACHE=pool takes DCP 1 or 2, not $DCP (CACHE=slots, or DCP=1)"; exit 2; }
 LAST=$((WORLD - 1))
-[ -n "${WEIGHTS:-}" ] && [ -n "${SOCKET_IFNAME:-}" ] && [ -n "${IB_HCA:-}" ] || { echo "set WEIGHTS, SOCKET_IFNAME and IB_HCA in $CONF"; exit 2; }
+# TOPOLOGY=auto: the cabling judged on this node before a start (tools/topology.py: every node read over ssh at once,
+# its RDMA devices and LLDP neighbours). Four GB10s cabled as a ring take ring4, NODES in ring order (rank 0 kept);
+# a switch or one link takes full. IB_HCA and SOCKET_IFNAME are then the judgment's (CONF's IB_HCA only picks a
+# switch's half). Nothing falls back: a cabling that is neither (a cable out, a lane down, a ring on one /24) is refused
+# with what to fix. check and up judge (the last judgment: PKG/launch/topology-pPORT.json, the control panel's); the
+# other commands take the order up started the ranks in (topology-pPORT.env), else NODES as CONF lists them.
+TOPO_SAVE=$PKG/launch/topology-p$PORT
+topo_judge() {
+  mkdir -p "$PKG/launch"
+  python3 "$PKG/tools/topology.py" --nodes "${NODES[*]}" --conf "$TOPOLOGY" --hca "${IB_HCA:-}" --runtime "$RUNTIME" \
+    --dcp "$DCP" --nccl-lib "$NCCL_LIB" --nccl-sha256 "${NCCL_SHA256:-}" --save "$TOPO_SAVE.json" "$@"
+}
+[ "${1:-}" = topology ] && { topo_judge ${2:+--json}; exit; }
+if [ "$TOPOLOGY" = auto ]; then
+  TOPO_MODE=; TOPO_NODES=(); TOPO_HCA=; TOPO_IFNAME=
+  case ${1:-} in
+    check|up)
+      # shellcheck disable=SC2034
+      eval "$(topo_judge --shell)"
+      [ -n "$TOPO_MODE" ] || { echo "TOPOLOGY=auto: no mode for this cabling (above). Fix it, or set TOPOLOGY=full or ring4 in $CONF"; exit 2; }
+      [ "$1" = up ] && declare -p TOPO_MODE TOPO_NODES TOPO_HCA TOPO_IFNAME > "$TOPO_SAVE.env" ;;
+    *)
+      # the order the ranks were started in, while it is NODES' own set (CONF not changed since)
+      # shellcheck source=/dev/null
+      [ -f "$TOPO_SAVE.env" ] && . "$TOPO_SAVE.env"
+      [ "$(printf '%s\n' "${TOPO_NODES[@]}" | sort)" = "$(printf '%s\n' "${NODES[@]}" | sort)" ] || { TOPO_MODE=full; TOPO_NODES=("${NODES[@]}"); }
+      # what these commands do not use, when nothing was judged yet
+      IB_HCA=${IB_HCA:-auto}; SOCKET_IFNAME=${SOCKET_IFNAME:-auto} ;;
+  esac
+  case ${1:-} in check|up) [ "${TOPO_NODES[*]}" = "${NODES[*]}" ] || echo "TOPOLOGY=auto: NODES in ring order ${TOPO_NODES[*]} (rank 0 kept)" ;; esac
+  TOPOLOGY=$TOPO_MODE; NODES=("${TOPO_NODES[@]}")
+  [ -n "$TOPO_HCA" ] && IB_HCA=$TOPO_HCA
+  [ -n "$TOPO_IFNAME" ] && SOCKET_IFNAME=$TOPO_IFNAME
+fi
+[ -n "${WEIGHTS:-}" ] && [ -n "${SOCKET_IFNAME:-}" ] && [ -n "${IB_HCA:-}" ] || { echo "set WEIGHTS, SOCKET_IFNAME and IB_HCA in $CONF (or run the control panel's node check: it writes SOCKET_IFNAME and IB_HCA to ${NODES_CONF:-${CONF%.conf}.nodes.conf})"; exit 2; }
+HCAS=${IB_HCA//,/ }
+# four nodes cabled as a ring without a switch (glm53/R3RT-102.md): NODES in ring order on the management network
+# (SOCKET_IFNAME), IB_HCA the four RDMA devices, one /24 a link a PCIe half; the engine relays what would reach the
+# opposite node. What the ring needs may not be overridden from EXTRA_ENV or LAUNCH_ENV.
+case $TOPOLOGY in
+  full) ;;
+  ring4)
+    [ "$WORLD" -eq 4 ] || { echo "TOPOLOGY=ring4 needs NODES of 4 nodes, in ring order"; exit 2; }
+    [ "$DCP" -le 2 ] || { echo "TOPOLOGY=ring4 takes DCP 1 or 2, not $DCP (a DCP group must be a cabled pair)"; exit 2; }
+    [[ $RING_CHANNELS =~ ^[1-8]$ ]] || { echo "RING_CHANNELS must be 1 .. 8"; exit 2; }
+    # the ring runs with NCCL's AArch64 send fence (NVIDIA/nccl#2393): the image's own build (check looks for it), or
+    # with RUNTIME=host NCCL_LIB on every node, whose sha256 check compares with NCCL_SHA256
+    [ "$RUNTIME" = docker ] || [[ ${NCCL_SHA256:-} =~ ^[0-9a-f]{64}$ ]] || { echo "TOPOLOGY=ring4 needs NCCL_SHA256 (the sha256 of the fenced libnccl.so in NCCL_LIB)"; exit 2; }
+    for v in $EXTRA_ENV $LAUNCH_ENV; do
+      case ${v%%=*} in
+        NCCL_ALGO|NCCL_PROTO|NCCL_IB_HCA|NCCL_IB_GID_INDEX|NCCL_IB_ADDR_FAMILY|NCCL_IB_ROCE_VERSION_NUM|NCCL_IB_MERGE_NICS|\
+        NCCL_IB_SUBNET_AWARE_ROUTING|NCCL_IB_SUBNET_PREFIX_LEN|NCCL_CROSS_NIC|NCCL_RUNTIME_CONNECT|NCCL_CUMEM_ENABLE|\
+        NCCL_PAT_ENABLE|NCCL_NVLS_ENABLE|NCCL_MIN_NCHANNELS|NCCL_MAX_NCHANNELS|NCCL_SOCKET_IFNAME|TF_NCCL_LIB|\
+        TF_ROCE_PROXY_LIB|B12X_ROCE_HCA|B12X_ROCE_GID_INDEX|TF_GLM53_TOPOLOGY|TF_GLM53_PREFILL_REDUCE|TF_GLM53_MULTI_AR2|\
+        TF_GLM53_DCP|TF_GLM53_WORLD|TF_GLM53_RANK|TF_GLM53_MASTER)
+          echo "TOPOLOGY=ring4: ${v%%=*} in EXTRA_ENV / LAUNCH_ENV would change what the ring needs"; exit 2 ;;
+      esac
+    done ;;
+  *) echo "TOPOLOGY must be full, ring4 or auto"; exit 2 ;;
+esac
 case $CACHE in pool|slots) ;; *) echo "CACHE must be pool or slots"; exit 2 ;; esac
 [ -z "$METRICS_LISTEN" ] || [[ $METRICS_LISTEN =~ ^(\[[0-9A-Fa-f:.]+\]|[^]:[]+):[0-9]{1,5}$ ]] || { echo "METRICS_LISTEN must be HOST:PORT (an IPv6 host in brackets)"; exit 2; }
 case $KV in fp8|fp4) ;; *) echo "KV must be fp8 or fp4"; exit 2 ;; esac
@@ -116,9 +237,50 @@ case $DRAFTER_KIND in
   none) ;;
   *) echo "DRAFTER_KIND must be mtp, dflash2 or none"; exit 2 ;;
 esac
+# MULTI: the conversations decoded together. It needs the pool and DCP 2, and DFlash2 its saves; it is not offered on 3
+# nodes or with DCP=1 for now. Set here, not as TF_GLM53_MULTI in EXTRA_ENV (these checks would not see it)
+[[ $MULTI =~ ^[0-4]$ ]] || { echo "MULTI must be 0 .. 4"; exit 2; }
+[[ $MULTI_WAIT =~ ^[0-9]+$ ]] || { echo "MULTI_WAIT must be whole seconds (0: no limit)"; exit 2; }
+[[ $MULTI_DECODE_SHARE =~ ^[0-9]+$ ]] && [ "$MULTI_DECODE_SHARE" -le 100 ] || { echo "MULTI_DECODE_SHARE must be 0 .. 100 (percent)"; exit 2; }
+[[ $MULTI_SHORT_PROMPT =~ ^[0-9]+$ ]] && [ "$MULTI_SHORT_PROMPT" -le 1048576 ] || { echo "MULTI_SHORT_PROMPT must be 0 .. 1048576 (tokens; 0: none)"; exit 2; }
+[[ $MULTI_SHORT_PREEMPT =~ ^[01]$ ]] || { echo "MULTI_SHORT_PREEMPT must be 0 or 1"; exit 2; }
+[[ $ROCE_PROXY_CORES =~ ^(a725|x925|os)$ ]] || { echo "ROCE_PROXY_CORES must be a725, x925 or os"; exit 2; }
+[ -z "$MAX_TOKENS" ] || [[ $MAX_TOKENS =~ ^[1-9][0-9]*$ ]] || { echo "MAX_TOKENS must be a token count (or empty: MAX_TOKENS_SHARE decides)"; exit 2; }
+[[ $MAX_TOKENS_SHARE =~ ^[1-9][0-9]*$ ]] && [ "$MAX_TOKENS_SHARE" -le 100 ] || { echo "MAX_TOKENS_SHARE must be a percent from 1 to 100"; exit 2; }
+REPLY_LIMIT=${MAX_TOKENS:-$(( CONTEXT * MAX_TOKENS_SHARE / 100 ))}   # the context length this start really has (LAUNCH_CONTEXT) decides
+[[ $THINKING_SHARE =~ ^[0-9]+$ ]] && [ "$THINKING_SHARE" -le 100 ] || { echo "THINKING_SHARE must be a percent from 0 to 100"; exit 2; }
+[[ $THINKING_NOTICE =~ ^[0-9]+$ ]] && { [ "$THINKING_NOTICE" -eq 0 ] || [ "$THINKING_NOTICE" -ge 256 ]; } || { echo "THINKING_NOTICE must be 0 or a token count from 256"; exit 2; }
+[[ $THINKING_BUDGET =~ ^[0-9]+$ ]] || { echo "THINKING_BUDGET must be a token count (0: THINKING_SHARE decides)"; exit 2; }
+[[ $THINKING_FOLD =~ ^(off|recent|checkpoint|branch)$ ]] || { echo "THINKING_FOLD must be off, recent, checkpoint or branch"; exit 2; }
+[[ $THINKING_FOLD_SHARE =~ ^[0-9]+$ ]] && [ "$THINKING_FOLD_SHARE" -le 100 ] || { echo "THINKING_FOLD_SHARE must be a percent up to 100 (100: no earlier than the limit)"; exit 2; }
+[[ $THINKING_FOLD_MAX =~ ^[0-9]+$ ]] && [ "$THINKING_FOLD_MAX" -le 1000 ] || { echo "THINKING_FOLD_MAX must be a count from 0 to 1000 (0: no limit)"; exit 2; }
+[[ $THINKING_FOLD_AT_BUDGET =~ ^[01]$ ]] || { echo "THINKING_FOLD_AT_BUDGET must be 0 or 1"; exit 2; }
+[[ $THINKING_FOLD_MARGIN =~ ^[0-9]+$ ]] && [ "$THINKING_FOLD_MARGIN" -le 50 ] || { echo "THINKING_FOLD_MARGIN must be a percent from 0 to 50"; exit 2; }
+[[ $THINKING_FOLD_PROMPT =~ ^[A-Za-z0-9%._~-]*$ ]] || { echo "THINKING_FOLD_PROMPT must be percent-encoded"; exit 2; }
+[[ $THINKING_CLOSE_PROMPT =~ ^[A-Za-z0-9%._~-]*$ ]] || { echo "THINKING_CLOSE_PROMPT must be percent-encoded"; exit 2; }
+[[ $THINKING_FOLD_KEEP =~ ^[0-9]+$ ]] || { echo "THINKING_FOLD_KEEP must be a token count (0: half the window)"; exit 2; }
+[ -z "$THINKING_FOLD_CAP" ] || { [[ $THINKING_FOLD_CAP =~ ^[0-9]+$ ]] && [ "$THINKING_FOLD_CAP" -ge 128 ] && [ "$THINKING_FOLD_CAP" -le 16384 ]; } || { echo "THINKING_FOLD_CAP must be a token count from 128 to 16384 (or empty: THINKING_FOLD_CAP_SHARE decides)"; exit 2; }
+[[ $THINKING_FOLD_CAP_SHARE =~ ^[0-9]+$ ]] && [ "$THINKING_FOLD_CAP_SHARE" -ge 10 ] && [ "$THINKING_FOLD_CAP_SHARE" -le 100 ] || { echo "THINKING_FOLD_CAP_SHARE must be a percent from 10 to 100"; exit 2; }
+[[ $THINKING_FOLD_AT_CLOSE_SHARE =~ ^[0-9]+$ ]] && [ "$THINKING_FOLD_AT_CLOSE_SHARE" -le 100 ] || { echo "THINKING_FOLD_AT_CLOSE_SHARE must be a percent, 0 to 100 (0: never)"; exit 2; }
+# (refused for the commands that start or check ranks; down, status, logs and the rest go on with a warning, so a lane
+# started with the old form can still be stopped)
+for v in $EXTRA_ENV $LAUNCH_ENV; do
+  case ${v%%=*} in TF_GLM53_MULTI)
+    echo "set MULTI=${v#*=} in $CONF instead of TF_GLM53_MULTI in EXTRA_ENV / LAUNCH_ENV"
+    case "${1:-}" in up|check|smoke|launcher) exit 2 ;; esac ;;
+  esac
+done
+if [ "$MULTI" -gt 0 ]; then
+  [ "$CACHE" = pool ] || { echo "MULTI=$MULTI needs CACHE=pool"; exit 2; }
+  [ "$WORLD" -ne 3 ] || { echo "MULTI=$MULTI is not offered on 3 nodes yet"; exit 2; }
+  [ "$DCP" -eq 2 ] || { echo "MULTI=$MULTI needs DCP=2 (DCP=$DCP is not offered with it yet)"; exit 2; }
+  [ "$DRAFTER_KIND" != dflash2 ] || [ "$DRAFT_SAVES" -gt 0 ] || { echo "MULTI=$MULTI with DFlash2 needs DRAFT_SAVES of 1 or more"; exit 2; }
+fi
 drafter_line() { case $DRAFTER_KIND in mtp) echo "mtp (the checkpoint's MTP layer), $MTP_K drafts a round" ;; dflash2) echo "dflash2 ($DRAFTER)" ;; *) echo none ;; esac; }
 
 on() { ssh -n -o ConnectTimeout=8 -o BatchMode=yes "$1" "$2"; }
+# CHECK_ITEMS: "  item<TAB>RANK<TAB>KEY<TAB>ok|warn|fail<TAB>VALUE<TAB>FIX", one a check item of a node
+item() { if [ -n "$CHECK_ITEMS" ]; then printf '  item\t%s\t%s\t%s\t%s\t%s\n' "$@"; fi; }
 loopback() { case $1 in 127.*|localhost|::1) return 0 ;; *) return 1 ;; esac; }
 # where this script reaches the server: loopback when it listens there or on every address, else HOST itself
 url() { case $HOST in 0.0.0.0|127.*|localhost) echo "http://127.0.0.1:$PORT" ;; ::|::1) echo "http://[::1]:$PORT" ;; *:*) echo "http://[$HOST]:$PORT" ;; *) echo "http://$HOST:$PORT" ;; esac; }
@@ -129,15 +291,67 @@ PIDS="for p in \$(pgrep -x tensorfold-nati); do e=\$(readlink /proc/\$p/exe); [ 
 alive() { local r; r=$(on "$1" "[ -n \"\$($PIDS)\" ] && echo 1 || echo 0" 2>/dev/null); case $r in 0|1) echo "$r" ;; *) echo U ;; esac; }
 # the GID index of the last RoCE v2 entry with an IPv4 address on the node's RDMA device
 GID_PROBE="d=/sys/class/infiniband/$IB_HCA/ports/1; g=; for i in \$(seq 0 15); do t=\$(cat \$d/gid_attrs/types/\$i 2>/dev/null); a=\$(cat \$d/gids/\$i 2>/dev/null); case \"\$t:\$a\" in 'RoCE v2:0000:0000:0000:0000:0000:ffff:'*) g=\$i ;; esac; done; echo \$g"
+# ring4: every one of the four devices has a RoCE v2 GID with an IPv4 address (the engine picks each device's own):
+# ok, else none-DEVICE
+[ "$TOPOLOGY" = ring4 ] && GID_PROBE="g=ok; for h in $HCAS; do d=/sys/class/infiniband/\$h/ports/1; f=; for i in \$(seq 0 15); do t=\$(cat \$d/gid_attrs/types/\$i 2>/dev/null); a=\$(cat \$d/gids/\$i 2>/dev/null); case \"\$t:\$a\" in 'RoCE v2:0000:0000:0000:0000:0000:ffff:'*) f=\$i ;; esac; done; [ -n \"\$f\" ] || g=none-\$h; done; echo \$g"
+# ring4: NODES[r] and NODES[r + 1] share exactly two /24s on the four devices' net devices (a link's two PCIe halves),
+# NODES[r] and NODES[r + 2] none, every device's net device up: ok, else what differs (NODES not in ring order, a cable
+# moved, an address missing, a lane down)
+ring_check() {
+  local r tmp
+  tmp=$(mktemp -d)
+  for r in 0 1 2 3; do
+    on "${NODES[$r]}" "for h in $HCAS; do n=\$(ls /sys/class/infiniband/\$h/device/net/ 2>/dev/null | head -1); [ -n \"\$n\" ] && ip -4 -o addr show dev \$n | awk -v h=\$h -v s=\$(cat /sys/class/net/\$n/operstate) '{print h, \$4, s}'; done" > "$tmp/$r" 2>/dev/null &
+  done
+  wait
+  python3 - "$tmp" <<'PY'
+import ipaddress, os, sys
+d = sys.argv[1]
+rows = [[l.split() for l in open(os.path.join(d, str(r))) if len(l.split()) == 3] for r in range(4)]
+bad = []
+dev = []  # per rank: device -> its network (one IPv4 address a device)
+for r, rs in enumerate(rows):
+    names = [n for n, _, _ in rs]
+    if len(rs) != 4 or len(set(names)) != 4:
+        bad.append(f"rank {r}: {len(rs)} addresses on {len(set(names))} devices (one each on four devices needed)")
+    # a lane down keeps its address: the engine has not been run on one lane of a link
+    for n, _, s in rs:
+        if s != "up":
+            bad.append(f"rank {r}: {n} is {s} (a lane of a link down)")
+    dev.append({n: ipaddress.ip_interface(a).network for n, a, _ in rs})
+for r in range(4):
+    s_ = (r + 1) % 4
+    pairs = [(a, b) for a in dev[r] for b in dev[s_] if dev[r][a] == dev[s_][b]]
+    if len(pairs) != 2 or len({a for a, _ in pairs}) != 2 or len({b for _, b in pairs}) != 2:
+        bad.append(f"ranks {r} and {s_}: {len(pairs)} device pairs in one subnet (a ring link has 2)")
+    elif not all({a[-2:], b[-2:]} == {"f0", "f1"} for a, b in pairs):
+        bad.append(f"ranks {r} and {s_}: the link joins {sorted(pairs)}, the same port number on both nodes (cross the cables: port 0 to port 1)")
+for r in range(2):
+    if set(dev[r].values()) & set(dev[r + 2].values()):
+        bad.append(f"ranks {r} and {r + 2} (opposite) share a subnet")
+print("; ".join(bad) if bad else "ok")
+PY
+  rm -rf "$tmp"
+}
 
 rank_env() {
   local r=$1 gid=$2
-  local e="TF_NCCL_LIB=$RUN_NCCL NCCL_SOCKET_IFNAME=$SOCKET_IFNAME NCCL_IB_HCA=$IB_HCA NCCL_IB_GID_INDEX=$gid"
-  e="$e NCCL_PROTO=Simple NCCL_MAX_NCHANNELS=2 NCCL_DEBUG=WARN TF_GLM53_RANK=$r TF_GLM53_WORLD=$WORLD"
+  local e="TF_NCCL_LIB=$RUN_NCCL NCCL_SOCKET_IFNAME=$SOCKET_IFNAME NCCL_IB_HCA=$IB_HCA"
+  if [ "$TOPOLOGY" = ring4 ]; then
+    # each device's own IPv4 GID; peers through the device in their subnet; rings only, connected when first used
+    # (never to the opposite node); every PCIe half used with 4 channels (glm53/R3RT-102.md section 5)
+    e="$e NCCL_IB_ADDR_FAMILY=AF_INET NCCL_IB_ROCE_VERSION_NUM=2 NCCL_IB_MERGE_NICS=0 NCCL_IB_SUBNET_AWARE_ROUTING=1"
+    e="$e NCCL_IB_SUBNET_PREFIX_LEN=24 NCCL_CROSS_NIC=1 NCCL_ALGO=Ring NCCL_PAT_ENABLE=0 NCCL_NVLS_ENABLE=0"
+    e="$e NCCL_RUNTIME_CONNECT=1 NCCL_CUMEM_ENABLE=1 NCCL_MIN_NCHANNELS=$RING_CHANNELS NCCL_MAX_NCHANNELS=$RING_CHANNELS"
+    e="$e NCCL_PROTO=Simple TF_GLM53_TOPOLOGY=ring4 B12X_ROCE_HCA=$IB_HCA B12X_ROCE_GID_INDEX=-1"
+  else
+    e="$e NCCL_IB_GID_INDEX=$gid NCCL_PROTO=Simple NCCL_MAX_NCHANNELS=2"
+  fi
+  e="$e NCCL_DEBUG=WARN TF_GLM53_RANK=$r TF_GLM53_WORLD=$WORLD"
   e="$e TF_GLM53_MASTER=${NODES[0]}:$MASTER_PORT TF_GLM53_STORED_WORLD=8 TF_GLM53_KV=$KV TF_GLM53_DCP=$DCP"
   e="$e TF_GLM53_PROMPT_SP=1 TF_GLM53_SP_DCP=1 TF_GLM53_SP_PARTS=$SP_PARTS TF_GLM53_COMM_PRIORITY=-1"
   e="$e TF_GLM53_PROMPT_ROWS=$ROWS TF_GLM53_DCP_PROMPT_ROWS=$ROWS TF_GLM53_PREFILL_REDUCE=ring TF_EXL3_PROMPT_EXPERTS=1"
-  e="$e TF_GLM53_ROCE=1 TF_GLM53_DECODE_BF16=1 B12X_ROCE_SPIN_LIMIT=300000000 TF_ROCE_PROXY_LIB=$RUN_PKG/lib/libroce_proxy.so"
+  e="$e TF_GLM53_ROCE=1 TF_GLM53_DECODE_BF16=1 B12X_ROCE_SPIN_LIMIT=300000000 TF_ROCE_PROXY_LIB=$RUN_PKG/lib/libroce_proxy.so TF_GLM53_ROCE_PROXY_CORES=$ROCE_PROXY_CORES"
   e="$e TF_GLM53_PREFIX=$CACHE TF_GLM53_PREFIX_STORE=$STORE TF_GLM53_TOPK_WORDS=1 TF_GLM53_TOPK_ANY=1 TF_GLM53_FUSE=1"
   e="$e TF_GLM53_PEER_Q=1 TF_GLM53_INDEX_FP8=0"
   case $DRAFTER_KIND in
@@ -145,6 +359,12 @@ rank_env() {
     dflash2) e="$e TF_GLM53_DFLASH=$DRAFTER"; [ "$CACHE" = pool ] && e="$e TF_GLM53_POOL_DRAFT_SAVES=$DRAFT_SAVES" ;;
   esac
   [ "$EXPERT_LIVE" = 1 ] && e="$e TF_GLM53_EXPERT_LIVE=1"
+  # the panel's entrance is the launcher: rank 0's own /panel sends the browser there, when the launcher runs and
+  # listens on every address (the engine's counts are read by the launcher from inside the node)
+  if [ "$r" -eq 0 ] && [ -n "$(launcher_pid)" ]; then
+    case ${LAUNCHER_HOST:-0.0.0.0} in 0.0.0.0|::) e="$e TF_PANEL_LAUNCHER_PORT=$(launcher_port)" ;; esac
+  fi
+  [ "$MULTI" -gt 0 ] && e="$e TF_GLM53_MULTI=$MULTI TF_GLM53_MULTI_WAIT_S=$MULTI_WAIT TF_GLM53_MULTI_DECODE_SHARE=$MULTI_DECODE_SHARE TF_GLM53_MULTI_SHORT_PROMPT=$MULTI_SHORT_PROMPT TF_GLM53_MULTI_SHORT_PREEMPT=$MULTI_SHORT_PREEMPT"
   # the Messages endpoint (Claude Code) puts a note where a request has an image: the model reads text only, and a
   # refused image would refuse every later turn of that conversation
   e="$e TF_MESSAGES_OMIT_IMAGES=1"
@@ -162,7 +382,9 @@ mount_dirs() {
   echo "$WEIGHTS"
   [ "$DRAFTER_KIND" = dflash2 ] && echo "$DRAFTER"
   [ -f "$PKG/expert-plan/banks.json" ] && python3 -c 'import json, os, sys
-for b in json.load(open(sys.argv[1]))["banks"]: print(os.path.expanduser(b["dir"]))' "$PKG/expert-plan/banks.json" 2>/dev/null
+for b in json.load(open(sys.argv[1]))["banks"]:
+    print(os.path.expanduser(b["dir"]))
+    if b.get("manifest"): print(os.path.dirname(os.path.expanduser(b["manifest"])))' "$PKG/expert-plan/banks.json" 2>/dev/null
 }
 
 # rank R's container: the GPU, the RDMA devices and the host network, the locked-memory and open-file limits NCCL and
@@ -171,7 +393,7 @@ for b in json.load(open(sys.argv[1]))["banks"]: print(os.path.expanduser(b["dir"
 docker_rank() {
   local r=$1 gid=$2 a=$3 m=$4 env="" kv d ro=""
   for kv in $(rank_env "$r" "$gid") $m; do env="$env -e $kv"; done
-  for d in $(mount_dirs); do ro="$ro $d"; done
+  for d in $(mount_dirs | sort -u); do ro="$ro $d"; done
   echo "docker rm -f $CN$r >/dev/null 2>&1; M=; for d in $ro; do [ -d \$d ] && M=\"\$M -v \$d:\$d:ro\"; done;" \
     "nohup docker run --rm --init --log-driver none --name $CN$r --user \$(id -u):\$(id -g) --gpus all --network host --ipc host" \
     "--device /dev/infiniband --cap-add IPC_LOCK --ulimit memlock=-1 --ulimit nofile=1048576:1048576 --oom-score-adj 1000" \
@@ -187,7 +409,7 @@ cmd_deploy() {
   local n tmp want; tmp=$(mktemp -d)
   want=$(cd "$PKG" && eval "$PKGSUM") || { echo "SHA256SUMS does not match here"; return 1; }
   for n in "${NODES[@]:1}"; do
-    ( on "$n" "mkdir -p $PKG" && rsync -a --exclude logs --exclude glm53.conf "$PKG/" "$n:$PKG/" \
+    ( on "$n" "mkdir -p $PKG" && rsync -a --exclude logs --exclude glm53.conf --exclude '*.nodes.conf' "$PKG/" "$n:$PKG/" \
       && [ "$(on "$n" "cd $PKG && $PKGSUM")" = "$want" ] \
       && echo "  ok $n" || { echo "  FAIL $n"; : > "$tmp/fail"; } ) &
   done; wait
@@ -195,25 +417,98 @@ cmd_deploy() {
   rm -rf "$tmp"; echo "deploy: every node matches SHA256SUMS ${want:0:12}"
 }
 
+# CHECK_ITEMS: node r's check items from cmd_check's probe $o of node $n (and its variables): ssh (from ssh's own
+# error when $o is empty: the host key, the key, no answer; nothing else then), gpu, memory, rendezvous, rdma, image
+# (RUNTIME=docker) or nccl (RUNTIME=host), weights, package; the versions are compared after every node answered
+# MiB as GiB with one decimal, for the memory lines
+gib1() { awk -v m="${1:-0}" 'BEGIN{printf "%.1f", m / 1024}'; }
+node_items() {
+  [ -n "$CHECK_ITEMS" ] || return 0
+  if [ -z "$o" ]; then
+    case $(cat "$tmp/e$r" 2>/dev/null) in
+      *"Host key verification failed"*|*"IDENTIFICATION HAS CHANGED"*) item "$r" ssh fail "host key not known" "add $n's host key to known_hosts" ;;
+      *"Permission denied"*) item "$r" ssh fail "the key is refused" "ssh-copy-id $n" ;;
+      *) item "$r" ssh fail "no answer" "ssh $n" ;;
+    esac
+    return 0
+  fi
+  item "$r" ssh ok "$n" ""
+  local run gn rdv lb py
+  run=$(echo "$o" | grep -o 'running=[0-9]*' | cut -d= -f2); gn=$(echo "$o" | grep -o 'gpuname=[^ ]*' | cut -d= -f2 | tr _ ' ')
+  if [[ $o == *"gpu=unreadable"* ]]; then item "$r" gpu fail "nvidia-smi fails" "nvidia-smi on $n"
+  elif [ "${run:-1}" != 0 ]; then item "$r" gpu fail "${run:-?} processes" "tf-glm53 down, or stop the GPU's other processes"
+  else item "$r" gpu ok "${gn:-GPU}" ""; fi
+  if [ "${fm:-0}" -ge "${nm:-0}" ]; then item "$r" memory ok "$(gib1 "${fm:-0}") GiB" ""; else item "$r" memory fail "$(gib1 "${fm:-0}") GiB < $(gib1 "$nm") GiB" "free memory on $n"; fi
+  rdv=$(echo "$o" | grep -o 'rdv=[^ ]*' | cut -d= -f2)
+  if [ -n "$rdv" ]; then item "$r" rendezvous ok "$SOCKET_IFNAME $rdv" ""
+  elif [ "$TOPOLOGY" = ring4 ]; then item "$r" rendezvous fail "no IPv4 on $SOCKET_IFNAME" "an IPv4 address on $SOCKET_IFNAME (SOCKET_IFNAME)"
+  else item "$r" rendezvous warn "no IPv4 on $SOCKET_IFNAME" "an IPv4 address on $SOCKET_IFNAME (SOCKET_IFNAME)"; fi
+  local down=""; [[ $o =~ \ down=([^ ]+) ]] && down=${BASH_REMATCH[1]}
+  if [[ $o == *"hca=0"* ]]; then item "$r" rdma fail "$IB_HCA missing" "IB_HCA"
+  elif [ "$TOPOLOGY" = ring4 ] && [ -n "$down" ]; then
+    local nd; nd=$(echo "$down" | tr ',' '\n' | grep -c .)
+    item "$r" rdma fail "$((4 - nd)) of 4 up, IPv4 GID" "the cable of ${down//,/, }"
+  elif ! [[ $o =~ gid=([0-9]|ok) ]]; then item "$r" rdma fail "$(echo "$o" | grep -o 'gid=[^ ]*')" "an IPv4 address on each RDMA device's interface (a RoCE v2 GID)"
+  elif [ "$TOPOLOGY" = ring4 ]; then item "$r" rdma ok "4 devices, IPv4 GIDs" ""
+  else item "$r" rdma ok "GID $g" ""; fi
+  # python3 on the host, for the log keeper (either runtime): with the image's row under Docker, the libraries' on the host
+  if [ "$RUNTIME" = docker ]; then
+    if [[ $o != *"py=1"* ]]; then item "$r" image fail "python3 missing on the host" "python3 (the log keeper)"
+    elif [[ $o == *"image=missing"* ]]; then item "$r" image fail "missing" "tf-glm53 pull"
+    elif [[ $o != *"image=$wimg"* ]]; then item "$r" image fail "differs from the head" "tf-glm53 pull"
+    elif [[ $o == *"inimage=bad"* ]]; then item "$r" image fail "--gpus all fails" "the NVIDIA container toolkit"
+    elif [[ $o == *"inimage=nonccl"* ]]; then item "$r" image fail "no $RUN_NCCL in this image" "an image with the fenced NCCL (docker/Dockerfile)"
+    elif [[ $o != *"inimage=$wrel"* ]]; then item "$r" image fail "not this release" "tf-glm53 pull"
+    else item "$r" image ok "$wimg" ""; fi
+  else
+    lb=""
+    [[ $o == *"nccl=missing"* ]] && lb="$lb NCCL"
+    [[ $o == *"cublas=0"* ]] && lb="$lb cuBLAS-13"
+    [[ $o == *"ibverbs=0"* ]] && lb="$lb libibverbs"
+    py=""; [[ $o != *"py=1"* ]] && { lb="$lb python3"; py=", python3 for the log keeper"; }
+    if [ -n "$lb" ]; then item "$r" nccl fail "missing:$lb" "the libraries of RUNTIME=host$py"
+    elif [ "$TOPOLOGY" = ring4 ] && [[ $o != *"ncclsha=$NCCL_SHA256"* ]]; then item "$r" nccl fail "$nc, not the fenced build" "NCCL_LIB and NCCL_SHA256: the fenced NCCL (RING.md)"
+    else item "$r" nccl ok "$nc" ""; fi
+  fi
+  if [ -n "$nohead" ]; then item "$r" weights fail "no weights at $WEIGHTS on the head" "WEIGHTS: the control panel's launch settings, or glm53.conf"
+  elif [[ $o == *"weights=$wsum"* ]]; then item "$r" weights ok "as the head" ""; else item "$r" weights fail "differs from the head" "the files at $WEIGHTS as on the head"; fi
+  if [[ $o == *"files=$sums"* ]]; then item "$r" package ok "SHA256SUMS" ""; else item "$r" package fail "differs" "tf-glm53 deploy"; fi
+  echo "$o" | grep -o 'ver=[^ ]*' | cut -d= -f2 > "$tmp/v$r"
+}
+
 cmd_check() {
   local tmp ng=0 n need; tmp=$(mktemp -d)
   local sums; sums=$(cd "$PKG" && eval "$PKGSUM") || { echo "  SHA256SUMS does not match here"; rm -rf "$tmp"; echo "check: NG"; return 1; }
-  # GiB a node must have available before the start (measured with CONTEXT and STORE 819,200: the ranks use about 108
-  # with MTP or no drafts, 111 with DFlash2), 4 to spare; each 100,000 positions of STORE fewer need 2.7 less
+  # GiB a node must have available before the start (measured with CONTEXT_LENGTH 819,200 and KV_SIZE 1,638,400: the
+  # ranks use about 108 with MTP or no drafts, 111 with DFlash2), 4 to spare; 2.7 less for each 100,000 positions
+  # KV_SIZE is below 1,638,400 (the KV's memory follows all its positions: a shorter CONTEXT_LENGTH with the same KV_SIZE
+  # needs no more)
   need=${NEED_GB:-112}; [ "$DRAFTER_KIND" = dflash2 ] && need=$((need + 3))
-  need=$(( need - (819200 - STORE) * 27 / 1000000 ))
-  # 2 and 3 nodes: NEED_GB as CONF gives it, for its CONTEXT and STORE
+  need=$(( need - (1638400 - CONTEXT - STORE) * 27 / 1000000 ))
+  # 2 and 3 nodes: NEED_GB as CONF gives it, for its CONTEXT_LENGTH and KV_SIZE
   case $WORLD in 2|3) need=${NEED_GB:-$need} ;; esac
+  # MULTI: 1 GiB more for the conversations decoded together (CONCURRENT.md §15.6, at idle; the panel's plan below counts
+  # its own, idle and load)
+  [ "$MULTI" -gt 0 ] && need=$((need + 1))
   # a start from the control panel: its plan's need (the experts, the KV it sized, the reserve) instead of the estimate
   [ -n "${LAUNCH_NEED_GB:-}" ] && need=$LAUNCH_NEED_GB
-  local wsum; wsum=$(cd "$WEIGHTS" 2>/dev/null && { find . -maxdepth 1 -type f -printf '%f %s\n' | LC_ALL=C sort | sha256sum; sha256sum config.json; } | sha256sum | cut -c1-64) || { echo "  no weights at $WEIGHTS"; rm -rf "$tmp"; echo "check: NG"; return 1; }
-  if [ "$DRAFTER_KIND" = mtp ] && ! grep -q '\.eh_proj\.weight"' "$WEIGHTS/model.safetensors.index.json" 2>/dev/null; then
+  # the plan's own need of each rank in MiB (LAUNCH_NEED_MIB, rank order): the nodes' work areas differ, and a node held
+  # to the largest one's need in whole GiB failed by less than a GiB (11-01); compared in MiB, without rounding. Without
+  # it every rank needs the GiB above
+  local -a needmb=(); read -r -a needmb <<< "${LAUNCH_NEED_MIB:-}"
+  # no weights on the head: NG, every other item checked all the same (a lane whose WEIGHTS is set later, in the
+  # control panel's launch settings, registers its nodes first)
+  local wsum nohead=""; wsum=$(cd "$WEIGHTS" 2>/dev/null && { find . -maxdepth 1 -type f -printf '%f %s\n' | LC_ALL=C sort | sha256sum; sha256sum config.json; } | sha256sum | cut -c1-64) \
+    || { echo "  no weights at $WEIGHTS on the head (WEIGHTS: the control panel's launch settings, or $CONF)"; wsum=""; nohead=1; ng=1; }
+  if [ -z "$nohead" ] && [ "$DRAFTER_KIND" = mtp ] && ! grep -q '\.eh_proj\.weight"' "$WEIGHTS/model.safetensors.index.json" 2>/dev/null; then
     echo "  the checkpoint at $WEIGHTS has no MTP layer (eh_proj): use one that has it, or set DRAFTER_KIND=none"; ng=1
   fi
   if [ "$DRAFTER_KIND" = dflash2 ] && [ ! -f "$DRAFTER/config.json" ]; then echo "  no DFlash2 model at $DRAFTER"; ng=1; fi
   # the pool holds the context and two blocks of 256 at least (the engine refuses fewer with PoolTooSmall)
-  if [ "$CACHE" = pool ] && [ "$STORE" -lt 512 ]; then echo "  STORE $STORE: the pool cache (CACHE=pool) needs at least 512 positions beyond CONTEXT"; ng=1; fi
+  if [ "$CACHE" = pool ] && [ "$STORE" -lt 512 ]; then echo "  KV_SIZE $((CONTEXT + STORE)): the pool cache (CACHE=pool) needs CONTEXT_LENGTH ($CONTEXT) + 512 at least"; ng=1; fi
   echo "  drafter: $(drafter_line)"
+  { [ -n "$REPLY_LIMIT" ] || [ "$THINKING_SHARE" != 0 ] || [ "$THINKING_BUDGET" != 0 ] || [ "$THINKING_NOTICE" != 0 ] || [ "$THINKING_FOLD" != off ] || [ "$THINKING_FOLD_AT_CLOSE_SHARE" != 0 ]; } && echo "  replies: max_tokens $REPLY_LIMIT when unasked, thinking $([ "$THINKING_BUDGET" != 0 ] && echo "up to $THINKING_BUDGET tokens" || { [ "$THINKING_SHARE" = 0 ] && echo "without a limit" || echo "up to $THINKING_SHARE% of max_tokens"; })$([ "$THINKING_NOTICE" != 0 ] && echo ", a notice every $THINKING_NOTICE thinking tokens")$([ "$THINKING_FOLD" != off ] && echo ", folded ($THINKING_FOLD) when it fills its share of the context$([ "$THINKING_FOLD_SHARE" != 0 ] && [ "$THINKING_FOLD_SHARE" != 100 ] && echo " or $THINKING_FOLD_SHARE% of max_tokens")$([ "$THINKING_FOLD_MAX" != 0 ] && echo ", $THINKING_FOLD_MAX times at most")")$([ "$THINKING_FOLD_AT_CLOSE_SHARE" != 0 ] && echo ", summarized at the close past $THINKING_FOLD_AT_CLOSE_SHARE% of the thinking's limit")"
+  [ "$MULTI" -gt 0 ] && echo "  concurrent: up to $MULTI conversations decoded together, a request waits for room $([ "$MULTI_WAIT" = 0 ] && echo "without a limit" || echo "up to $MULTI_WAIT s"), the decode $MULTI_DECODE_SHARE% of the GPU while a prompt waits, $([ "$MULTI_SHORT_PROMPT" = 0 ] && echo "no prompt goes first" || echo "a prompt of up to $MULTI_SHORT_PROMPT new tokens goes first$([ "$MULTI_SHORT_PREEMPT" = 1 ] && echo ", past a prefill running")")"
   [ -n "$DRAFTER" ] && [ "$DRAFTER_KIND" != dflash2 ] && echo "  (DRAFTER is set but not used: DRAFTER_KIND=$DRAFTER_KIND)"
   # RUNTIME=docker: the libraries are the image's. Each node needs IMAGE with the first node's layers, a GPU reachable
   # from a container (--gpus all: the NVIDIA container toolkit), and inside it this directory's release (its SHA256SUMS)
@@ -223,9 +518,10 @@ cmd_check() {
     wrel=$(sha256sum "$PKG/SHA256SUMS" | cut -c1-64)
     echo "  image: $IMAGE (layers ${wimg})"
     probe="echo -n ' image='\$(L=\$(docker image inspect -f '{{json .RootFS.Layers}}' $IMAGE 2>/dev/null) && echo \"\$L\" | sha256sum | cut -c1-16 || echo missing)
-        echo -n ' inimage='\$(docker run --rm --gpus all --entrypoint sh $IMAGE -c 'nvidia-smi -L >/dev/null 2>&1 && sha256sum /opt/glm53/SHA256SUMS | cut -c1-64' 2>/dev/null || echo bad)"
+        echo -n ' inimage='\$(docker run --rm --gpus all --entrypoint sh $IMAGE -c 'nvidia-smi -L >/dev/null 2>&1 || { echo bad; exit; }; [ -f $RUN_NCCL ] || { echo nonccl; exit; }; sha256sum /opt/glm53/SHA256SUMS | cut -c1-64' 2>/dev/null || echo bad)"
   else
     probe="echo -n ' nccl='\$([ -r $NCCL_LIB ] && basename \$(readlink -f $NCCL_LIB) || echo missing)
+        echo -n ' ncclsha='\$(sha256sum \$(readlink -f $NCCL_LIB) 2>/dev/null | cut -c1-64)
         echo -n ' cublas='\$(ldconfig -p | grep -c 'libcublasLt.so.13 ')
         echo -n ' ibverbs='\$(ldconfig -p | grep -c 'libibverbs.so.1 ')"
   fi
@@ -234,37 +530,77 @@ cmd_check() {
     ( o=$(on "$n" "cd $PKG 2>/dev/null && echo -n files=\$($PKGSUM 2>/dev/null) || echo -n files=bad
         echo -n ' weights='\$(cd $WEIGHTS 2>/dev/null && { find . -maxdepth 1 -type f -printf '%f %s\\n' | LC_ALL=C sort | sha256sum; sha256sum config.json; } | sha256sum | cut -c1-64)
         $probe
-        echo -n ' hca='\$([ -d /sys/class/infiniband/$IB_HCA ] && echo 1 || echo 0)
+        echo -n ' hca='\$(m=1; for h in $HCAS; do [ -d /sys/class/infiniband/\$h ] || m=0; done; echo \$m)
         echo -n ' py='\$(python3 -c 'print(1)' 2>/dev/null || echo 0)
         echo -n ' gid='\$($GID_PROBE)
         echo -n ' gpu='\$(nvidia-smi -L >/dev/null 2>&1 && echo ok || echo unreadable)
         echo -n ' running='\$( { $PIDS; nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null; } | grep -c '^ *[0-9]')
-        echo -n ' free_gb='\$(free -g | awk '/^Mem/{print \$7}')" 2>/dev/null)
-      [ -n "$GID_INDEX" ] && o=$(echo "$o" | sed "s/gid=[0-9]*/gid=$GID_INDEX/")
+        echo -n ' gpuname='\$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 | tr ' ' _)
+        echo -n ' rdv='\$(ip -4 -o addr show dev $SOCKET_IFNAME 2>/dev/null | awk '{print \$4; exit}')
+        echo -n ' down='\$(d=; for h in $HCAS; do n=\$(ls /sys/class/infiniband/\$h/device/net/ 2>/dev/null | head -1); [ \"\$(cat /sys/class/net/\$n/operstate 2>/dev/null)\" = up ] || d=\$d,\$h; done; echo \${d#,})
+        echo -n ' ver='\$(uname -r),\$(cat /sys/module/nvidia/version 2>/dev/null),\$(cat /sys/class/infiniband/${HCAS%% *}/fw_ver 2>/dev/null | tr ' ' _)
+        echo -n ' free_mb='\$(free -m | awk '/^Mem/{print \$7}')" 2>"$tmp/e$r")
+      [ -n "$GID_INDEX" ] && [ "$TOPOLOGY" = full ] && o=$(echo "$o" | sed "s/gid=[0-9]*/gid=$GID_INDEX/")
       bad=""
-      [[ $o == *"files=$sums"* ]] || bad="$bad files"
-      [[ $o == *"weights=$wsum"* ]] || bad="$bad weights"
+      [[ $o == *"files=$sums"* ]] || bad="$bad files(this-directory-differs-from-the-head:tf-glm53-deploy)"
+      if [ -n "$nohead" ]; then bad="$bad weights(none-at-$WEIGHTS-on-the-head)"; else [[ $o == *"weights=$wsum"* ]] || bad="$bad weights"; fi
       if [ "$RUNTIME" = docker ]; then
         if [[ $o == *"image=missing"* || -z $o ]]; then bad="$bad image-missing(tf-glm53 pull)"
         elif [[ $o != *"image=$wimg"* ]]; then bad="$bad image-differs-from-the-first-node(tf-glm53 pull)"; fi
         [[ $o == *"inimage=bad"* ]] && bad="$bad docker-GPU(--gpus all fails: the NVIDIA container toolkit)"
-        [[ $o == *"inimage=bad"* || $o == *"inimage=$wrel"* ]] || bad="$bad image-not-this-release"
+        [[ $o == *"inimage=nonccl"* ]] && bad="$bad image-without-$RUN_NCCL"
+        [[ $o == *"inimage=bad"* || $o == *"inimage=nonccl"* || $o == *"inimage=$wrel"* ]] || bad="$bad image-not-this-release"
       else
         [[ $o == *"nccl=missing"* || -z $o ]] && bad="$bad NCCL($NCCL_LIB)"
+        [ "$TOPOLOGY" = ring4 ] && [[ $o != *"ncclsha=$NCCL_SHA256"* ]] && bad="$bad NCCL-not-the-fenced-build(sha256 differs from NCCL_SHA256)"
         [[ $o == *"cublas=0"* || -z $o ]] && bad="$bad cuBLAS-13"
         [[ $o == *"ibverbs=0"* ]] && bad="$bad libibverbs"
       fi
       [[ $o == *"hca=0"* ]] && bad="$bad $IB_HCA"
       [[ $o == *"py=1"* ]] || bad="$bad python3(the log keeper)"
-      [[ $o =~ gid=[0-9] ]] || bad="$bad RoCE-v2-GID"
+      [[ $o =~ gid=([0-9]|ok) ]] || bad="$bad RoCE-v2-GID($(echo "$o" | grep -o 'gid=[^ ]*'))"
       [[ $o == *"gpu=unreadable"* ]] && bad="$bad GPU-unreadable(nvidia-smi fails)"
       [[ $o == *"running=0"* ]] || bad="$bad GPU-busy"
-      fg=$(echo "$o" | grep -o 'free_gb=[0-9]*' | cut -d= -f2); [ "${fg:-0}" -ge "$need" ] || bad="$bad memory(${fg:-?}<$need GiB)"
-      g=$(echo "$o" | grep -o 'gid=[0-9]*' | cut -d= -f2)
+      fm=$(echo "$o" | grep -o 'free_mb=[0-9]*' | cut -d= -f2); nm=${needmb[$r]:-$((need * 1024))}
+      [ "${fm:-0}" -ge "$nm" ] || bad="$bad memory($(gib1 "${fm:-0}")<$(gib1 "$nm") GiB)"
+      g=$(echo "$o" | grep -o 'gid=[^ ]*' | cut -d= -f2)
       nc=$(echo "$o" | grep -o 'nccl=[^ ]*' | cut -d= -f2); [ "$RUNTIME" = docker ] && nc="image ${wimg}"
-      if [ -n "$bad" ]; then echo "  rank $r $n: NG:$bad"; : > "$tmp/ng"; else echo "  rank $r $n: ok (GID $g, $fg GiB available, $nc)"; fi ) > "$tmp/$r" &
+      # ring4: the rendezvous goes over the management network, which must have an IPv4 address on every node
+      [ "$TOPOLOGY" = ring4 ] && [[ ! $o =~ \ rdv=[0-9] && -n $o ]] && bad="$bad rendezvous(no IPv4 on $SOCKET_IFNAME)"
+      # ring4: every RDMA device's interface up (a lane down: the engine has not been run on one lane of a link)
+      [ "$TOPOLOGY" = ring4 ] && [[ $o =~ \ down=([^ ]+) ]] && bad="$bad lane-down(${BASH_REMATCH[1]})"
+      if [ -n "$bad" ]; then echo "  rank $r $n: NG:$bad"; : > "$tmp/ng"; else echo "  rank $r $n: ok (GID $g, $(gib1 "${fm:-0}") GiB available, $nc)"; fi
+      node_items ) > "$tmp/$r" &
   done; wait
-  cat $(for r in $(seq 0 $LAST); do echo "$tmp/$r"; done); [ -f "$tmp/ng" ] && ng=1; rm -rf "$tmp"
+  cat $(for r in $(seq 0 $LAST); do echo "$tmp/$r"; done); [ -f "$tmp/ng" ] && ng=1
+  # every node's kernel, GPU driver and CX7 firmware against the head's (a warning: they need not match to run)
+  if [ -n "$CHECK_ITEMS" ] && [ -s "$tmp/v0" ]; then
+    local v v0; v0=$(cat "$tmp/v0")
+    for r in $(seq 0 $LAST); do
+      [ -f "$tmp/v$r" ] || continue
+      v=$(cat "$tmp/v$r")
+      if [ "$v" = "$v0" ]; then item "$r" versions ok "${v//,/ / }" ""; else item "$r" versions warn "${v//,/ / }" "as the head: ${v0//,/ / }"; fi
+    done
+  fi
+  rm -rf "$tmp"
+  if [ "$TOPOLOGY" = ring4 ]; then
+    local ring
+    ring=$(ring_check)
+    if [ "$ring" = ok ]; then echo "  ring: ok (NODES in ring order, two subnets a link, none to the opposite node)"
+    else echo "  ring: NG: $ring"; ng=1; fi
+  fi
+  # the banks on this node: what the panel offers (every node must have a width); 3 bits is always needed
+  python3 - "$PKG/expert-plan/banks.json" <<'BANKS' 2>/dev/null
+import glob, json, os, sys
+rc = 0
+for b in json.load(open(sys.argv[1]))["banks"]:
+    d = os.path.expanduser(b["dir"])
+    here = bool(glob.glob(os.path.join(d, "*.json")))
+    rc = 3 if b["bits"] == 3 and not here else rc
+    print(f"  bank {b['bits']} bit: " + (d if here else f"nothing at {d} on this node (put {b.get('repo', 'its files')} there, on every node, " + ("3 bit is always needed)" if b["bits"] == 3 else f"to use {b['bits']} bit)")))
+sys.exit(rc)
+BANKS
+  [ $? -eq 3 ] && ng=1
   # every address is the default: the API has no key, so everyone on the network can use it (a note, not a refusal)
   if ! loopback "$HOST"; then echo "  note: the API listens on $HOST:$PORT with no key: anyone on the network can use it (HOST=127.0.0.1 keeps it to this node)"; fi
   echo "  logs: in memory on each node (tf-glm53 logs R)${LOG_LISTEN:+, read-only at http://NODE:${LOG_LISTEN##*:}/streams for a monitor}"
@@ -339,11 +675,13 @@ cmd_verify_banks() {                               # every width's bank against 
   for r in "${!NODES[@]}"; do
     ( n=${NODES[$r]}; t0=$(date +%s)
       o=$(on "$n" "python3 -c \"\$(echo $code | base64 -d)\" $banks $*" 2>&1)
-      if [[ $o == *"bad=0"* ]]; then echo "  rank $r $n: ok, $(echo "$o" | grep -o 'files=[0-9]*')$(echo "$o" | grep -o ' absent=[0-9a-z ,]*' | sed 's/ absent=/, absent: /') ($(( $(date +%s) - t0 )) s)"
+      if [[ $o == *"bad=0"* && ( $o == *"files=0"* || ( $# -gt 0 && $o == *"absent="* ) ) ]]; then
+        echo "  rank $r $n: NG, no bank to check here:$(echo "$o" | grep -o ' absent=[0-9a-z ,]*' | sed 's/ absent=/ absent: /') (the directories: $banks)"; : > "$tmp/ng"
+      elif [[ $o == *"bad=0"* ]]; then echo "  rank $r $n: ok, $(echo "$o" | grep -o 'files=[0-9]*')$(echo "$o" | grep -o ' absent=[0-9a-z ,]*' | sed 's/ absent=/, absent: /') ($(( $(date +%s) - t0 )) s)"
       else echo "  rank $r $n: NG $(echo "$o" | tr '\n' ' ' | cut -c1-300)"; : > "$tmp/ng"; fi ) > "$tmp/$r" &
   done; wait
   cat "$tmp"/[0-9]*; [ -f "$tmp/ng" ] && ng=1; rm -rf "$tmp"
-  [ $ng -eq 0 ] && echo "verify-banks: ok" || echo "verify-banks: NG (copy the bank files named above to that node again)"
+  [ $ng -eq 0 ] && echo "verify-banks: ok" || echo "verify-banks: NG (put the bank files named above on that node)"
   return $ng
 }
 
@@ -394,7 +732,8 @@ cmd_up() {
   [ "$WORLD" -eq 3 ] && { echo "3 nodes (TP=3): this engine does not split GLM-5.3 over three ranks yet: not started"; return 1; }
   cmd_check || { echo "not started"; return 1; }
   local r n gid args bad
-  args="--host $HOST --port $PORT --name $NAME --context $CONTEXT"
+  # rank 0's reply settings (the others refuse requests)
+  args="--host $HOST --port $PORT --name $NAME --context $CONTEXT --max-tokens $REPLY_LIMIT --thinking-share $THINKING_SHARE --thinking-budget $THINKING_BUDGET --thinking-notice $THINKING_NOTICE --thinking-fold $THINKING_FOLD --thinking-fold-share $THINKING_FOLD_SHARE --thinking-fold-max $THINKING_FOLD_MAX --thinking-fold-at-budget $THINKING_FOLD_AT_BUDGET --thinking-fold-margin $THINKING_FOLD_MARGIN${THINKING_FOLD_PROMPT:+ --thinking-fold-prompt $THINKING_FOLD_PROMPT}${THINKING_CLOSE_PROMPT:+ --thinking-close-prompt $THINKING_CLOSE_PROMPT} --thinking-fold-keep $THINKING_FOLD_KEEP --thinking-fold-at-close-share $THINKING_FOLD_AT_CLOSE_SHARE --thinking-fold-cap-share $([ -n "$THINKING_FOLD_CAP" ] && echo 0 || echo "$THINKING_FOLD_CAP_SHARE")${THINKING_FOLD_CAP:+ --thinking-fold-cap $THINKING_FOLD_CAP}"
   # each node's keeper (renewed when the settings changed), its rank's log opened anew (the start before's lines to
   # rankR.prev now, so the wait below never reads the last start's "serving" line as this one's)
   bad=$(for r in $(seq 0 $LAST); do s=rank$r; [ "$r" -eq 0 ] && s="rank0 watch"
@@ -416,7 +755,10 @@ cmd_up() {
         || { fail_up "rank $r's container did not start on $n"; return 1; }
       continue
     fi
-    on "$n" "cd $PKG || exit 1; echo 1000 > /proc/self/oom_score_adj || exit 1; export $(rank_env "$r" "$gid"); ${m}nohup ./bin/tensorfold-native serve $WEIGHTS $a < /dev/null 2>&1 | nohup $KEEP send rank$r > /dev/null 2>&1 &"
+    # NSYS_RANK0 (profiling, CONF): rank 0's server started by this nsys command line; its process is still
+    # ./bin/tensorfold-native (nsys starts it), so PIDS finds it and down stops it, and nsys writes its report after
+    local pre=""; [ "$r" -eq 0 ] && [ -n "${NSYS_RANK0:-}" ] && pre="$NSYS_RANK0 "
+    on "$n" "cd $PKG || exit 1; echo 1000 > /proc/self/oom_score_adj || exit 1; export $(rank_env "$r" "$gid"); ${m}nohup ${pre}./bin/tensorfold-native serve $WEIGHTS $a < /dev/null 2>&1 | nohup $KEEP send rank$r > /dev/null 2>&1 &"
   done
   drafter_line | $KEEP send drafter
   ( nohup bash "$SELF" -c "$CONF" watch < /dev/null 2>&1 | nohup $KEEP send watch > /dev/null 2>&1 & )
@@ -454,7 +796,8 @@ cmd_status() {
   fi
 }
 
-# the slot cache's store as the last start allocated it (rank 0's log); 0 with STORE above 0: a rank lacked the memory.
+# the slot cache's store as the last start allocated it (rank 0's log); 0 with a store (KV_SIZE − CONTEXT_LENGTH) above 0:
+# a rank lacked the memory.
 # With the pool (TF_GLM53_PREFIX=pool) its own line: the positions every conversation shares, in blocks of 256
 store_line() {
   local s p
@@ -465,8 +808,8 @@ store_line() {
     return
   fi
   s=$($KEEP cat rank0 2>/dev/null | grep -m1 -o 'slot cache: store of [0-9]* positions' | grep -o '[0-9][0-9]*')
-  if [ -z "$s" ]; then echo "slot cache: not reported in rank 0's log"
-  elif [ "$s" -eq 0 ] && [ "$STORE" -gt 0 ]; then echo "slot cache: WARNING: no store (a rank could not allocate $STORE positions); a request resumes only the conversation just before it: lower STORE or free memory, then down and up"
+  if [ -z "$s" ]; then echo "conversation cache: not reported in rank 0's log"
+  elif [ "$s" -eq 0 ] && [ "$STORE" -gt 0 ]; then echo "slot cache: WARNING: no store (a rank could not allocate $STORE positions); a request resumes only the conversation just before it: lower KV_SIZE or free memory, then down and start again"
   else echo "slot cache: $s positions kept for earlier conversations"; fi
 }
 
@@ -488,10 +831,72 @@ cmd_launcher() {                                   # start (default), stop or st
       ( TF_LOGKEEP="$KEEP" PYTHONUNBUFFERED=1 nohup python3 "$PKG/launcher/tf_launcher.py" -c "$CONF" < /dev/null 2>&1 | nohup $KEEP send launcher > /dev/null 2>&1 & )
       sleep 3; p=$(pgrep -f "$pat")
       [ -n "$p" ] && echo "launcher: started (pid $p): $($KEEP cat launcher | grep -m1 -o 'http://[^ ]*/panel')" || { echo "launcher: did not start:"; $KEEP cat launcher | tail -5; return 1; } ;;
-    stop) [ -z "$p" ] && { echo "launcher: not running"; return 0; }; kill -TERM $p; echo "launcher: stopped (pid $p)" ;;
+    stop) [ -z "$p" ] && { echo "launcher: not running"; return 0; }; kill -TERM $p; echo "launcher: stopped (pid $p; the engine and each node's log keeper stay on: tf-glm53 down, tf-glm53 logs)" ;;
     status) [ -n "$p" ] && echo "launcher: running (pid $p): $($KEEP cat launcher 2>/dev/null | grep -m1 -o 'http://[^ ]*/panel')" || echo "launcher: not running" ;;
     *) echo "launcher [start|stop|status]"; return 2 ;;
   esac
+}
+
+# the launcher of this lane: its pid (empty when it does not run), its port, the address this node reaches it at, and
+# a call to it (METHOD PATH [BODY]: the answer, then the HTTP code on a line of its own)
+launcher_pid() { pgrep -f "^python3 $PKG/launcher/tf_launcher.py -c $CONF\$"; }
+launcher_port() { echo "${LAUNCHER_PORT:-$((PORT + 10))}"; }
+launcher_url() {
+  case ${LAUNCHER_HOST:-0.0.0.0} in
+    0.0.0.0|::|127.*|localhost) echo "http://127.0.0.1:$(launcher_port)" ;;
+    *:*) echo "http://[$LAUNCHER_HOST]:$(launcher_port)" ;;
+    *) echo "http://$LAUNCHER_HOST:$(launcher_port)" ;;
+  esac
+}
+lapi() { curl -s -m 30 -X "$1" -H 'Content-Type: application/json' ${3:+--data-binary "$3"} -w '\n%{http_code}' "$(launcher_url)$2"; }
+lstatus() { lapi GET /v1/launch/status | sed '$d' | python3 -c 'import json, sys; d = json.load(sys.stdin); print(d.get("state", "") or "-", d.get("phase", "") or "-", (d.get("error") or "").replace("\n", " ")[:300])' 2>/dev/null; }
+
+cmd_panel_up() {                                   # up: the control panel first; the engine is started from it
+  cmd_launcher start || { echo "the panel did not start (tf-glm53 logs launcher); the engine starts without it with tf-glm53 engine-up"; return 1; }
+  local st; read -r st _ < <(lstatus)
+  if [ "$st" = running ]; then echo "  the engine runs: the panel shows it"; else echo "  start the engine from the panel (or: tf-glm53 start)"; fi
+}
+
+cmd_start() {                                      # the engine through the launcher, as the panel's start does
+  local plan body out code st ph err last="" t0 el
+  cmd_launcher start > /dev/null || { echo "start: the launcher did not start (tf-glm53 logs launcher); without the panel: tf-glm53 engine-up"; return 1; }
+  # the last start's plan (the launcher writes each start's into launch/); none yet: the launcher's default, every expert at 3 bits
+  plan=$(ls -t "$PKG"/launch/plan-*.bits 2>/dev/null | head -1)
+  body=$(python3 -c 'import base64, json, sys; d = {"bits": base64.b64encode(open(sys.argv[1], "rb").read()).decode()} if sys.argv[1] else {}; sys.argv[2] and d.update(drafter=sys.argv[2]); print(json.dumps(d))' "$plan" "$DRAFTER_KIND_ARG")
+  out=$(lapi POST /v1/launch/start "$body"); code=$(echo "$out" | tail -1)
+  case $code in 2??) ;; *) echo "start: the launcher refused it ($code): $(echo "$out" | sed '$d' | cut -c1-300)"; return 1 ;; esac
+  echo "start: through the launcher, with $([ -n "$plan" ] && echo "the plan of $(basename "$plan" .bits | sed 's/^plan-//')" || echo "every expert at 3 bits")${DRAFTER_KIND_ARG:+ and the drafter $DRAFTER_KIND_ARG}"
+  t0=$(date +%s)
+  while true; do
+    sleep 10; el=$(( $(date +%s) - t0 ))
+    read -r st ph err < <(lstatus)
+    [ "$st $ph" != "$last" ] && { echo "  ${el}s: $st$([ "$ph" != - ] && echo " ($ph)")"; last="$st $ph"; }
+    case $st in
+      running) [ "$ph" = - ] && { echo "start: running (the start's output: tf-glm53 logs launcher)"; return 0; } ;;
+      failed) echo "start: failed: $err"; return 1 ;;
+      stopped) echo "start: stopped before it ran"; return 1 ;;
+    esac
+    [ $el -gt $((READY_TIMEOUT + 600)) ] && { echo "start: still $st after ${el}s (tf-glm53 logs launcher)"; return 1; }
+  done
+}
+
+cmd_stop() {                                       # down: through the launcher when it runs, then every rank checked
+  local out code st t0
+  if [ -n "$(launcher_pid)" ]; then
+    out=$(lapi POST /v1/launch/stop '{}'); code=$(echo "$out" | tail -1)
+    case $code in
+      2??) t0=$(date +%s)
+        while true; do
+          sleep 5; read -r st _ < <(lstatus)
+          case $st in stopped) echo "down: stopped through the launcher"; break ;; failed) echo "down: the launcher's stop failed (tf-glm53 logs launcher)"; break ;; esac
+          [ $(( $(date +%s) - t0 )) -gt 180 ] && { echo "down: the launcher still says $st after 180 s"; break; }
+        done ;;
+      409) ;;  # already stopped: the ranks are checked below all the same
+      *) echo "down: the launcher did not take the stop ($code): $(echo "$out" | sed '$d' | cut -c1-200)" ;;
+    esac
+  fi
+  # every rank stopped directly too: nothing is left running, whatever the launcher knew of it
+  cmd_down
 }
 
 cmd_pull() {                                       # RUNTIME=docker: IMAGE on every node, then each node's layers
@@ -527,13 +932,19 @@ case "${1:-}" in
   check)  cmd_check ;;
   verify) cmd_verify ;;
   verify-banks) shift; cmd_verify_banks "$@" ;;
-  up)     cmd_up ;;
-  down)   cmd_down ;;
+  up)     cmd_panel_up ;;
+  start)  cmd_start ;;
+  down)   cmd_stop ;;
+  engine-up)
+    # by hand, no plan: every expert at 3 bits, through the launcher, which writes the plan and comes back here with it
+    if [ -z "$LAUNCH_ENV" ] && [ -z "${TF_GLM53_CHECKPOINT_WIDTHS:-}" ]; then cmd_start; else cmd_up; fi ;;
+  engine-down) cmd_down ;;
   status) cmd_status ;;
   smoke)  cmd_smoke ;;
   watch)  cmd_watch ;;
   logs)   r=${2:-0}; case $r in watch*|launcher*) eval "$KEEP follow $r" ;; *) on "${NODES[${r%%.*}]}" "$KEEP follow rank$r" ;; esac ;;
   launcher) cmd_launcher "${2:-start}" ;;
   pull)   cmd_pull ;;
+  quickstart) shift; exec python3 "$PKG/tools/quickstart.py" --pkg "$PKG" --conf "$CONF" --launcher-port "$(launcher_port)" --api-port "$PORT" "$@" ;;
   *)      usage; exit 1 ;;
 esac

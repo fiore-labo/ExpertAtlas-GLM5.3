@@ -142,6 +142,9 @@ pub fn build(b: *std.Build) void {
     // the GLM-5.3 KV pool's host-side planner alone (glm53/POOL.md)
     const pool = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm_moe_dsa/pool/pool_test.zig"), .target = b.graph.host, .optimize = .debug }) });
     b.step("test-glm53-pool", "The GLM-5.3 KV pool's host planner: worked examples, Python reference traces, invariants").dependOn(&b.addRunArtifact(pool).step);
+    // TF_GLM53_MULTI's pace alone: the decode's share of the GPU while a prompt waits or is computed
+    const pace = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm_moe_dsa/pace.zig"), .target = b.graph.host, .optimize = .debug }) });
+    b.step("test-glm53-pace", "The GLM-5.3 concurrent server's pace: the decode's share of the GPU beside a prefill").dependOn(&b.addRunArtifact(pace).step);
     const pool_trace = b.addExecutable(.{ .name = "tf-glm53-pool-trace", .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm_moe_dsa/pool/trace.zig"), .target = b.graph.host, .optimize = .debug }) });
     b.step("pool-trace", "tf-glm53-pool-trace: the KV pool planner over a JSON-lines trace (compared with glm53/tools/pool/pool_ref.py)").dependOn(&b.addInstallArtifact(pool_trace, .{}).step);
 }

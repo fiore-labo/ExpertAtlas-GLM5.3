@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! Chat messages as the template sees them: leading instructions merged, text parts joined, call arguments as objects.
 const std = @import("std");
 const json = @import("json.zig");
@@ -22,6 +23,24 @@ fn withField(cx: *Cx, o: *const json.Object, key: []const u8, value: Value) !*js
 }
 
 /// ``normalize_messages`` (text only): leading system and developer text merged, later ones as ``late_system``; a template that needs a user query gains one user turn after a trailing tool run.
+/// The ``reasoning_details`` format of a folded reply's reasoning as the model's context held it.
+pub const fold_format = "expertatlas-fold-1";
+
+/// The reasoning a folded reply's ``reasoning_details`` carries (a ``reasoning.text`` entry in ``fold_format``), if any.
+fn foldedReasoning(message: Value) ?[]const u8 {
+    const details = message.get("reasoning_details") orelse return null;
+    if (details != .array) return null;
+    for (details.array) |d| {
+        if (d != .object) continue;
+        const kind = d.get("type") orelse continue;
+        const format = d.get("format") orelse continue;
+        const text = d.get("text") orelse continue;
+        if (kind != .string or format != .string or text != .string) continue;
+        if (std.mem.eql(u8, kind.string, "reasoning.text") and std.mem.eql(u8, format.string, fold_format)) return text.string;
+    }
+    return null;
+}
+
 pub fn normalize(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_after_tool: bool) errors.Refused!Value {
     const list = messages orelse return cx.refuse("messages must be a non-empty list");
     if (list != .array or list.array.len == 0) return cx.refuse("messages must be a non-empty list");
@@ -50,6 +69,11 @@ pub fn normalize(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_
             return cx.refuse("message content must be text or an array of text parts");
         }
         const r = role.?.string;
+        // a reply this server folded comes back with its reasoning as the model's context held it (reasoning_details
+        // in fold_format), in place of the whole reasoning the client was shown
+        if (std.mem.eql(u8, r, "assistant")) if (foldedReasoning(message)) |t| {
+            item = try withField(cx, item, "reasoning_content", .{ .string = t });
+        };
         if (std.mem.eql(u8, r, "system") or std.mem.eql(u8, r, "developer")) {
             if (out.items.len == 0) {
                 try instructions.append(cx.a, item);
@@ -167,6 +191,18 @@ test "a conversation with a user query stays byte-identical under the rule" {
     const out = try normalize(&cx, messages, "system", true);
     // byte-identical: the same messages, in order, nothing gained
     try std.testing.expectEqualStrings(try json.stringify(cx.a, messages, .{ .ascii = false }), try json.stringify(cx.a, out, .{ .ascii = false }));
+}
+
+test "a folded reply sent back renders its reasoning as the context held it; other details are left alone" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    const messages = (try json.parse(cx.a,
+        \\[{"role": "user", "content": "q"}, {"role": "assistant", "content": "a", "reasoning_content": "the whole reasoning", "reasoning_details": [{"type": "reasoning.text", "text": "head, checkpoint, after", "format": "expertatlas-fold-1"}]}, {"role": "user", "content": "q2"}, {"role": "assistant", "content": "b", "reasoning_content": "own", "reasoning_details": [{"type": "reasoning.text", "text": "elsewhere", "format": "other"}]}, {"role": "user", "content": "q3"}]
+    )).ok;
+    const out = try normalize(&cx, messages, "system", true);
+    try std.testing.expectEqualStrings("head, checkpoint, after", out.array[1].get("reasoning_content").?.string);
+    try std.testing.expectEqualStrings("own", out.array[3].get("reasoning_content").?.string);
 }
 
 test "a conversation with no user query gains one placeholder turn after its last tool run" {

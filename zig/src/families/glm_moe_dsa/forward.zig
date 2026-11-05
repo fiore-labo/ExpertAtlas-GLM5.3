@@ -21,6 +21,14 @@ pub const MAX_LIN_ROWS = 128; // the row-invariant linear's widest call / 行に
 /// Rows up to this many take the decode class of kernels, prompt chunks as well as decode windows.
 /// この行数までは prompt チャンクでも decode ウィンドウでも decode 用のカーネルを使う。
 const small_rows = 16;
+
+/// The bytes a rank sends in the split q_a / kv_a front (Ctx.split) for a window of up to small_rows rows.
+/// q_a / kv_a の分担 (Ctx.split) で、small_rows 行までのウィンドウに 1 ランクが送るバイト数。
+pub fn splitCap(q_n: u32, kv_n: u32, world: u32) usize {
+    const qnb = q_n / 128;
+    const knb = (kv_n + 127) / 128;
+    return small_rows * ((qnb / world) * 128 + ((knb + world - 1) / world) * 128) * 2;
+}
 const sel_rows = 128; // the indexer scores rows in blocks of this many / indexer はこの行数ずつ点数を付ける
 // Glue.topkWordsAny16 from this many slots a row (shorter rows: topkWords, measured faster at 20,000)
 // Glue.topkWordsAny16 を使う行のスロット数の下限 (それより短い行は topkWords。20,000 ではそちらが速かった)
@@ -64,6 +72,7 @@ pub const Glue = struct {
     add_f32: cuda.Function,
     topk_keys: cuda.Function,
     row_argmax: cuda.Function,
+    row_lse: cuda.Function,
     pick_fn: cuda.Function,
     set_i32: cuda.Function,
     topk_select: cuda.Function,
@@ -92,10 +101,11 @@ pub const Glue = struct {
     slot_fold: cuda.Function,
     slot_copy: cuda.Function,
     slot_zero: cuda.Function,
+    split_unpack: cuda.Function,
 
     pub fn load(d: *const cuda.Driver) !Glue {
         const m = try cuda.Module.load(d, cuda.kernels.glm53_glue);
-        return .{ .module = m, .gather_rows16 = try m.function("tf_glm53_gather_rows16"), .copy3_16 = try m.function("tf_glm53_copy3_16"), .copy3_32 = try m.function("tf_glm53_copy3_32"), .scatter3_16 = try m.function("tf_glm53_scatter3_16"), .scatter3_32 = try m.function("tf_glm53_scatter3_32"), .add_f32 = try m.function("tf_glm53_add_f32"), .topk_keys = try m.function("tf_glm53_topk_keys"), .row_argmax = try m.function("tf_glm53_row_argmax"), .pick_fn = try m.function("tf_glm53_pick"), .set_i32 = try m.function("tf_glm53_set_i32"), .topk_select = try m.function("tf_glm53_topk_keys_select"), .draft_rope = try m.function("tf_glm53_draft_rope"), .draft_invfreq = try m.function("tf_glm53_draft_invfreq"), .draft_ring = try m.function("tf_glm53_draft_ring"), .draft_advance = try m.function("tf_glm53_draft_advance"), .rank_sum_bf16 = try m.function("tf_glm53_rank_sum_bf16"), .draft_topk = try m.function("tf_glm53_draft_topk"), .topk_values = try m.function("tf_glm53_topk_values"), .topk_words = try m.function("tf_glm53_topk_words"), .topk_words_any = try m.function("tf_glm53_topk_words_any"), .dcp_select = try m.function("tf_glm53_dcp_select"), .dcp_own = try m.function("tf_glm53_dcp_own"), .round_bf16 = try m.function("tf_glm53_round_bf16"), .to_bf16 = try m.function("tf_glm53_to_bf16"), .add_to_bf16 = try m.function("tf_glm53_add_to_bf16"), .radd_to_bf16 = try m.function("tf_glm53_radd_to_bf16"), .topk_words_any16 = try m.function("tf_glm53_topk_words_any16"), .from_bf16 = try m.function("tf_glm53_from_bf16"), .tk_hist = try m.function("tf_glm53_tk_hist"), .tk_digit = try m.function("tf_glm53_tk_digit"), .tk_split = try m.function("tf_glm53_tk_split"), .tk_finish = try m.function("tf_glm53_tk_finish"), .slot_lanes = try m.function("tf_glm53_slot_lanes"), .slot_fold = try m.function("tf_glm53_slot_fold"), .slot_copy = try m.function("tf_glm53_slot_copy"), .slot_zero = try m.function("tf_glm53_slot_zero") };
+        return .{ .module = m, .gather_rows16 = try m.function("tf_glm53_gather_rows16"), .copy3_16 = try m.function("tf_glm53_copy3_16"), .copy3_32 = try m.function("tf_glm53_copy3_32"), .scatter3_16 = try m.function("tf_glm53_scatter3_16"), .scatter3_32 = try m.function("tf_glm53_scatter3_32"), .add_f32 = try m.function("tf_glm53_add_f32"), .topk_keys = try m.function("tf_glm53_topk_keys"), .row_argmax = try m.function("tf_glm53_row_argmax"), .row_lse = try m.function("tf_glm53_row_lse"), .pick_fn = try m.function("tf_glm53_pick"), .set_i32 = try m.function("tf_glm53_set_i32"), .topk_select = try m.function("tf_glm53_topk_keys_select"), .draft_rope = try m.function("tf_glm53_draft_rope"), .draft_invfreq = try m.function("tf_glm53_draft_invfreq"), .draft_ring = try m.function("tf_glm53_draft_ring"), .draft_advance = try m.function("tf_glm53_draft_advance"), .rank_sum_bf16 = try m.function("tf_glm53_rank_sum_bf16"), .draft_topk = try m.function("tf_glm53_draft_topk"), .topk_values = try m.function("tf_glm53_topk_values"), .topk_words = try m.function("tf_glm53_topk_words"), .topk_words_any = try m.function("tf_glm53_topk_words_any"), .dcp_select = try m.function("tf_glm53_dcp_select"), .dcp_own = try m.function("tf_glm53_dcp_own"), .round_bf16 = try m.function("tf_glm53_round_bf16"), .to_bf16 = try m.function("tf_glm53_to_bf16"), .add_to_bf16 = try m.function("tf_glm53_add_to_bf16"), .radd_to_bf16 = try m.function("tf_glm53_radd_to_bf16"), .topk_words_any16 = try m.function("tf_glm53_topk_words_any16"), .from_bf16 = try m.function("tf_glm53_from_bf16"), .tk_hist = try m.function("tf_glm53_tk_hist"), .tk_digit = try m.function("tf_glm53_tk_digit"), .tk_split = try m.function("tf_glm53_tk_split"), .tk_finish = try m.function("tf_glm53_tk_finish"), .slot_lanes = try m.function("tf_glm53_slot_lanes"), .slot_fold = try m.function("tf_glm53_slot_fold"), .slot_copy = try m.function("tf_glm53_slot_copy"), .slot_zero = try m.function("tf_glm53_slot_zero"), .split_unpack = try m.function("tf_glm53_split_unpack") };
     }
 
     fn grid(n2: u32, rows: u32) cuda.Config {
@@ -177,6 +187,19 @@ pub const Glue = struct {
         a.add(@as(c_int, @intCast(v)));
         a.add(@as(c_int, @intCast(off)));
         try cuda.launch.launch(g.row_argmax, .{ .grid = .{ .x = n, .y = 1, .z = 1 }, .block = .{ .x = 1024, .y = 1, .z = 1 } }, s, &a);
+    }
+
+    /// TF_GLM53_MTP_CONF: each of n rows' softmax mass over this rank's V logits, beside the row's argmax rowArgmax
+    /// left in amax [n, 4]: slot 2 = the sum of exp((x - value) * inv_t). The same stream, before the gather.
+    /// TF_GLM53_MTP_CONF: n 行それぞれの、このランクの V 個の logit の softmax の質量を、rowArgmax が amax [n, 4] に
+    /// 残した行の argmax の横へ: 枠 2 = exp((x - value) * inv_t) の和。同じ stream で、gather の前に。
+    pub fn rowLse(g: *const Glue, s: cuda.Stream, logits: u64, amax: u64, n: u32, v: u32, inv_t: f32) !void {
+        var a: cuda.Args = .{};
+        a.add(logits);
+        a.add(amax);
+        a.add(@as(c_int, @intCast(v)));
+        a.add(inv_t);
+        try cuda.launch.launch(g.row_lse, .{ .grid = .{ .x = n, .y = 1, .z = 1 }, .block = .{ .x = 1024, .y = 1, .z = 1 } }, s, &a);
     }
 
     /// The gathered rows [world, n, 4] -> ids int64 [n] and tok int32 [n]: the lowest rank among equal maxima.
@@ -392,6 +415,25 @@ pub const Glue = struct {
         try cuda.launch.launch(g.to_bf16, .{ .grid = .{ .x = @intCast(@min((n + 1023) / 1024, 4096)), .y = 1, .z = 1 }, .block = .{ .x = 1024, .y = 1, .z = 1 } }, s, &a);
     }
 
+    /// The split q_a / kv_a front's gathered chunks (`recv`, [W, R, sq + skv] bf16) back into qa [R, q_ld] and
+    /// kva [R, kv_ld] (tf_glm53_split_unpack).
+    /// q_a / kv_a の分担で集めた分 (`recv`、[W, R, sq + skv] bf16) を qa [R, q_ld] と kva [R, kv_ld] に戻す
+    /// (tf_glm53_split_unpack)。
+    pub fn splitUnpack(g: *const Glue, s: cuda.Stream, recv: u64, R: u32, W: u32, qnb: u32, knb: u32, qa: u64, q_ld: u32, kva: u64, kv_ld: u32) !void {
+        var a: cuda.Args = .{};
+        a.add(recv);
+        a.add(@as(c_int, @intCast(R)));
+        a.add(@as(c_int, @intCast(W)));
+        a.add(@as(c_int, @intCast(qnb)));
+        a.add(@as(c_int, @intCast(knb)));
+        a.add(qa);
+        a.add(@as(c_int, @intCast(q_ld)));
+        a.add(kva);
+        a.add(@as(c_int, @intCast(kv_ld)));
+        const n = R * (qnb + knb) * 128;
+        try cuda.launch.launch(g.split_unpack, .{ .grid = .{ .x = @intCast((n + 255) / 256), .y = 1, .z = 1 }, .block = .{ .x = 256, .y = 1, .z = 1 } }, s, &a);
+    }
+
     /// dst[:n] = float(src[:n]) (bf16 in, exact).
     /// dst[:n] = float(src[:n]) (bf16 入力、誤差なし)。
     pub fn fromBf16(g: *const Glue, s: cuda.Stream, src: u64, dst: u64, n: u64) !void {
@@ -571,6 +613,9 @@ pub const Buffers = struct {
     // DECODE_BF16: a window's partial rows as bf16 and their bf16 sum
     // DECODE_BF16: ウィンドウの部分和の行 (bf16) と、その bf16 の和
     dpart: ?Buf = null,
+    /// TF_GLM53_KVB=fp8: wk or wv back to bf16 for the wide rows' cuBLAS GEMMs (Ctx.kvbBf16), [H, 256, lw]
+    /// TF_GLM53_KVB=fp8: 広い行の cuBLAS GEMM のために bf16 に戻した wk か wv (Ctx.kvbBf16)、[H, 256, lw]
+    kvbw: ?Buf = null,
     dred: ?Buf = null,
     // the two-shot all-reduce's share of dpart (rows x D x 2 / world bytes; Ctx.ar2_rows)
     // 2 段の all-reduce での dpart の取り分 (rows x D x 2 / world バイト。Ctx.ar2_rows)
@@ -838,6 +883,25 @@ pub const Ctx = struct {
     fast: ?*const roce.Runtime = null,
     dfast: ?*const roce.Runtime = null,
     decode_bf16: bool = false,
+    /// A ring4 world's all-to-all relay area (Engine.relay; tp.Group.allToAllRelay), 0 elsewhere.
+    /// ring4 の world の all-to-all の中継の領域 (Engine.relay、tp.Group.allToAllRelay)。それ以外は 0。
+    relay: u64 = 0,
+    relay_bytes: usize = 0,
+    /// TF_GLM53_SPLIT_QA (decode windows only, over the RoCE one-shot): q_a's and kv_a's output blocks, replicated on
+    /// every rank otherwise, shared out (linear.share), each rank's computed and all-gathered (gr8's split GEMVs):
+    /// split_cap bytes to send from `split`, world x split_cap received at `split_recv`; 0 off.
+    /// TF_GLM53_SPLIT_QA (decode ウィンドウのみ、RoCE の one-shot で): ふだんは全ランクが同じものを計算する q_a と kv_a
+    /// の出力ブロックを分け (linear.share)、各ランクが自分の分を計算して all-gather する (gr8 の GEMV の分担):
+    /// `split` から送る split_cap バイト、`split_recv` に world x split_cap を受ける。0 は使わない。
+    split: u64 = 0,
+    split_recv: u64 = 0,
+    split_cap: usize = 0,
+    /// TF_GLM53_L2PF (decode windows): each RoCE wait of a layer prefetches into L2 what the layer reads next
+    /// (pfFfn, pfNext, pfQ); `next` the window's next layer (windowStep), null for the last.
+    /// TF_GLM53_L2PF (decode ウィンドウ): 層の RoCE の待ちごとに、層が次に読むものを L2 に先読みする (pfFfn、pfNext、
+    /// pfQ)。`next` はウィンドウの次の層 (windowStep)。最後の層では null。
+    l2pf: bool = false,
+    next: ?*const model.Layer = null,
     /// Tests: emit each DCP selection's tok / cnt (TF_ZIG_SELECT=1).
     /// テスト用: DCP の選択ごとに tok / cnt を出す (TF_ZIG_SELECT=1)。
     probe_select: bool = false,
@@ -979,17 +1043,19 @@ pub const Ctx = struct {
         const W = c.world;
         const q = D / W;
         const b = c.b;
+        const n: usize = @as(usize, R) * q;
+        // the buffers hold every rank's share before anything is written (R >= 64 here)
+        // 書き込む前に、バッファが全ランクの取り分を収めることを確かめる (ここでは R >= 64)
+        if (R == 0 or D % W != 0) return error.GatherShape;
+        _ = try b.send.at(W * n * 4 - 1);
+        _ = try b.recv.at(W * n * 4 - 1);
         // each rank's column share together: send [W, R, q] from part's strides (q, D, 1)
         // ランクごとの列の取り分をまとめる: part のストライド (q, D, 1) から send [W, R, q]
         try c.glue.copy3(c.stream, b.part.ptr, b.send.ptr, W, R, q, q, D, true);
         const api = c.group.lib.api;
-        const n: usize = @as(usize, R) * q;
-        try c.group.lib.check(api.ncclGroupStart(), "ncclGroupStart");
-        for (0..W) |p| {
-            try c.group.lib.check(api.ncclSend(try b.send.at(p * n * 4), n, .f32, @intCast(p), c.group.comm, c.stream.handle), "ncclSend");
-            try c.group.lib.check(api.ncclRecv(try b.recv.at(p * n * 4), n, .f32, @intCast(p), c.group.comm, c.stream.handle), "ncclRecv");
-        }
-        try c.group.lib.check(api.ncclGroupEnd(), "ncclGroupEnd");
+        // each share to its owner (on a ring the opposite's through both neighbours: the same bytes arrive)
+        // 取り分をそれぞれの持ち主へ (リングでは向かいの分は両隣を通る: 届くバイトは同じ)
+        try c.group.allToAllRelay(b.send.ptr, b.recv.ptr, n, .f32, c.relay, c.relay_bytes, c.stream.handle);
         // mine = recv[0], then += recv[r] for r = 1 .. W - 1 (rank order)
         // mine = recv[0] に recv[r] (r = 1 .. W - 1) をランク順に足す
         try b.mine.copyFrom(0, b.recv.ptr, n * 4, c.stream.handle);
@@ -1022,6 +1088,12 @@ pub const Ctx = struct {
     const Gathered = struct { ptr: u64, world: u32, bf16: bool = false };
 
     fn gather(c: *const Ctx, R: u32) !Gathered {
+        return c.gatherPf(R, .{});
+    }
+
+    /// `gather`, its RoCE one-shot prefetching `pf` into L2 while it waits on the peers (TF_GLM53_L2PF).
+    /// `gather` で、RoCE の one-shot が peer を待つ間に `pf` を L2 に先読みする (TF_GLM53_L2PF)。
+    fn gatherPf(c: *const Ctx, R: u32, pf: roce.Prefetch) !Gathered {
         if (c.fast) |f| if (R <= c.window_rows) {
             // the RoCE one-shot: the rank-order sum [1, R, D] (DECODE_BF16: of the bf16 partials, stored bf16, then
             // copied into the fp32 red)
@@ -1032,14 +1104,14 @@ pub const Ctx = struct {
             if (c.laneBf16(R)) {
                 if (R >= c.ar2_rows and b.dmid != null) {
                     try f.allReduce2(c.stream, b.dpart.?.ptr, b.dmid.?.ptr, b.dred.?.ptr, @intCast(n * 2), true);
-                } else try f.allReduce(c.stream, b.dpart.?.ptr, b.dred.?.ptr, @intCast(n * 2), true);
+                } else try f.allReducePf(c.stream, b.dpart.?.ptr, b.dred.?.ptr, @intCast(n * 2), true, pf);
                 return .{ .ptr = b.dred.?.ptr, .world = 1, .bf16 = true };
             }
             if (c.decode_bf16 and b.dpart != null) {
                 try c.glue.toBf16(c.stream, b.part.ptr, b.dpart.?.ptr, n);
-                try f.allReduce(c.stream, b.dpart.?.ptr, b.dred.?.ptr, @intCast(n * 2), true);
+                try f.allReducePf(c.stream, b.dpart.?.ptr, b.dred.?.ptr, @intCast(n * 2), true, pf);
                 try c.glue.fromBf16(c.stream, b.dred.?.ptr, b.red.ptr, n);
-            } else try f.allReduce(c.stream, b.part.ptr, b.red.ptr, @intCast(n * 4), false);
+            } else try f.allReducePf(c.stream, b.part.ptr, b.red.ptr, @intCast(n * 4), false, pf);
             return .{ .ptr = b.red.ptr, .world = 1 };
         };
         if (R > 16 and R >= 64) {
@@ -1074,7 +1146,7 @@ pub const Ctx = struct {
         const b = c.b;
         const H = c.heads;
         const D: u32 = @intCast(cfg.hidden);
-        try c.lins(&.{ &L.q_a, &L.kv_a }, b.normed.ptr, R, &.{ b.qa.ptr, b.kva.ptr }, &.{ true, true });
+        try c.qaKva(L, R);
         try c.ops.rmsnorm(b.qa.ptr, @intCast(cfg.q_lora), L.q_a_norm.ptr, b.qn.ptr, @intCast(cfg.q_lora), R, @intCast(cfg.q_lora), cfg.eps);
         try c.ops.kvWrite(b.kva.ptr, L.kv_a.n, L.kv_a_norm.ptr, kc, pos, b.inv.ptr, cfg.eps, R);
         var q_done = false;
@@ -1101,6 +1173,95 @@ pub const Ctx = struct {
         try c.coreOut(L, R);
     }
 
+    /// TF_GLM53_L2PF, the split front's gather wait: this layer's q_b and wk (the query step's weights).
+    /// TF_GLM53_L2PF、分担の前段の gather の待ち: この層の q_b と wk (query の段の重み)。
+    fn pfQ(c: *const Ctx, L: *const model.Layer) roce.Prefetch {
+        var p: roce.Prefetch = .{};
+        if (!c.l2pf) return p;
+        p.add(L.q_b.words.ptr, L.q_b.words.len);
+        p.add(L.wk.ptr, L.wk.len);
+        return p;
+    }
+
+    /// TF_GLM53_L2PF, the attention's reduce wait: this layer's router and shared expert (or dense MLP) gate / up.
+    /// TF_GLM53_L2PF、attention の reduce の待ち: この層の router と shared expert (か dense MLP) の gate / up。
+    fn pfFfn(c: *const Ctx, L: *const model.Layer) roce.Prefetch {
+        var p: roce.Prefetch = .{};
+        if (!c.l2pf) return p;
+        if (L.router_w) |w| p.add(w.ptr, w.len);
+        p.add(L.mlp.gate.words.ptr, L.mlp.gate.words.len);
+        p.add(L.mlp.up.words.ptr, L.mlp.up.words.len);
+        return p;
+    }
+
+    /// TF_GLM53_L2PF, the FFN's reduce wait: the next layer's q_a / kv_a (this rank's blocks under the split front)
+    /// and its indexer's wk.
+    /// TF_GLM53_L2PF、FFN の reduce の待ち: 次の層の q_a / kv_a (分担の前段ならこのランクのブロック) と indexer の wk。
+    fn pfNext(c: *const Ctx) roce.Prefetch {
+        var p: roce.Prefetch = .{};
+        if (!c.l2pf) return p;
+        const N = c.next orelse return p;
+        if (c.split != 0) {
+            const W = c.world;
+            const qs = linear.share(N.q_a.n / 128, W, c.rank);
+            const ks = linear.share(N.kv_a.n / 128, W, c.rank);
+            const qv = linear.colBlocks(&N.q_a, qs.b0, qs.b1);
+            const kv = linear.colBlocks(&N.kv_a, ks.b0, ks.b1);
+            p.add(qv.words.ptr, qv.words.len);
+            p.add(kv.words.ptr, kv.words.len);
+        } else {
+            p.add(N.q_a.words.ptr, N.q_a.words.len);
+            p.add(N.kv_a.words.ptr, N.kv_a.words.len);
+        }
+        if (N.indexer) |ix| p.add(ix.wk.ptr, ix.wk.len);
+        return p;
+    }
+
+    /// q_a and kv_a of the R rows into b.qa / b.kva. Under TF_GLM53_SPLIT_QA (`split`, decode windows): this rank's
+    /// output blocks of both in one launch, all-gathered over the RoCE one-shot, then put back into rows; every column
+    /// as the whole linear computes it. Otherwise both whole, on every rank.
+    /// R 行の q_a と kv_a を b.qa / b.kva へ。TF_GLM53_SPLIT_QA (`split`、decode ウィンドウ) では両方のこのランクの
+    /// 出力ブロックだけを 1 回の起動で計算し、RoCE の one-shot で all-gather して行に戻す。各列は linear 全体で
+    /// 計算したものと同じ。それ以外は両方を丸ごと、全ランクで。
+    fn qaKva(c: *const Ctx, L: *const model.Layer, R: u32) !void {
+        const b = c.b;
+        if (c.split != 0 and R <= small_rows) if (c.fast) |f| {
+            const W = c.world;
+            const qnb = L.q_a.n / 128;
+            const knb = L.kv_a.n / 128;
+            const sq: u64 = (qnb / W) * 128;
+            const skv: u64 = ((knb + W - 1) / W) * 128;
+            const chunk: u64 = @as(u64, R) * (sq + skv) * 2;
+            if (qnb % W == 0 and L.q_a.n % 128 == 0 and L.kv_a.n % 128 == 0 and chunk <= c.split_cap) {
+                const qs = linear.share(qnb, W, c.rank);
+                const ks = linear.share(knb, W, c.rank);
+                const qv = linear.colBlocks(&L.q_a, qs.b0, qs.b1);
+                const kv = linear.colBlocks(&L.kv_a, ks.b0, ks.b1);
+                try c.lins(&.{ &qv, &kv }, b.normed.ptr, R, &.{ c.split, c.split + @as(u64, R) * sq * 2 }, &.{ true, true });
+                try f.allGatherPf(c.stream, c.split, c.split_recv, @intCast(chunk), c.pfQ(L));
+                return c.glue.splitUnpack(c.stream, c.split_recv, R, W, qnb, knb, b.qa.ptr, @intCast(c.cfg.q_lora), b.kva.ptr, L.kv_a.n);
+            }
+        };
+        try c.lins(&.{ &L.q_a, &L.kv_a }, b.normed.ptr, R, &.{ b.qa.ptr, b.kva.ptr }, &.{ true, true });
+    }
+
+    /// A row scale buffer's pointer (TF_GLM53_KVB=fp8), 0 without one (bf16 rows).
+    /// 行スケールのバッファのポインタ (TF_GLM53_KVB=fp8)。なければ 0 (bf16 の行)。
+    fn rowScales(s: ?Buf) u64 {
+        return if (s) |x| x.ptr else 0;
+    }
+
+    /// kv_b's `rows` rows at `w` as bf16 for the wide rows' cuBLAS GEMMs: `w` itself, or (TF_GLM53_KVB=fp8, `s` its
+    /// row scales) its e4m3 rows converted into b.kvbw.
+    /// 広い行の cuBLAS GEMM 用に、`w` にある kv_b の `rows` 行を bf16 で: `w` そのもの、または (TF_GLM53_KVB=fp8、
+    /// `s` が行スケール) その e4m3 の行を b.kvbw に変換したもの。
+    fn kvbBf16(c: *const Ctx, w: u64, s: u64, rows: u32) !u64 {
+        if (s == 0) return w;
+        const out = (c.b.kvbw orelse return error.NoKvbScratch).ptr;
+        try c.ops.k.kvb8Bf16(c.stream, w, s, out, rows, @intCast(c.cfg.kv_lora));
+        return out;
+    }
+
     /// The attention's query step: q_b (unless already grouped with wq_b), the absorbed latent queries and the RoPE
     /// part (b.qlat, b.qrot); DCP: packed [R, H, 576] into b.qpack.
     /// attention の query の段: q_b (wq_b とまとめて済んでいなければ)、吸収済みの latent query と RoPE 部分 (b.qlat、
@@ -1120,18 +1281,19 @@ pub const Ctx = struct {
             // q_b / wk を掛けた相手の分。相手が送るはずのバイトと同じ (collective なし)
             const per: u64 = @as(u64, R) * H * 576 * 2;
             const me: u64 = c.dgroup.?.rank;
-            try c.packQ(L.wk.ptr, b.qall.?.ptr + me * per, R, pos);
+            try c.packQ(L.wk.ptr, rowScales(L.wks), b.qall.?.ptr + me * per, R, pos);
             try c.lin(&L.peer_q_b.?, b.qn.ptr, R, b.q.ptr, true);
-            return c.packQ(L.peer_wk.?.ptr, b.qall.?.ptr + (1 - me) * per, R, pos);
+            return c.packQ(L.peer_wk.?.ptr, rowScales(L.peer_wks), b.qall.?.ptr + (1 - me) * per, R, pos);
         }
-        if (c.fuse and c.dgroup != null) return c.packQ(L.wk.ptr, b.qpack.?.ptr, R, pos);
+        if (c.fuse and c.dgroup != null) return c.packQ(L.wk.ptr, rowScales(L.wks), b.qpack.?.ptr, R, pos);
         if (R > MAX_LIN_ROWS) {
             // per head qlat [R, H, lw] = q[:, h, :nope] @ wk[h], through tmp [H, R, lw]
             // ヘッドごとに qlat [R, H, lw] = q[:, h, :nope] @ wk[h]。tmp [H, R, lw] を経由する
-            try c.bmm(0, @intCast(lw), @intCast(R), @intCast(nope), L.wk.ptr, @intCast(lw), @as(i64, nope) * lw, b.q.ptr, @intCast(H * qd), qd, b.tmp.ptr, @intCast(lw), @as(i64, R) * lw, @intCast(H));
+            const wk = try c.kvbBf16(L.wk.ptr, rowScales(L.wks), H * nope);
+            try c.bmm(0, @intCast(lw), @intCast(R), @intCast(nope), wk, @intCast(lw), @as(i64, nope) * lw, b.q.ptr, @intCast(H * qd), qd, b.tmp.ptr, @intCast(lw), @as(i64, R) * lw, @intCast(H));
             try c.glue.scatter3(c.stream, b.tmp.ptr, b.qlat.ptr, H, R, lw, lw, @as(i64, H) * lw, false);
             try c.ops.qrope(b.q.ptr, b.inv.ptr, b.qrot.ptr, pos, R, H);
-        } else try c.ops.absorb(b.q.ptr, L.wk.ptr, b.inv.ptr, b.qlat.ptr, b.qrot.ptr, pos, R, H);
+        } else try c.ops.absorb(b.q.ptr, L.wk.ptr, rowScales(L.wks), b.inv.ptr, b.qlat.ptr, b.qrot.ptr, pos, R, H);
         if (c.dgroup != null) {
             const qp = b.qpack.?.ptr;
             try c.glue.scatter3(c.stream, b.qlat.ptr, qp, 1, R * H, lw, 0, 576, false);
@@ -1151,7 +1313,7 @@ pub const Ctx = struct {
 
     /// The absorbed queries of b.q (one member's heads, by its `wk`) with their RoPE part, packed [R, H, 576] at `qp`.
     /// b.q の吸収済み query (1 メンバーのヘッド、その `wk` で) と RoPE 部分を、[R, H, 576] に pack して `qp` に書く。
-    fn packQ(c: *const Ctx, wk: u64, qp: u64, R: u32, pos: u64) !void {
+    fn packQ(c: *const Ctx, wk: u64, wks: u64, qp: u64, R: u32, pos: u64) !void {
         const cfg = c.cfg;
         const b = c.b;
         const H = c.heads;
@@ -1163,10 +1325,11 @@ pub const Ctx = struct {
             // and a scatter (glm53/tools/native/cublas_layout.cu), without the scatter
             // pack した [R, H, 576] へ直接 (ldc H 576、stride_c 576): tmp [H, R, lw] と scatter を経るのと同じビットで、
             // scatter がない (glm53/tools/native/cublas_layout.cu)
-            try c.bmm(0, @intCast(lw), @intCast(R), @intCast(nope), wk, @intCast(lw), @as(i64, nope) * lw, b.q.ptr, @intCast(H * qd), qd, qp, @intCast(H * 576), 576, @intCast(H));
+            const w = try c.kvbBf16(wk, wks, H * nope);
+            try c.bmm(0, @intCast(lw), @intCast(R), @intCast(nope), w, @intCast(lw), @as(i64, nope) * lw, b.q.ptr, @intCast(H * qd), qd, qp, @intCast(H * 576), 576, @intCast(H));
             return c.ops.qropePacked(b.q.ptr, b.inv.ptr, qp, pos, R, H);
         }
-        return c.ops.absorbPacked(b.q.ptr, wk, b.inv.ptr, qp, pos, R, H);
+        return c.ops.absorbPacked(b.q.ptr, wk, wks, b.inv.ptr, qp, pos, R, H);
     }
 
     /// The attention's output step: the value expansion (b.ol -> b.o) and o_proj -> this rank's fp32 partial
@@ -1183,8 +1346,9 @@ pub const Ctx = struct {
             // tmp [H, R, v] and a scatter)
             // ヘッドごとに o [R, H, v] = ol[:, h] @ wv[h]^T。o へ直接書く (ldc H v、stride_c v。tmp [H, R, v] と scatter を
             // 経るのと同じビット)
-            try c.bmm(1, @intCast(vd), @intCast(R), @intCast(lw), L.wv.ptr, @intCast(lw), @as(i64, vd) * lw, b.ol.ptr, @intCast(H * lw), lw, b.o.ptr, @intCast(H * vd), vd, @intCast(H));
-        } else try c.ops.expand(b.ol.ptr, L.wv.ptr, b.o.ptr, R, H);
+            const wv = try c.kvbBf16(L.wv.ptr, rowScales(L.wvs), H * vd);
+            try c.bmm(1, @intCast(vd), @intCast(R), @intCast(lw), wv, @intCast(lw), @as(i64, vd) * lw, b.ol.ptr, @intCast(H * lw), lw, b.o.ptr, @intCast(H * vd), vd, @intCast(H));
+        } else try c.ops.expand(b.ol.ptr, L.wv.ptr, rowScales(L.wvs), b.o.ptr, R, H);
         if (c.laneBf16(R)) return c.lin(&L.o_proj, b.o.ptr, R, b.dpart.?.ptr, true);
         if (c.laneSp(R)) return c.linHpart(&L.o_proj, b.o.ptr, R);
         try c.lin(&L.o_proj, b.o.ptr, R, b.part.ptr, false);
@@ -1476,7 +1640,13 @@ pub const Ctx = struct {
         const b = c.b;
         if (R > 16) return error.WindowTooWide;
         try c.embed(embed_table, R);
-        for (layers, 0..) |*L, i| try c.layerDecode(L, R, kc[i].ptr, if (ic[i]) |x| x.ptr else null, pos, t);
+        for (layers, 0..) |*L, i| {
+            // the next layer, for the RoCE waits' L2 prefetch (TF_GLM53_L2PF)
+            // RoCE の待ちの L2 先読み用に、次の層 (TF_GLM53_L2PF)
+            var cl = c.*;
+            cl.next = if (i + 1 < layers.len) &layers[i + 1] else null;
+            try cl.layerDecode(L, R, kc[i].ptr, if (ic[i]) |x| x.ptr else null, pos, t);
+        }
         try c.headLogits(norm, lm_head, 0, R, vocab_share);
         try c.glue.rowArgmax(c.stream, b.lpart.ptr, b.amax.ptr, R, vocab_share, c.rank * vocab_share);
         if (c.fast) |f| {
@@ -1521,6 +1691,20 @@ pub const Ctx = struct {
             try f.allGather(c.stream, b.amax.ptr, b.amax_all.ptr, 16 * R);
         } else try c.group.lib.check(c.group.lib.api.ncclAllGather(b.amax.ptr, b.amax_all.ptr, 4 * @as(usize, R), .f32, c.group.comm, c.stream.handle), "ncclAllGather");
         try c.glue.pick(c.stream, b.amax_all.ptr, c.world, R, b.ids.ptr, b.tok_out.ptr);
+    }
+
+    /// One layer over several conversations' rows (`seqs`, R rows in all) as a layer of windowMulti's `par` window, its
+    /// input already in b.x (TF_GLM53_MULTI: the MTP layer's batched steps, each conversation on its own cache rows and
+    /// map).
+    /// 複数の会話の行 (`seqs`、計 R 行) に対する 1 層を、windowMulti の `par` のウィンドウの層として実行する。入力は
+    /// b.x にある (TF_GLM53_MULTI: MTP 層をまとめた段。各会話は自分のキャッシュの行と表で)。
+    pub fn layerMultiPar(c0: *const Ctx, L: *const model.Layer, li: usize, seqs: []const WindowSeq, R: u32) !void {
+        var n: u32 = 0;
+        for (seqs) |s| n += s.rows;
+        if (n != R or R > multi_rows or c0.dgroup == null) return error.WindowTooWide;
+        var cw = c0.*;
+        cw.window_rows = multi_rows;
+        return cw.layerMulti(L, li, seqs, R, .par);
     }
 
     /// `layerPrompt` for a window over several conversations (`windowMulti`).
@@ -1699,7 +1883,7 @@ pub const Ctx = struct {
             // the position), then each later conversation's RoPE part at its own: the bytes of one absorb each
             // 全行の吸収済みの query を最初の会話の位置で作り (latent 部分は位置に依らない)、2 つ目以降の会話の RoPE
             // 部分を自分の位置で書き直す: 会話ごとの absorb と同じバイト
-            try c.ops.absorbPacked(b.q.ptr, L.wk.ptr, b.inv.ptr, b.qpack.?.ptr, seqs[0].pos, R, H);
+            try c.ops.absorbPacked(b.q.ptr, L.wk.ptr, rowScales(L.wks), b.inv.ptr, b.qpack.?.ptr, seqs[0].pos, R, H);
             o = seqs[0].rows;
             for (seqs[1..]) |s| {
                 const bv = c.rowView(o, kva_n);
@@ -1879,7 +2063,7 @@ pub const Ctx = struct {
             } else try dg.lib.check(dg.lib.api.ncclAllGather(b.dmine.?.ptr, b.cand.?.ptr, @as(usize, R) * K, .i64, dg.comm, c.stream.handle), "ncclAllGather");
             try c.glue.dcpSelect(c.stream, b.cand.?.ptr, b.tok.ptr, b.cnt.?.ptr, R, R, K, G, dg.rank, false);
         }
-        try c.ops.absorbPacked(b.q.ptr, L.wk.ptr, b.inv.ptr, b.qpack.?.ptr, seqs[0].pos, R, H);
+        try c.ops.absorbPacked(b.q.ptr, L.wk.ptr, rowScales(L.wks), b.inv.ptr, b.qpack.?.ptr, seqs[0].pos, R, H);
         o = seqs[0].rows;
         for (seqs[1..]) |s| {
             const bv = c.rowView(o, kva_n);
@@ -2034,12 +2218,12 @@ pub const Ctx = struct {
         const D: u32 = @intCast(c.cfg.hidden);
         try c.ops.rmsnorm(b.x.ptr, D, L.input_norm.ptr, b.normed.ptr, D, R, D, c.cfg.eps);
         try c.attention(L, R, kc, ic, pos, t);
-        const a = try c.gather(R);
+        const a = try c.gatherPf(R, c.pfFfn(L));
         try c.emit(L.index, "attn", R, a.ptr, @as(usize, R) * D * 4);
         if (a.bf16) try c.ops.residualAddBf16(b.x.ptr, b.x.ptr, a.ptr, R, D) else try c.ops.residualAdd(b.x.ptr, b.x.ptr, a.ptr, R, D, a.world);
         try c.ops.rmsnorm(b.x.ptr, D, L.post_attn_norm.ptr, b.normed.ptr, D, R, D, c.cfg.eps);
         try c.ffnPart(L, R);
-        const f = try c.gather(R);
+        const f = try c.gatherPf(R, c.pfNext());
         try c.emit(L.index, "ffn", R, f.ptr, @as(usize, R) * D * 4);
         if (f.bf16) try c.ops.residualAddBf16(b.x.ptr, b.x.ptr, f.ptr, R, D) else try c.ops.residualAdd(b.x.ptr, b.x.ptr, f.ptr, R, D, f.world);
         try c.emit(L.index, "x", R, b.x.ptr, @as(usize, R) * D * 2);

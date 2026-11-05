@@ -27,14 +27,12 @@ Expert Atlas 的 2、3、4、5 位专家库。你不需要 Fiore-lab 在 Hugging
 | 内容 | 文件 | 大小 | 用途 |
 |---|---|---|---|
 | 4 位专家库 | `experts-layer-003` … `077.safetensors` | 368.5 GB | 八节点检查点的路由专家；Expert Atlas 的 4 位 |
-| 八节点检查点 | 4 位专家库的文件、`nonexperts-5bit.safetensors`、`unquantized-bf16.safetensors`、三个 `mtp-layer-78-*` 文件、官方小文件、`config.json`、索引、`SHA256SUMS` | 389.9 GB | 八节点上的 `./tf-glm53 up`；每次用 Expert Atlas 启动时专家以外的部分 |
-| 3 位专家库 | `experts-layer-*.safetensors` | 277.9 GB | Expert Atlas 的 3 位；四节点检查点 |
+| 八节点检查点 | 4 位专家库的文件、`nonexperts-5bit.safetensors`、`unquantized-bf16.safetensors`、三个 `mtp-layer-78-*` 文件、官方小文件、`config.json`、索引、`SHA256SUMS` | 389.9 GB | 八节点上的每次启动（四节点上也可代替四节点检查点）：路由专家以外的权重 |
+| 3 位专家库 | `experts-layer-*.safetensors` | 277.9 GB | 每次启动：Expert Atlas 的 3 位，默认位宽；四节点检查点 |
 | 2 位 / 5 位专家库 | `experts-layer-*.safetensors` | 187.3 / 459.1 GB | Expert Atlas 的 2 位和 5 位（可选） |
-| 四节点检查点 | 把一半路由专家换成 3 位的八节点检查点 | 344.6 GB | 四节点上的 `./tf-glm53 up` |
+| 四节点检查点 | 把一半路由专家换成 3 位的八节点检查点 | 344.6 GB | 四节点上的每次启动：路由专家以外的权重 |
 
-需要哪些取决于运行方式：不用控制面板、八节点运行只需要八节点检查点；不用控制面板、四节点运行需要四节点检查点（由八节点检查点和
-3 位专家库制作）；使用控制面板需要一个检查点和你想用的位宽的专家库（四节点上为 3 位和 4 位；八节点检查点的目录可以直接作为 4 位
-专家库）。
+每次启动都需要一个检查点和 3 位专家库：八节点用八节点检查点，四节点用四节点检查点（由八节点检查点和 3 位专家库制作）或八节点检查点。其他专家库只在使用相应位宽时才需要（八节点检查点的目录可以直接作为 4 位专家库）。
 
 ## 与 Fiore-lab 文件的比较
 
@@ -181,7 +179,7 @@ $P bank_manifest.py banks banks.json /data/banks/3bit /data/banks/4bit      # �
 ./tf-glm53 deploy
 ./tf-glm53 verify            # 在所有节点上用你的 SHA256SUMS 核对权重
 ./tf-glm53 verify-banks      # 在所有节点上用你的清单核对专家库
-./tf-glm53 up
+./tf-glm53 up                # 控制面板：在其中启动引擎（不用面板：./tf-glm53 start）
 ```
 
 ## 本目录中的文件

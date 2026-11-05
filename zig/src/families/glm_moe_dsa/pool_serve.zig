@@ -20,7 +20,9 @@ const engine = @import("engine.zig");
 const forward = @import("forward.zig");
 const lockstep = @import("lockstep.zig");
 const plan = @import("pool/plan.zig");
+const byte_resume = @import("pool/byte_resume.zig");
 const devmap = @import("pool/devmap.zig");
+const pool_live = @import("pool/live.zig");
 const hashing = @import("slotcache/hashing.zig");
 const tree = @import("slotcache/tree.zig");
 const kvdigest = @import("kvdigest.zig");
@@ -31,10 +33,6 @@ const Buf = cuda.DeviceBuffer;
 /// Local rows a hash launch takes at most (bounds the lanes scratch, rows x lanes x 8 B).
 /// ハッシュ 1 回の起動で扱う最大のローカル行数 (lane の作業域 rows x lanes x 8 B を抑える)。
 const hash_rows: usize = 16384;
-
-/// The drafter's confidence, the same on every rank (slots_serve.zig).
-/// ドラフタの confidence。全ランクで同じ値 (slots_serve.zig)。
-const dflash_confidence: f64 = 0.4;
 
 /// TF_GLM53_POOL_FAULT=KIND:RANK (tests, glm53/POOL.md P3): one fault, once, on rank RANK. hash: before the first
 /// request that checks reused rows, the expected hash of the first row checked is flipped (that rank's check fails:
@@ -85,6 +83,9 @@ pub const Pool = struct {
     // DFlash2 without per-slot saves: the tokens of the request the live ring last held
     // スロットごとの写しなしの DFlash2: live のリングが最後に持った要求のトークン列
     ring_seq: std.ArrayList(i64) = .empty,
+    // the slot the request alone writes (its plan's X, from its admission; the engine thread's): /health's progress
+    // 単独の要求が書くスロット (計画の X、受け付けから。エンジンのスレッドのもの): /health の progress 用
+    cur_x: ?u64 = null,
     // /health (core/engine_api.zig PoolStatus), set after every request, read by the server's thread
     // /health (core/engine_api.zig の PoolStatus)。要求ごとに更新し、サーバーのスレッドが読む
     st_free: std.atomic.Value(u64) = .init(0),
@@ -99,6 +100,9 @@ pub const Pool = struct {
     st_action: [3]std.atomic.Value(u64) = @splat(std.atomic.Value(u64).init(0)),
     st_check_us: std.atomic.Value(u64) = .init(0),
     st_hash_us: std.atomic.Value(u64) = .init(0),
+    // Fiore-lab, rank 0: GET /v1/pool's snapshot of the tables (pool/live.zig), taken where they change
+    // Fiore-lab、rank 0: GET /v1/pool 用の表の写し (pool/live.zig)。表が変わる所で取る
+    live: ?*pool_live.PoolLive = null,
 
     pub const Stats = struct { blocks: u64, block_positions: u64, free_blocks: u64, slots: u64, shared_blocks: u64, evicted_total: u64, cold_total: u64, continued_total: u64, shared_total: u64, new_total: u64, check_seconds_total: f64, hash_seconds_total: f64 };
 
@@ -123,6 +127,18 @@ pub const Pool = struct {
         if (action) |a| _ = p.st_action[if (cold_) 2 else @intFromEnum(a)].fetchAdd(1, .monotonic);
         _ = p.st_check_us.fetchAdd(@intFromFloat(@max(0, check_ms) * 1000), .monotonic);
         _ = p.st_hash_us.fetchAdd(@intFromFloat(@max(0, hash_ms) * 1000), .monotonic);
+    }
+
+    /// A slot's number in GET /v1/pool (convs[].id, the owners' marks): its id + 1, wrapped below 0xFFFF.
+    /// スロットの GET /v1/pool での番号 (convs[].id、持ち主の印): id + 1、0xFFFF より下で折り返す。
+    pub fn convNumber(x: u64) u64 {
+        return pool_live.number(x);
+    }
+
+    // Fiore-lab: the tables into GET /v1/pool's snapshot (rank 0); `active`: the slots requests run on now
+    // Fiore-lab: 表を GET /v1/pool の写しへ (rank 0)。`active`: 今要求が動いているスロット
+    fn noteLive(p: *Pool, active: []const u64) void {
+        if (p.live) |l| l.snap(&p.meta, active);
     }
 
     fn digestWords(d: [32]u8) [8]i32 {
@@ -237,6 +253,7 @@ pub const Pool = struct {
         p.meta.deinit();
         p.meta = try plan.Meta.init(p.gpa, cfg);
         p.ring_seq.clearRetainingCapacity();
+        p.noteLive(&.{});
     }
 };
 
@@ -309,10 +326,12 @@ pub fn setup(ch: *lockstep.Channel, e: *engine.Engine) !void {
         try poison.all(e, v);
         try e.stream.synchronize();
     }
+    if (e.rank == 0) p.live = try pool_live.PoolLive.init(gpa, e.io);
     e.pool = p;
-    // /health and /metrics read the empty pool's counts from the start
-    // /health と /metrics は起動直後から空の pool の数を読める
+    // /health and /metrics read the empty pool's counts from the start (and GET /v1/pool its tables)
+    // /health と /metrics は起動直後から空の pool の数を読める (GET /v1/pool はその表を)
     p.noteStats(0, false, null, 0, 0);
+    p.noteLive(&.{});
     if (e.rank == 0) std.debug.print("[tensorfold] pool: {d} blocks of 256 positions + Z ({d} positions, capacity {d}), {d} slots at most, verify {s}, DFlash2 saves {d}, MTP rows cached {}\n", .{ cfg.n_blocks, env.positions, e.capacity, env.slots, @tagName(env.verify), env.draft_saves, cfg.mtp });
 }
 
@@ -321,18 +340,49 @@ pub fn setup(ch: *lockstep.Channel, e: *engine.Engine) !void {
 /// 要求を共有する前の rank 0: プラン (メタデータは変えない) とヘッダのスロット用の語。r0 = resume_end。
 pub fn lead(e: *engine.Engine, h: *lockstep.Header, prompt: []const i64) !plan.Plan {
     const p = e.pool.?;
-    var q = try plan.makePlan(&p.meta, prompt, h.max_tokens, true);
+    const own = ownable(h.own_slot);
+    var q = try plan.makePlanOwn(&p.meta, prompt, h.max_tokens, true, &.{}, own);
     errdefer q.deinit(p.gpa);
     const d0 = p.meta.digest();
     var x: [21]i32 = undefined;
-    x[0] = 1; // the pool reuses the target's rows in the serial mode too / pool は逐次モードでもターゲットの行を再利用する
+    x[0] = slotWord(true, own); // the pool reuses the target's rows in the serial mode too / pool は逐次モードでもターゲットの行を再利用する
     x[1..9].* = Pool.digestWords(d0);
     x[9..17].* = Pool.digestWords(q.digest(d0));
-    x[17] = if (e.drafter != null) @intCast(lockstep.dflash_depth) else 0;
-    lockstep.f64Words(if (e.drafter != null) dflash_confidence else 0, x[18..21]);
+    lockstep.draftWords(e, x[17..21]);
     h.extra = x;
     h.r0 = @intCast(q.resume_end);
     return q;
+}
+
+/// Fiore-lab: the slot words' first: bit 0 the resume flag, the bits above it the slot a re-admission continues (its id
+/// + 1; 0: none). Ids past 2^30 - 2 are not sent (the request then plans as any other).
+/// Fiore-lab: スロットの語の先頭: ビット 0 が resume フラグ、その上が受け入れ直しが続けるスロット (id + 1。0 はなし)。
+/// 2^30 - 2 を越える id は送らない (その要求はふつうに計画する)。
+fn slotWord(resume_ok: bool, own: ?u64) i32 {
+    const o: u64 = if (own) |s| s + 1 else 0;
+    return @intCast(@as(u64, @intFromBool(resume_ok)) | (o << 1));
+}
+
+fn ownable(own: ?u64) ?u64 {
+    const s = own orelse return null;
+    return if (s + 1 < (1 << 30)) s else null;
+}
+
+fn ownOf(w: i32) ?u64 {
+    const o: u64 = @intCast(w >> 1);
+    return if (o > 0) o - 1 else null;
+}
+
+test "slotWord carries the resume flag and the slot a re-admission continues" {
+    try std.testing.expectEqual(@as(i32, 1), slotWord(true, null));
+    try std.testing.expectEqual(@as(i32, 0), slotWord(false, null));
+    try std.testing.expectEqual(@as(?u64, null), ownOf(slotWord(true, null)));
+    try std.testing.expectEqual(@as(?u64, 0), ownOf(slotWord(true, 0)));
+    try std.testing.expect(slotWord(true, 0) & 1 != 0);
+    try std.testing.expectEqual(@as(?u64, 12345), ownOf(slotWord(false, 12345)));
+    try std.testing.expect(slotWord(false, 12345) & 1 == 0);
+    try std.testing.expectEqual(@as(?u64, (1 << 30) - 2), ownOf(slotWord(true, ownable((1 << 30) - 2))));
+    try std.testing.expectEqual(@as(?u64, null), ownable((1 << 30) - 1));
 }
 
 fn ms(io: std.Io, t0: std.Io.Timestamp) f64 {
@@ -348,13 +398,14 @@ pub fn serve(ch: *lockstep.Channel, e: *engine.Engine, h: lockstep.Header, promp
     // エンジンが断る prompt (空、または応答の余地がない) は、pool がないときと同じく全ランクで断る
     if (prompt.len == 0 or prompt.len >= e.capacity) return run(e, h, prompt, sink, prop);
     const x = h.extra orelse return error.MissingSlotWords;
+    lockstep.takeDraftWords(e, x[17..21]);
     var own: ?plan.Plan = null;
     defer if (own) |*q| q.deinit(gpa);
     var q: ?*plan.Plan = plan0;
     if (q == null) {
         const d0 = p.meta.digest();
         if (std.mem.eql(i32, &Pool.digestWords(d0), x[1..9])) {
-            if (plan.makePlan(&p.meta, prompt, h.max_tokens, x[0] != 0)) |qq| {
+            if (plan.makePlanOwn(&p.meta, prompt, h.max_tokens, x[0] & 1 != 0, &.{}, ownOf(x[0]))) |qq| {
                 own = qq;
                 if (std.mem.eql(i32, &Pool.digestWords(own.?.digest(d0)), x[9..17])) q = &own.?;
             } else |err| std.debug.print("[tensorfold] pool: rank {d} could not plan ({s})\n", .{ e.rank, @errorName(err) });
@@ -385,6 +436,9 @@ pub fn serve(ch: *lockstep.Channel, e: *engine.Engine, h: lockstep.Header, promp
     }
     const qp = q.?;
     try p.writeMap(e, qp, prompt.len);
+    // X's table holds the request's whole span from here to the commit / ここから確定まで X の表は要求の範囲全体
+    p.noteLive(&.{qp.X});
+    p.cur_x = qp.X;
     if (poison.byte()) |v| {
         // the blocks taken, and the resume block's rows from resume_end (its stale tail; written by this request)
         // 割り当てたブロックと、再開ブロックの resume_end 以降の行 (古い残り。この要求が書く)
@@ -499,6 +553,7 @@ pub fn serve(ch: *lockstep.Channel, e: *engine.Engine, h: lockstep.Header, promp
     }
     st.cached = r;
     p.noteStats(if (why == null) qp.evicted.len else 0, why != null, qp.action, check_ms, hash_ms);
+    p.noteLive(&.{});
     if (e.rank == 0) {
         var shared: usize = 0;
         if (p.meta.find(qp.X)) |i| for (p.meta.slots.items[i].blocks.items) |b| {
@@ -516,21 +571,54 @@ pub fn serve(ch: *lockstep.Channel, e: *engine.Engine, h: lockstep.Header, promp
 // ------------------------------------------------- several conversations at once (TF_GLM53_MULTI) / 複数の会話 ---
 
 /// TF_GLM53_MULTI, rank 0 before an admission is shared: `lead` beside the conversations in flight (`busy`: their
-/// slots, never continued, shared from, shrunk or evicted). error.Invariant: too few blocks while they run (the job
-/// waits for one to end).
-/// TF_GLM53_MULTI、受け付けを共有する前の rank 0: 処理中の会話 (`busy`: そのスロット。続き・共有元・縮め・追い出しの
-/// 対象にしない) と並ぶ `lead`。error.Invariant: それらが動いている間はブロックが足りない (要求はどれかが終わるのを待つ)。
+/// slots, never continued, shrunk or evicted; shared from below their resume point only, plan.makePlanBusy).
+/// error.Invariant: too few blocks while they run (the job waits for one to end).
+/// TF_GLM53_MULTI、受け付けを共有する前の rank 0: 処理中の会話 (`busy`: そのスロット。続き・縮め・追い出しの対象に
+/// しない。共有は再開位置より手前だけ、plan.makePlanBusy) と並ぶ `lead`。error.Invariant: それらが動いている間は
+/// ブロックが足りない (要求はどれかが終わるのを待つ)。
+/// TF_GLM53_MULTI, rank 0's scheduler: the rows a request for `prompt` would compute if admitted now beside the
+/// Fiore-lab: the slot whose tokens agree with `prompt` the furthest in bytes (pool/byte_resume.zig); null: no pool or no
+/// slot. Reads the slots only, on the thread that plans.
+/// Fiore-lab: バイトで `prompt` と一番先まで一致するスロット (pool/byte_resume.zig)。null は pool かスロットがない時。
+/// スロットを読むだけで、計画するのと同じスレッドで呼ぶ。
+pub const ByteProbe = struct { slot: u64, seq: []const i64, x: byte_resume.Result };
+
+/// The prompt with the slot's ids where the bytes agree (byte_resume.merged). / バイトが一致する所をスロットの id にした prompt。
+pub fn byteMerged(a: std.mem.Allocator, b: ByteProbe, prompt: []const u32) std.mem.Allocator.Error![]u32 {
+    return byte_resume.merged(a, b.seq, prompt, b.x);
+}
+
+pub fn byteProbe(e: *engine.Engine, prompt: []const u32, vocab: anytype) ?ByteProbe {
+    const p = e.pool orelse return null;
+    var best: ?ByteProbe = null;
+    for (p.meta.slots.items) |*s| {
+        const x = byte_resume.walk(s.seq.items, prompt, vocab);
+        if (best == null or x.q > best.?.x.q) best = .{ .slot = s.id, .seq = s.seq.items, .x = x };
+    }
+    return best;
+}
+
+/// conversations in flight: its prompt past where its plan would resume (plan.resumeEnd; no plan made).
+/// TF_GLM53_MULTI、rank 0 のスケジューラ用: `prompt` の要求を今、処理中の会話の横で受け入れたら計算する行数: プランが
+/// 再開する位置より後ろの prompt (plan.resumeEnd。プランは作らない)。
+pub fn freshRows(e: *const engine.Engine, prompt: []const u32) u64 {
+    const p = e.pool orelse return prompt.len;
+    var buf: [engine.multi_max]u64 = undefined;
+    const busy = e.multiBusy(&buf);
+    return prompt.len - @min(prompt.len, plan.resumeEnd(&p.meta, prompt, busy));
+}
+
 pub fn leadBusy(e: *engine.Engine, h: *lockstep.Header, prompt: []const i64, busy: []const u64) !plan.Plan {
     const p = e.pool.?;
-    var q = try plan.makePlanBusy(&p.meta, prompt, h.max_tokens, true, busy);
+    const own = ownable(h.own_slot);
+    var q = try plan.makePlanOwn(&p.meta, prompt, h.max_tokens, true, busy, own);
     errdefer q.deinit(p.gpa);
     const d0 = p.meta.digest();
     var x: [21]i32 = undefined;
-    x[0] = 1;
+    x[0] = slotWord(true, own);
     x[1..9].* = Pool.digestWords(d0);
     x[9..17].* = Pool.digestWords(q.digest(d0));
-    x[17] = if (e.drafter != null) @intCast(lockstep.dflash_depth) else 0;
-    lockstep.f64Words(if (e.drafter != null) dflash_confidence else 0, x[18..21]);
+    lockstep.draftWords(e, x[17..21]);
     h.extra = x;
     h.r0 = @intCast(q.resume_end);
     return q;
@@ -551,12 +639,13 @@ pub fn admitMulti(ch: *lockstep.Channel, e: *engine.Engine, k: usize, h: lockste
     var busy_buf: [engine.multi_max + 1]u64 = undefined;
     const busy = e.multiBusy(busy_buf[0..engine.multi_max]);
     const x = h.extra orelse return error.MissingSlotWords;
+    lockstep.takeDraftWords(e, x[17..21]);
     var q: ?plan.Plan = plan0;
     errdefer if (q) |*qq| qq.deinit(gpa);
     if (q == null) {
         const d0 = p.meta.digest();
         if (std.mem.eql(i32, &Pool.digestWords(d0), x[1..9])) {
-            if (plan.makePlanBusy(&p.meta, prompt, h.max_tokens, x[0] != 0, busy)) |qq| {
+            if (plan.makePlanOwn(&p.meta, prompt, h.max_tokens, x[0] & 1 != 0, busy, ownOf(x[0]))) |qq| {
                 var mine = qq;
                 if (std.mem.eql(i32, &Pool.digestWords(mine.digest(d0)), x[9..17])) q = mine else mine.deinit(gpa);
             } else |err| std.debug.print("[tensorfold] pool: rank {d} could not plan conversation {d} ({s})\n", .{ e.rank, k, @errorName(err) });
@@ -577,6 +666,12 @@ pub fn admitMulti(ch: *lockstep.Channel, e: *engine.Engine, k: usize, h: lockste
         return error.MultiCheckFailed;
     }
     try p.writeMap(e, qp, prompt.len);
+    // GET /v1/pool: the conversation admitted first (its prefill), then the others in flight
+    // GET /v1/pool: 受け付けた会話 (prefill 中) を先頭に、続いて処理中のほか
+    var act: [engine.multi_max + 1]u64 = undefined;
+    act[0] = qp.X;
+    @memcpy(act[1..][0..busy.len], busy);
+    p.noteLive(act[0 .. busy.len + 1]);
     const cv = &m.convs[k];
     try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(cv.pmap.?.ptr, e.pmap.?.ptr, e.pmap.?.len, e.stream.handle), "cuMemcpyDtoDAsync");
     const r: usize = @intCast(qp.resume_end);
@@ -640,7 +735,10 @@ pub fn commitMulti(e: *engine.Engine, k: usize) !engine.Stats {
     };
     defer gpa.free(seq);
     const V: u64 = seq.len;
-    try plan.commit(&p.meta, qp, seq, if (in_prompt) cv.prefill_done else prompt.len, @max(V, qp.resume_end));
+    // with the MTP layer, only its rows' range counts (as serve's commit: m.track.kvEnd)
+    // MTP 層があるときは、その行の範囲だけを数える (serve の確定と同じ: m.track.kvEnd)
+    const kv_end: u64 = if (cv.mtp) |*d| d.track.kvEnd(V) else V;
+    try plan.commit(&p.meta, qp, seq, if (in_prompt) cv.prefill_done else prompt.len, @max(kv_end, qp.resume_end));
     var busy_buf: [engine.multi_max]u64 = undefined;
     try p.meta.checkBusy(e.multiBusy(&busy_buf));
     const xi = p.meta.find(qp.X);
@@ -659,7 +757,7 @@ pub fn commitMulti(e: *engine.Engine, k: usize) !engine.Stats {
     try e.stream.synchronize();
     const hash_ms = ms(e.io, th);
     if (p.meta.saves.len > 0) {
-        const drafted = cv.drafted;
+        const drafted = cv.drafted and e.drafter != null;
         if (drafted and !in_prompt) {
             const dr = e.drafter.?;
             dr.use(k);
@@ -673,6 +771,7 @@ pub fn commitMulti(e: *engine.Engine, k: usize) !engine.Stats {
         try p.meta.checkBusy(e.multiBusy(&busy_buf));
     }
     p.noteStats(qp.evicted.len, false, qp.action, 0, hash_ms);
+    p.noteLive(e.multiBusy(&busy_buf)); // k's plan is gone: the others in flight / k のプランは外した: 処理中のほか
     const st0 = cv.st;
     var st = try e.multiEnd(k);
     st.cached = cv.start;

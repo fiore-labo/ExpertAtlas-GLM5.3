@@ -1,4 +1,4 @@
-English | [日本語](PANEL-GUIDE.ja.md)
+English | [日本語](PANEL-GUIDE.ja.md) | [简体中文](PANEL-GUIDE.zh-CN.md)
 
 # Expert Atlas: the control panel
 
@@ -18,13 +18,11 @@ The circle shows the 19,200 routed experts: layers 3 to 77 run from the inside o
   New · unsaved.
   - **Shares**: type each width's share of the experts in the table (5, 4 and 3 bit; the narrowest width with data
     takes the rest, so they add up to 100 %), or drag the knobs on the curve. The scale counts from the 5 bit end,
-    which is 100 %: 5 bit 10 % is the range 100–90 %. In a mix the most used experts get the widest bits, ranked by
+    which is 0 %: 5 bit 10 % is the range 0–10 %. In a mix the most used experts get the widest bits, ranked by
     prefill 0.3 / decode 0.7 (an expert's decode share weighed 0.7, its prefill share 0.3; `ATLAS-TESTS.md`).
   - **Count** (decode, prefill, prefill 0.3 / decode 0.7): for reading only. The curve, the knobs' readouts (what share
     of the picks the experts up to a point carry), the circle's order and Use follow the counts picked; the plan's bits
-    do not change. When the plan's bits follow other counts than the ones shown (an opened allocation, or Count other
-    than prefill 0.3 / decode 0.7), the regions are faded and marked Regions: a guide; the strip under the curve shows
-    the real bits.
+    do not change.
   - **A new plan**: changing the shares (typed or with the knobs) makes a new plan (New · unsaved), the experts ranked by
     the plan's usage record (below).
   - **Open**: the last run's allocation and the saved ones, with their shares, mean bits, when and how each was made.
@@ -49,12 +47,12 @@ The circle shows the 19,200 routed experts: layers 3 to 77 run from the inside o
   (N = 2, 3, 4, 5), each in its own directory on every node, by default `~/models/GLM-5.3-EXL3-Experts-<N>bit`, with
   its manifest. A width whose bank is missing on any node shows No data with the node and what it lacks. It cannot be
   planned: its row in the table shows No data and takes no share.
-- **Memory** ([ LAUNCH ]): each node's memory for the plan (expert, Other weights, KV, Work, Margin) and the verdict:
+- **Memory** ([ NODE ]): each node's memory for the plan (expert, Other weights, KV, Work, Margin) and the verdict:
   Fits, Tight or Does not fit. KV FP4 / FP8 shows the KV size each format would allocate (tokens, and GiB a node); press
-  one to choose it. The KV always takes all the room the plan leaves: Max model len for one conversation, the rest for
+  one to choose it. The KV always takes all the room the plan leaves: Context length for one conversation, the rest for
   earlier conversations. Keep for the OS sets how much each node keeps free.
-- **Max model len**: the longest request (prompt and reply) the start allows, in tokens: 131K, 262K, 524K, glm53.conf's
-  CONTEXT, or Max (the most the plan leaves room for in the chosen KV format, less what the engine needs beyond it: it
+- **Context length**: the longest request (prompt and reply) the start allows, in tokens: 131K, 262K, 524K, glm53.conf's
+  CONTEXT_LENGTH, or Max (the most the plan leaves room for in the chosen KV format, less what the engine needs beyond it: it
   is never the whole KV size, the pool cache keeping at least 512 tokens). A size that does not fit is greyed; a
   context the launcher had to cut is shown under the row. Max is the default. The launcher finds Max from the memory a
   start with that drafter took on this lane (measured each start, a drafter at a time); until then it plans on built-in
@@ -77,6 +75,9 @@ The circle shows the 19,200 routed experts: layers 3 to 77 run from the inside o
   every bank must be on every node. Until a start on a new count has been measured, the plans are estimates.
 - **Start**: press it twice (Start, then Confirm within 8 s). The circle lights each layer as it loads (real: the engine's load
   progress), then the page turns into the live panel.
+- **Startup flow**: a screen opened from the header's button (shown while the step bar is, the screens before the
+  engine runs): 0 start (`./tf-glm53 up` on the head node) › 1 › 2 › 3 › the live panel, on one page, numbered as the
+  step bar, each step tagged with the step bar's own button. Close or Escape goes back.
 - **Optimised allocations**: a start loads the table it is given and never re-sorts, so the launch screen has no
   Optimise experts. Optimise while the engine runs (below): the result is what the engine holds at the stop, so the
   launch screen opens with it as the last run; Save keeps it for later starts, and Open brings it back.
@@ -95,10 +96,47 @@ The circle shows the 19,200 routed experts: layers 3 to 77 run from the inside o
 - **Rim**: the prefill's progress while a prompt is computed (real); while decoding, the reply's text runs round the
   rim.
 - **Centre and below**: in the centre, bpw (the mean bits of the experts picked) and each width's share of the picks;
-  below the circle, prefill and decode tok/s, and bpw over the last 3 minutes.
-- **[ LAUNCH ]**: Stop, and the servers: head (rank 0) and the workers, each with its free memory and its GPU and CPU
+  below the circle, prefill and decode tok/s (decode: every request's tokens together, decode total when several run at
+  once; prefill when several run: the request the circle follows, over the time its prompt computed, the waits for the
+  decode left out, — from an engine that does not give it), and bpw over the last 3 minutes.
+- **[ NODE ]**: Stop, and the servers: each named with head or worker beside it, with its free memory and its GPU and CPU
   temperatures (the CPU's is the hottest of the node's thermal zones: on GB10 the CPU and GPU share one chip, which runs
   6-10 °C above the GPU's own reading under load), read by the launcher every 5 s; "—" where the launcher gives none.
+  RDMA (an engine that says where its RoCE proxy threads run): each node's two proxy threads' CPUs, between the nodes
+  and the DCP pair (e.g. 0·10), and their kind, A725 or X925; the line under the table says the start setting
+  (ROCE_PROXY_CORES: kept on A725, the default, or left to the OS). The head's are where they ran last; the
+  other nodes' where they were kept at the start, "—" when left to the OS. Without the launcher the same is a card of
+  its own, [ RDMA ].
+  Concurrent: the engine's conversations at once and, at 2 or more, the requests in flight.
+- **GPU split** (an engine that runs several conversations at once and serves its schedule; otherwise not shown): how
+  the GPU's time is shared while a prompt is computed beside conversations that are decoding. The slider goes from
+  prefill 100% (the prompts first: the decode stops while a prefill runs) to decode 100% (while a conversation is
+  generating, new prompts wait and a running prefill stops), in steps of 5; between, that percentage of the time goes
+  to the decode. When only one of them has work, it uses all of the GPU. The value is sent when the slider is let go
+  (Applying…, then Applied) and holds for the running requests too; a refused change goes back to the value in use, the
+  reason in red. The dot under the slider is the value the engine started with, when the engine gives it. Below: the
+  decode's share the engine measured over the latest overlap (Overlapping while they overlap); at decode 100%, the
+  prompts waiting and the longest wait. Each row's explanation opens from the ⓘ beside its name (as Context length's)
+  and shuts with it or Escape; a refusal's reason shows in red without it.
+  Priority prompt (short_prompt in the API): a prompt with at most this many new tokens to compute (past the cache, not its length) goes before the
+  longer ones whatever the split, and its prefill takes all of the GPU (the decode stops for the time it takes; the
+  hint gives no seconds). − / + step through 0, 256, 512, 1K, 2K, 4K, 8K, 16K, 32K; a value can
+  be typed (0 to 1,048,576, sent on Enter or leaving the field); 0 turns it off. Overtake a running prefill too (off by
+  default): a long prefill running gives way to a priority prompt and goes on from the chunks it finished (it is up to a
+  chunk later). Every value follows the engine every second, so a change made elsewhere shows here. An engine started
+  without the launcher (no [ NODE ] card) shows the same in a card of its own, [ GPU SPLIT ], with Concurrent in its
+  head.
+- **[ REASONING CONTROL ]** (under [ NODE ], as the GPU split; the thinking's settings that change while the engine runs; the API and the settings keep their names, `/v1/thinking` and `THINKING_*`):
+  Thinking limit, a slider from 5% to 100% (No limit) of each reply's limit: at it the engine has the model close
+  its thinking and answer in the rest, so a short reply (a harness's max_tokens) keeps room for its answer too; the
+  split of the server's reply limit shows under it, the start value as a dot. Organize midway Yes (checkpoint) / No;
+  Organize every, a slider from 10% to 100% of the reply's limit (1,024 tokens at least; the right end 100%, the default: no
+  organizing until the limit), greyed without organizing midway and otherwise below the thinking limit; Organize at the close Yes (the share of the
+  thinking limit it had, else glm53.conf's, else 100%) / No. Each takes the requests that start after it (Applying…, then Applied;
+  refused: back, the reason in red) and is written to glm53.conf by the launcher, so the next start keeps it; a
+  request's own thinking budget or summaries come first. On the launch screen (the engine stopped), or with an engine
+  that cannot change them while running, the same card writes glm53.conf's start values at once (From the next
+  start). The engine settings screen sets the same four; either shows the other's change.
 - **[ BIT ALLOC ]**: the bits loaded, with the allocation the start used in the head (New · unsaved for a new plan).
   Save keeps them under a name.
   For each width: Experts (their number), Share (of the experts), Use (their share
@@ -124,6 +162,38 @@ The circle shows the 19,200 routed experts: layers 3 to 77 run from the inside o
 - An engine run with `TF_GLM53_MULTI` changes no bits while it runs. There Optimise experts gives the estimate with
   Save for a start in place of Apply: the estimate's bits are saved under a name (`opt-<time>`), inference going on.
   Stop the engine, Open that allocation and Start.
+
+## Engine settings
+
+The switch at the top right, Inference (Launch while stopped) | Engine settings, opens the settings that need a restart,
+in glm53.conf (a launcher without them shows no switch). The settings that change while running stay on the inference
+screen: the GPU split (with Use these at the next start too, which writes the values in use as glm53.conf's start
+values without a restart), [ REASONING CONTROL ] (its changes written to glm53.conf as they apply) and Optimise experts.
+
+- Each row has its name, an (i) that opens what it acts on, what is set, why, an example and what it goes with (and the
+  default), Changed while it differs from glm53.conf, and the key. A value against its rule (the same checks as
+  tf-glm53) is red and Save is greyed; a choice that cannot be taken now is greyed and says why when pointed at.
+- **KV and context length**: Context length (CONTEXT_LENGTH: one request's longest) and KV size (KV_SIZE: the whole
+  KV cache, one pool every conversation shares; a start from the panel always takes all the room the plan leaves, so
+  this is for `tf-glm53 up`) and the KV format.
+- **Thinking and answer sizes**: a reply's limit (MAX_TOKENS_SHARE, a slider: a share of the context length, 70% by default,
+  for a request that names no max_tokens; the client's own max_tokens comes first, and an older glm53.conf's MAX_TOKENS
+  until the slider is saved, which clears it) and the
+  thinking's limit as a share of it (THINKING_SHARE; saving it clears an older THINKING_BUDGET). The thinking's limit,
+  Organize midway, Organize every (THINKING_FOLD_SHARE) and organizing at the close are tagged At once: while the
+  engine runs a save applies them at once (the message says which), and the inference screen's [ REASONING CONTROL ] sets the
+  same values. With organizing midway the limits are tagged Virtual: they count the
+  tokens written, and the thinking that takes out of the KV still counts, so they may pass the context length. The (i) beside the group's name draws a reply's split from the values set, as shares: the sizes change with each
+  prompt. Organize midway (THINKING_FOLD, and the size target as a share of the thinking it organizes, 70% by default, midway and at the close) and organizing at the close (Yes or No, No by default; with Yes, organize after a thinking of N% of the thinking limit or more, counted since the last organizing, 100% to start from: THINKING_FOLD_AT_CLOSE_SHARE, 0 for No) are their own groups. Notice of what is left is Yes or No too (with Yes, every how many thinking tokens, 5,000 to start from: THINKING_NOTICE, 0 for No).
+- While the engine runs, the drafter, concurrent inference, KV format, context length, KV size and memory kept show what it took; when glm53.conf has another value, Next start: X beside them says so. Only a row you change is saved; while stopped they show glm53.conf.
+- The weights, the DFlash2 model and the nodes are shown here and changed where they are checked: the launch screen's
+  [ WEIGHTS ] (Check and save: saved once every node passes; a failed row says why and nothing is saved) and the node check. The API port changes only while the engine is stopped; the panel's port once the
+  launcher starts again. Advanced (development) holds the prompt chunk, SP, the token fixes and
+  EXTRA_ENV.
+- **Save** writes the changed keys (glm53.conf copied aside first as glm53.conf.bak-<time>). While the engine runs it
+  keeps its values: the rows saved say Saved · next start. **Save and restart** asks once, then the stop's own question
+  (save this run's usage under a name or not), and the launcher stops the engine and starts it again with the saved
+  settings and the same bits.
 
 ## Display
 
