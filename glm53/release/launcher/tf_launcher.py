@@ -1940,8 +1940,8 @@ class Launcher:
                     else:
                         r["why"] = ", ".join(x for x in (r["why"], m.group(4).strip()) if x)
                 # the check's own lines that say what it found, not a problem (the drafter, the replies, the notes;
-                # the ring's line is the answer's ring)
-                elif line.strip() and not re.match(r"\s*(drafter:|check: ok|replies:|concurrent:|image:|note:|logs:|ring:|\(DRAFTER is set)", line) and not m:
+                # the ring's line is the answer's ring, the head's weights and each bank's are the answer's rows)
+                elif line.strip() and not re.match(r"\s*(drafter:|check: ok|replies:|concurrent:|image:|note:|logs:|ring:|no weights at |bank \d+ bit:|\(DRAFTER is set)", line) and not m:
                     if c.returncode != 0 and not line.startswith("check:"):
                         why.append(line.strip())
             if c.returncode != 0 and not c.stdout.strip() and c.stderr.strip():
