@@ -12,7 +12,8 @@ const prompt_mod = @import("prompt.zig");
 const log = @import("log.zig");
 const ids = @import("ids.zig");
 const clock = @import("clock.zig");
-const Server = @import("server.zig").Server;
+const server_mod = @import("server.zig");
+const Server = server_mod.Server;
 const chunk_plan = @import("chunk_plan.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
@@ -61,6 +62,9 @@ pub const Reply = struct {
     reasoning_tokens: usize,
     runtime: Value,
     speculative: Value,
+    /// A folded reply's reasoning as the model's context held it (the head, the label, the last checkpoint and the
+    /// thinking after it), for the client to send back next turn in place of ``reasoning``; null: not folded.
+    context_reasoning: ?[]const u8 = null,
 };
 
 pub const Failure = error{ Refused, Cancelled, Failed, OutOfMemory };
@@ -82,6 +86,7 @@ const Mailbox = struct {
     raised: []bool = &.{},
     telemetry: []u8 = "",
     message: []u8 = "",
+    context: []u32 = &.{}, // a folded reply as the model's context held it (api.Stats.context_reply)
 
     fn onEvent(ctx: *anyopaque, _: api.Id, event: *const api.Event) void {
         const m: *Mailbox = @ptrCast(@alignCast(ctx));
@@ -104,6 +109,7 @@ const Mailbox = struct {
                 m.raised = m.gpa.dupe(bool, f.stats.prefill_raised) catch &.{};
                 m.telemetry = m.gpa.dupe(u8, f.stats.telemetry_json) catch "";
                 m.message = m.gpa.dupe(u8, f.message) catch "";
+                m.context = m.gpa.dupe(u32, f.stats.context_reply) catch &.{};
             },
         }
         m.cond.signal(m.io);
@@ -116,6 +122,7 @@ const Mailbox = struct {
         m.gpa.free(m.raised);
         m.gpa.free(m.telemetry);
         m.gpa.free(m.message);
+        m.gpa.free(m.context);
     }
 };
 
@@ -164,13 +171,25 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     const rendered = try prompt_mod.prepare(srv, cx, input, thinking, effort);
     if (gone.check()) return error.Cancelled;
     if (rendered.ids.len == 0) return cx.refuse("rendered prompt is empty");
+    // the fold asked for (the request's thinking_fold, else the server's): with it the context holds the prompt, the
+    // thinking since the last fold and the answer, not the whole reply, so max_tokens is checked against that below
+    // the server's thinking defaults as they are now (POST /v1/thinking changes them while the engine runs), read once
+    const tn = srv.thinkingNow();
+    const fold_req: api.Fold = if (!thinking) .off else if (f.get("thinking_fold")) |v| (if (v == .string) std.meta.stringToEnum(api.Fold, v.string) orelse return cx.refuse("thinking_fold must be off, recent, checkpoint or branch") else return cx.refuse("thinking_fold must be off, recent, checkpoint or branch")) else tn.fold;
+    const fold_on = fold_req != .off and srv.canFold(fold_req) and srv.think_close.len > 0;
+    // the budget's summary empties the context too, so a reply with one may also pass the context's length
+    // 予算の要約も文脈を空けるので、それがある応答も文脈の長さを越えてよい
+    const steps_field = f.get("thinking_fold_steps");
+    const at_budget_on = thinking and srv.think_close.len > 0 and (if (steps_field) |v| v == .object and v.get("budget") != null else tn.fold_step != null and (flag(f, "thinking_fold_at_budget") orelse (tn.at_budget != 0)));
     const window: i64 = srv.info.context_window;
     const n: i64 = @intCast(rendered.ids.len);
     if (window > 0) {
         const room = window - n;
         if (room < 1) return cx.fail(.context_length, "{s} {d} tokens{s}, but the rendered prompt has {d} tokens and leaves no room for a reply, which exceeds the context window. Compact or shorten the conversation.", .{ errors.context_limit, window, if (srv.info.context_fitted) ", the most this server's memory budget fits" else "", n });
-        if (input.max_tokens != null and limit > room) return cx.fail(.context_length, "{s} {d} tokens, but the rendered prompt has {d} tokens and requests {d} reply tokens, which exceeds the context window. Reduce the prompt to at most {d} prompt tokens or request at most {d} reply tokens, including chat template and thinking tokens.", .{ errors.context_limit, window, n, limit, @max(0, window - limit), room });
-        limit = @min(limit, room);
+        if (!fold_on and !at_budget_on) {
+            if (input.max_tokens != null and limit > room) return cx.fail(.context_length, "{s} {d} tokens, but the rendered prompt has {d} tokens and requests {d} reply tokens, which exceeds the context window. Reduce the prompt to at most {d} prompt tokens or request at most {d} reply tokens, including chat template and thinking tokens.", .{ errors.context_limit, window, n, limit, @max(0, window - limit), room });
+            limit = @min(limit, room);
+        }
     }
     const system_len: usize = if (input.prompt != null) 0 else prompt_mod.systemPrefixLen(srv, cx, input.messages, input.tools, rendered.ids, thinking, effort);
     var shared: std.ArrayList(u32) = .empty;
@@ -194,17 +213,288 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .tools_json = if (input.tools.len > 0) try json.stringify(a, .{ .array = @constCast(input.tools) }, .{ .ascii = false }) else "",
     };
     try srv.checkFeatures(cx, f, input.tools.len > 0, thinking, rendered.ids, input.tools, &request);
+    // the thinking's share and the answer's part: the share is of max_tokens, at most what the prompt leaves
+    // of the context (`room`), and the rest of that is the answer's. Without folds the thinking's budget is the share;
+    // with them the thinking goes on past the context (what is folded leaves it), its budget max_tokens less the
+    // answer's part, and it folds when it fills its share of the room
+    // 思考の割合と答えの分: 割合は max_tokens の、ただし prompt が文脈に残す分 (`room`) までの割合で、残りが
+    // 答えの分。畳み込みなしでは思考の予算はその割合。ありでは思考は文脈を越えて続き (畳んだ分は文脈から出る)、予算は
+    // max_tokens から答えの分を引いたもの。畳むのは思考が room の割合を埋めた時
+    const room: i64 = if (window > 0) window - n else limit;
+    const split = thinkingSplit(room, limit, tn.share, fold_on, srv.config.thinking_fold_window, tn.fold_share);
+    var asked_window = false;
     if (thinking) {
+        // the request's budget, else --thinking-budget, else the share
         const budget_field = f.get("thinking_budget");
-        const budget: i64 = if (budget_field != null and budget_field.?.truthy()) budget_field.?.int64() orelse 0 else srv.config.thinking_budget;
+        const budget: i64 = if (budget_field != null and budget_field.?.truthy()) budget_field.?.int64() orelse 0 else if (tn.budget > 0) tn.budget else split.budget;
+        const notice: i64 = srv.config.thinking_notice;
+        // the fold: the request's thinking_fold / _window / _keep / _max, else the server's (the window: thinkingSplit)
+        const fold = fold_req;
+        const window_default = split.window;
+        const asked = f.get("thinking_fold_window");
+        asked_window = asked != null;
+        const fold_window: i64 = if (asked) |v| v.int64() orelse window_default else window_default;
+        const keep0: i64 = if (f.get("thinking_fold_keep")) |v| v.int64() orelse srv.config.thinking_fold_keep else srv.config.thinking_fold_keep;
+        const keep = if (keep0 > 0 and (asked_window or keep0 < fold_window)) keep0 else @divTrunc(fold_window, 2);
+        const fold_max: i64 = if (f.get("thinking_fold_max")) |v| v.int64() orelse tn.fold_max else tn.fold_max;
+        if (fold_max < 0) return cx.refuse("thinking_fold_max must be a count from 0");
+        const folding = fold != .off and srv.canFold(fold);
+        // the summary at the think block's close: the request's thinking_fold_at_close (tokens), else the server's
+        // percent of the thinking's limit (0: none)
+        const close_default = closeAt(tn.at_close_share, if (budget > 0) budget else limit);
+        const at_close: i64 = if (f.get("thinking_fold_at_close")) |v| v.int64() orelse close_default else close_default;
+        if (at_close < 0) return cx.refuse("thinking_fold_at_close must be a token count from 0");
+        // the server's summary at the close is a step like the budget's, unless the request brings its own texts or steps
+        // サーバーの閉じる時の要約は予算と同じ手順。要求が自分の文か手順を持つときを除く
+        const close_by_step = at_close > 0 and f.get("thinking_fold_texts") == null and steps_field == null and tn.close_step != null;
+        const closing = at_close > 0 and !close_by_step and srv.fold_close_open.len > 0;
+        // a request's own checkpoint texts, to compare wordings without a rebuild: thinking_fold_texts
+        // {"label": text, "stages": [{"open": text, "resume": text}, ...], "at_close": {"open": text, "budget_open":
+        // text}} (1 to 3 stages; at_close and its budget_open may be left out; the end stays the marker)
+        const texts = if (folding or closing) try foldTexts(srv, cx, f.get("thinking_fold_texts")) else null;
+        // a request's own steps, to compare ways of summing up without a rebuild (foldSteps)
+        const steps = try foldSteps(srv, cx, steps_field);
+        if (steps) |st| if (st.midway != null and fold != .branch) return cx.refuse("thinking_fold_steps: midway needs thinking_fold branch");
+        // the summary at the budget's end: where it starts, and whether the server's runs when the request has no steps
+        const margin: i64 = if (f.get("thinking_fold_margin")) |v| v.int64() orelse tn.fold_margin else tn.fold_margin;
+        if (margin < 0 or margin > 50) return cx.refuse("thinking_fold_margin must be a percent from 0 to 50");
+        const stages: i64 = if (f.get("thinking_fold_stages")) |v| v.int64() orelse srv.config.thinking_fold_stages else if (texts) |t| @intCast(t.opens.len) else srv.config.thinking_fold_stages;
+        if (folding and (stages < 1 or stages > server_mod.fold_stages)) return cx.refuse("thinking_fold_stages must be 1, 2 or 3");
+        // the summary's cap: the request's tokens, else the server's percent of the thinking it organises, within that
+        // percent of the most a fold holds (Job reads foldCapOf), else the server's tokens
+        // 要約の上限: 要求のトークン数、なければサーバーの「整理する思考の %」(1 回が持つ最大のその % まで)、なければサーバーのトークン数
+        const cap_share: i64 = if (f.get("thinking_fold_cap") != null) 0 else srv.config.thinking_fold_cap_share;
+        const cap_most: i64 = if (folding) fold_window else if (budget > 0) budget else limit;
+        const cap: i64 = if (cap_share > 0) @min(std.math.maxInt(u32), @max(128, @divTrunc(cap_most * cap_share, 100))) else if (f.get("thinking_fold_cap")) |v| v.int64() orelse srv.config.thinking_fold_cap else srv.config.thinking_fold_cap;
+        request.think_fold_cap_share = @intCast(cap_share);
+        if (cap_share > 0) request.think_fold_cap = @intCast(cap);
+        // 0 with steps: no cap, a rewrite is at most the thinking it rewrites (Job.stepCap)
+        if (cap_share == 0 and (folding or closing or steps != null) and !(steps != null and cap == 0) and (cap < 128 or cap > 16384)) return cx.refuse("thinking_fold_cap must be from 128 to 16384");
+        if (folding and asked_window and (fold_window < 1024 or keep >= fold_window)) return cx.refuse("thinking_fold_window must be at least 1024 and thinking_fold_keep less than it");
         if (srv.think_close.len > 0) request.loop_guard = srv.config.loop_guard;
-        if ((budget > 0 or request.loop_guard) and srv.think_close.len > 0) {
+        if (folding) {
+            request.think_fold = fold;
+            request.think_fold_window = @intCast(@min(@max(0, fold_window), std.math.maxInt(u32)));
+            request.think_fold_max = @intCast(@min(fold_max, std.math.maxInt(u32)));
+            request.think_fold_region = @intCast(@min(@max(0, split.region), std.math.maxInt(u32)));
+            request.think_fold_keep = @intCast(keep);
+            request.think_fold_stages = @intCast(stages);
+            request.think_fold_cap = @intCast(cap);
+            request.think_fold_opens = if (texts) |t| t.opens else srv.fold_opens[0..];
+            request.think_fold_label = if (texts) |t| t.label else srv.fold_label;
+            request.think_fold_resumes = if (texts) |t| t.resumes else srv.fold_resumes[0..];
+            request.think_fold_closes = if (texts) |t| t.closes else srv.fold_closes[0..];
+            if (fold == .branch) {
+                request.think_fold_branch_ask = srv.fold_branch_ask;
+                request.think_fold_branch_label = srv.fold_branch_label;
+                request.think_fold_branch_resume = srv.fold_branch_resume;
+                request.think_fold_branch_stops = srv.fold_branch_stops;
+                request.think_fold_branch_open = srv.fold_branch_open;
+            }
+        }
+        if (closing) {
+            request.think_fold_at_close = @intCast(@min(at_close, std.math.maxInt(u32)));
+            request.think_fold_close_open = if (texts) |t| (t.close_open orelse srv.fold_close_open) else srv.fold_close_open;
+            request.think_fold_close_budget_open = if (texts) |t| (t.close_budget_open orelse srv.fold_close_budget_open) else srv.fold_close_budget_open;
+            request.think_fold_cap = @intCast(cap);
+            request.think_fold_label = if (texts) |t| t.label else srv.fold_label;
+        }
+        if (steps) |st| {
+            request.think_step_midway = st.midway;
+            request.think_step_budget = st.budget;
+            request.think_step_close = st.close;
+            request.think_unclosed = st.unclosed;
+            request.think_fold_cap = @intCast(cap);
+            request.think_fold_branch_stops = srv.fold_branch_stops;
+            request.think_fold_branch_open = srv.fold_branch_open;
+        } else {
+            if (at_budget_on and budget > 0) request.think_step_budget = tn.fold_step;
+            if (close_by_step) {
+                request.think_step_close = tn.close_step;
+                request.think_step_close.?.min = @intCast(@min(at_close, std.math.maxInt(u32)));
+            }
+            if (request.think_step_budget != null or request.think_step_close != null) {
+                request.think_unclosed = .close;
+                request.think_fold_branch_stops = srv.fold_branch_stops;
+                request.think_fold_branch_open = srv.fold_branch_open;
+            }
+        }
+        request.think_step_margin = @intCast(margin);
+        request.think_answer = @intCast(@min(@max(0, split.answer), std.math.maxInt(u32)));
+        if ((budget > 0 or notice > 0 or folding or closing or close_by_step or steps != null or request.loop_guard) and srv.think_close.len > 0) {
             if (budget > 0) request.think_budget = @intCast(@min(budget, std.math.maxInt(u32)));
             request.think_close = srv.think_close;
             request.think_end = srv.think_close_end;
+            request.think_wrap = srv.think_wrap;
+            request.think_breaks = srv.think_breaks;
+            if (notice > 0) {
+                request.think_notice_every = @intCast(@min(notice, std.math.maxInt(u32)));
+                request.think_notices = try thinkNotices(srv, a, notice, @max(0, budget), limit);
+            }
         }
     }
+    // with folds, the context holds the prompt, the thinking at its most (the head kept, the label, the fold window,
+    // the line break waited for, the checkpoint's request, cap and close) and the answer past the thinking budget:
+    // that has to fit, not max_tokens (the host caps each segment at the context left, so the context never overruns).
+    // A window of the thinking's share is cut to what fits; one that fits less than 1024 tokens leaves this request
+    // without folds (its budget the share again, max_tokens at most the room)
+    // 畳み込みありでは、文脈は prompt、思考の最大 (残す先頭、見出し、窓、待つ改行、チェックポイントの依頼と上限と終わり)、
+    // 思考の予算より後の答えを持つ。収まるべきはそれで、max_tokens ではない (ホストが区間ごとに残りの文脈で切るので、文脈は
+    // 越えない)。思考の割合からの窓は収まる大きさに切る。1024 未満しか収まらなければこの要求は畳まない (予算は割合に戻し、
+    // max_tokens は room まで)
+    if (window > 0 and request.think_fold != .off and request.think_end != null) {
+        const slack = foldSlack(&request);
+        const answer: i64 = if (request.think_budget > 0) @max(0, limit - request.think_budget) else 0;
+        // with a percent cap, what a fold holds and its summary have to fit together
+        // % の上限では、1 回が持つ分とその要約が一緒に収まること
+        if (request.think_fold_cap_share > 0) {
+            const share: i64 = request.think_fold_cap_share;
+            const most = @divTrunc(@max(0, room - answer - @as(i64, @intCast(slack))) * 100, 100 + share);
+            request.think_fold_cap = @intCast(@min(@as(i64, request.think_fold_cap), @max(128, @divTrunc(most * share, 100))));
+        }
+        const fits = room - answer - request.think_fold_cap - @as(i64, @intCast(slack));
+        // the region (where the summaries stack) is what fits beside the answer and the summary being written
+        // 要約が積み上がる領域は、答えと書いている要約の横に収まる分
+        if (fits >= 1024 and request.think_fold_region > fits) request.think_fold_region = @intCast(@min(fits, std.math.maxInt(u32)));
+        if (!asked_window) {
+            if (fits < 1024) {
+                request.think_fold = .off;
+                limit = @min(limit, room);
+                request.max_tokens = @intCast(@min(limit, std.math.maxInt(u32)));
+                if (request.think_budget > 0 and f.get("thinking_budget") == null and tn.budget == 0) request.think_budget = @intCast(thinkingSplit(room, limit, tn.share, false, 0, 0).budget);
+                // the limit moved: the server's percent for the summary at the close follows it
+                if (f.get("thinking_fold_at_close") == null and tn.at_close_share > 0) {
+                    const at: u32 = @intCast(@min(closeAt(tn.at_close_share, if (request.think_budget > 0) request.think_budget else limit), std.math.maxInt(u32)));
+                    if (request.think_fold_at_close > 0) request.think_fold_at_close = at;
+                    if (request.think_step_close) |*st| st.min = at;
+                }
+                if (request.think_notice_every > 0) request.think_notices = try thinkNotices(srv, cx.a, request.think_notice_every, request.think_budget, limit);
+            } else if (request.think_fold_window > fits) {
+                request.think_fold_window = @intCast(@min(fits, std.math.maxInt(u32)));
+                if (request.think_fold_keep >= request.think_fold_window) request.think_fold_keep = request.think_fold_window / 2;
+            }
+        }
+    }
+    if (window > 0 and request.think_fold != .off and request.think_end != null) {
+        const slack = foldSlack(&request);
+        const peak: i64 = @as(i64, request.think_fold_window) + request.think_fold_cap + @as(i64, @intCast(slack));
+        const answer: i64 = if (request.think_budget > 0) @max(0, limit - request.think_budget) else 0;
+        const need = @min(limit, peak + answer);
+        if (n + need > window) return cx.fail(.context_length, "{s} {d} tokens, but the rendered prompt has {d} tokens; with thinking folds the context also holds up to {d} thinking tokens (the fold window, the checkpoint and its texts) and the answer past the thinking budget ({d} tokens). Reduce the prompt to at most {d} prompt tokens, or lower thinking_fold_window, thinking_fold_cap or max_tokens.", .{ errors.context_limit, window, n, peak, answer, @max(0, window - need) });
+    }
     return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .effort = effort, .sampled = sampling != null, .drafts = drafts, .stops = stops_opt, .preparing = preparing };
+}
+
+/// Where the summary at the think block's close starts: `share` percent of the thinking's limit, at least one token;
+/// share 0: never.
+pub fn closeAt(share: i64, thinking_limit: i64) i64 {
+    if (share <= 0) return 0;
+    return @max(1, @divTrunc(@max(0, thinking_limit) * share, 100));
+}
+
+test "closeAt: a percent of the thinking's limit, 0 for never" {
+    try std.testing.expectEqual(@as(i64, 0), closeAt(0, 464486));
+    try std.testing.expectEqual(@as(i64, 23224), closeAt(5, 464486));
+    try std.testing.expectEqual(@as(i64, 1440), closeAt(5, 28800));
+    try std.testing.expectEqual(@as(i64, 1), closeAt(1, 10));
+    try std.testing.expectEqual(@as(i64, 1), closeAt(50, 0));
+}
+
+/// A reply's thinking split: `share` percent of its max_tokens `limit`, at most of the context `room` the
+/// prompt leaves, is the thinking's and the rest the answer's. Without folds the budget is the thinking's part; with
+/// them the thinking goes on past the context (what is folded leaves it), its budget `limit` less the answer's part,
+/// and its window (where it folds) the share of the room, no later than `early` tokens or `fold_share` percent of
+/// `limit` (at least 1024) when those are above 0. Share 0: no budget, the window all the room. The window is cut
+/// further to what fits beside the answer and the summary (prepare).
+/// 応答の思考の分け方: max_tokens `limit` の `share` %、ただし prompt が残す文脈 `room` までの割合が思考の分、
+/// 残りが答えの分。畳み込みなしでは予算は思考の分。ありでは思考は文脈を越えて続き (畳んだ分は文脈から出る)、予算は
+/// `limit` から答えの分を引いたもの、窓 (畳む所) は room の割合。`early` トークンか `limit` の `fold_share` % (1024 以上)
+/// が 0 より大きければそれより遅くはしない。share 0: 予算なし、窓は room 全部。窓は答えと要約の横に収まるようさらに切る
+/// (prepare)。
+pub const Split = struct { budget: i64, answer: i64, window: i64, region: i64 };
+
+pub fn thinkingSplit(room: i64, limit: i64, share0: i64, folds: bool, early0: i64, fold_share: i64) Split {
+    const share = @min(100, @max(0, share0));
+    const base = @min(limit, room);
+    const answer: i64 = if (share > 0) base - @divTrunc(base * share, 100) else 0;
+    const budget: i64 = if (share == 0) 0 else if (folds) limit - answer else base - answer;
+    const region: i64 = if (share > 0) @divTrunc(room * share, 100) else room;
+    var early: i64 = early0;
+    if (fold_share > 0) {
+        const by_share = @max(1024, @divTrunc(limit * @min(100, fold_share), 100));
+        early = if (early > 0) @min(early, by_share) else by_share;
+    }
+    return .{ .budget = budget, .answer = answer, .window = if (early > 0) @min(early, region) else region, .region = region };
+}
+
+test "thinkingSplit: the share of max_tokens at most of the room; with folds the budget runs past the room" {
+    const t = std.testing;
+    // pi on a 1M lane: max_tokens 276,480 below the room 988,576; share 81: the same budget folded or not
+    var s = thinkingSplit(988_576, 276_480, 81, true, 0, 0);
+    try t.expectEqual(@as(i64, 52_532), s.answer);
+    try t.expectEqual(@as(i64, 223_948), s.budget);
+    try t.expectEqual(@as(i64, 800_746), s.window);
+    try t.expectEqual(@as(i64, 800_746), s.region);
+    try t.expectEqual(@as(i64, 223_948), thinkingSplit(988_576, 276_480, 81, false, 0, 0).budget);
+    // max_tokens past the room (65,436): the answer's part is of the room; with folds the thinking takes the rest of
+    // max_tokens, without them its share of the room
+    s = thinkingSplit(65_436, 200_000, 50, true, 0, 0);
+    try t.expectEqual(@as(i64, 32_718), s.answer);
+    try t.expectEqual(@as(i64, 167_282), s.budget);
+    try t.expectEqual(@as(i64, 32_718), s.window);
+    try t.expectEqual(@as(i64, 32_718), thinkingSplit(65_436, 200_000, 50, false, 0, 0).budget);
+    // an earlier fold: --thinking-fold-window, fold_share percent of max_tokens (at least 1024), the smaller
+    try t.expectEqual(@as(i64, 71_680), thinkingSplit(988_576, 276_480, 81, true, 71_680, 0).window);
+    try t.expectEqual(@as(i64, 800_746), thinkingSplit(988_576, 276_480, 81, true, 71_680, 0).region);
+    try t.expectEqual(@as(i64, 27_648), thinkingSplit(988_576, 276_480, 81, true, 71_680, 10).window);
+    try t.expectEqual(@as(i64, 1_024), thinkingSplit(988_576, 4_000, 81, true, 0, 1).window);
+    try t.expectEqual(@as(i64, 32_718), thinkingSplit(65_436, 200_000, 50, true, 100_000, 0).window);
+    // share 0: no budget, the answer no part, the window all the room
+    s = thinkingSplit(10_000, 4_096, 0, true, 0, 0);
+    try t.expectEqual(@as(i64, 0), s.budget);
+    try t.expectEqual(@as(i64, 0), s.answer);
+    try t.expectEqual(@as(i64, 10_000), s.window);
+}
+
+/// The tokens a fold may hold past its window: the head kept, the label, the line break waited for, the longest
+/// request, close and resume, and (thinking_fold branch) the summary's request, label and resume line and a second cap
+/// (the answer may think first).
+/// 畳み込みが窓を越えて持ちうるトークン: 残す先頭、見出し、待つ改行、いちばん長い依頼・終わり・続き、(branch) 要約の依頼と
+/// 見出しと続きの一行と、もう 1 つの上限 (答えが先に考えうる)。
+fn foldSlack(r: *const api.Request) usize {
+    return r.think_fold_head + r.think_fold_label.len + 257 + longest(r.think_fold_opens) + longest(r.think_fold_closes) + longest(r.think_fold_resumes) +
+        r.think_fold_branch_ask.len + r.think_fold_branch_label.len + r.think_fold_branch_resume.len + (if (r.think_fold == .branch) r.think_fold_cap else 0) +
+        (if (r.think_step_midway) |st| st.ask.len + st.label.len + st.heading.len + st.after.len else 0);
+}
+
+/// The longest of `texts`, in tokens.
+fn longest(texts: []const []const u32) usize {
+    var m: usize = 0;
+    for (texts) |t| m = @max(m, t.len);
+    return m;
+}
+
+/// The think block's notices for a reply (GLM-5.3): the k-th after k * `every` thinking tokens, while that is short
+/// of the budget (no budget: of the reply's `limit`), at most 256. Each tells the model, in its own words, what it
+/// used and what is left; past half the budget it asks for focus, past three quarters for the answer soon.
+fn thinkNotices(srv: *Server, a: Allocator, every: i64, budget: i64, limit: i64) Allocator.Error![]const []const u32 {
+    var out: std.ArrayList([]const u32) = .empty;
+    const end = if (budget > 0) budget else limit;
+    var used = every;
+    while (used < end and out.items.len < 256) : (used += every) {
+        const left = end - used;
+        const line = if (budget > 0)
+            try std.fmt.allocPrint(a, "(Thinking budget check: I have used about {d} of my {d} thinking tokens; about {d} are left{s})\n", .{ used, budget, left, if (left * 4 <= budget) ", so I should wrap up and move on to the answer soon." else if (left * 2 <= budget) ", so I should stay focused on what the answer needs." else "." })
+        else
+            try std.fmt.allocPrint(a, "(Thinking check: I have used about {d} thinking tokens; the whole reply, answer included, may use at most {d} tokens.)\n", .{ used, limit });
+        // plain text: only memory can fail; anything else leaves the notices out
+        const toks = srv.text.encode(a, line, false) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return &.{},
+        };
+        try out.append(a, toks);
+    }
+    return out.items;
 }
 
 /// Submit a prepared request and collect its reply; ``sink`` hears the stream (null: not streamed).
@@ -231,6 +521,11 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     if (gone.check()) return error.Cancelled;
     var stop_hook: StopHook = .{ .srv = srv, .stops = .{ .strings = stops_opt.strings } };
     if (stops_opt.strings.len > 0) request.stop = .{ .ctx = &stop_hook, .check = StopHook.check };
+    var fold_hook: FoldHook = .{ .srv = srv };
+    if (request.think_fold == .checkpoint or request.think_fold_at_close > 0) request.think_fold_end = .{ .ctx = &fold_hook, .check = FoldHook.check };
+    var canon_hook: CanonHook = .{ .srv = srv };
+    if (request.think_end != null) request.think_canon = .{ .ctx = &canon_hook, .run = CanonHook.run };
+    request.token_vocab = .{ .ctx = &canon_hook, .bytes = CanonHook.tokenBytes, .added = CanonHook.tokenAdded };
     var box: Mailbox = .{ .io = io, .gpa = srv.gpa };
     defer box.deinit();
     const id = srv.next_id.fetchAdd(1, .monotonic);
@@ -497,6 +792,7 @@ const Generation = struct {
             .length => "length",
             .cancelled => "cancelled",
             .failed => return cx.other(if (m.message.len > 0) try a.dupe(u8, m.message) else "the reply failed"),
+            .busy => return cx.fail(.capacity, "{s}", .{if (m.message.len > 0) m.message else "the engine is busy; retry shortly"}),
         };
         const finished_ns = nowNs(g.srv.io);
         const content_tokens = if (g.ignore_eos) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
@@ -590,11 +886,14 @@ const Generation = struct {
             .tool_calls_streamed = g.calls != null and g.calls.?.streamed,
             .finish_reason = reason,
             .prompt_tokens = prompt_len,
-            .cached_tokens = m.cached orelse 0,
+            // TF_GLM53_BYTE_RESUME: the engine's prompt may be some ids longer than the one rendered
+            // TF_GLM53_BYTE_RESUME: エンジンの prompt は描画したものより数 id 長いことがある
+            .cached_tokens = @min(m.cached orelse 0, prompt_len),
             .completion_tokens = g.collected.items.len,
             .reasoning_tokens = reply_text.reasoningCount(g.collected.items, think_end),
             .runtime = .{ .object = runtime },
             .speculative = .{ .object = spec },
+            .context_reasoning = if (thinking and m.context.len > 0) try contextReasoning(g, a, m.context) else null,
         };
         if (std.mem.eql(u8, reason, "length") and thinking and reply_text.pyStrip(content).len == 0)
             log.line("warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {{\"enable_thinking\": false}} (server: --no-thinking)", .{});
@@ -602,6 +901,55 @@ const Generation = struct {
         const cycle = if (s.loop_period) |period| std.fmt.bufPrint(&cycle_text, " loop=period:{d}", .{period}) catch "" else "";
         log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted });
         return reply;
+    }
+};
+
+/// A folded reply's reasoning from the reply as the model's context held it (the think block's text, split as the
+/// reply's own); null when it has none.
+fn contextReasoning(g: *Generation, a: Allocator, context: []const u32) Failure!?[]const u8 {
+    // the text between the think block's tokens exactly as the context held it: no display parsing, no strip, for
+    // the template's '<think>' + reasoning + '</think>' renders it back as it is; a reply still thinking at its end
+    // has no block to send back
+    const close = g.srv.text.tokenId(g.srv.markers.close) orelse return null;
+    const end = std.mem.indexOfScalar(u32, context, close) orelse return null;
+    const open = g.srv.text.tokenId("<think>");
+    const start: usize = if (open != null and end > 0 and context[0] == open.?) 1 else 0;
+    return try g.srv.text.decode(a, context[start..end]);
+}
+
+/// Rank 0's remaking of a reply's think ids (Request.think_canon): the ids decoded and the text encoded again as one,
+/// the way the next turn's prompt tokenizes a client's copy; null when that changes the text (a character cut
+/// between tokens) or its structural tokens (special ids and the think markers keep their count).
+const CanonHook = struct {
+    srv: *Server,
+
+    fn run(ctx: *anyopaque, a: Allocator, think: []const u32) ?[]u32 {
+        const h: *CanonHook = @ptrCast(@alignCast(ctx));
+        const text = h.srv.text.decode(a, think) catch return null;
+        if (std.mem.indexOf(u8, text, "\u{FFFD}") != null) return null;
+        const out = h.srv.text.encode(a, text, false) catch return null;
+        const back = h.srv.text.decode(a, out) catch return null;
+        if (!std.mem.eql(u8, back, text)) return null;
+        if (h.structural(think) != h.structural(out)) return null;
+        return out;
+    }
+
+    fn tokenBytes(ctx: *anyopaque, a: Allocator, id: u32) ?[]const u8 {
+        const h: *CanonHook = @ptrCast(@alignCast(ctx));
+        return h.srv.text.tokenBytes(a, id) catch null;
+    }
+
+    fn tokenAdded(ctx: *anyopaque, id: u32) bool {
+        const h: *CanonHook = @ptrCast(@alignCast(ctx));
+        return h.srv.text.isAdded(id);
+    }
+
+    fn structural(h: *const CanonHook, toks: []const u32) usize {
+        const open = h.srv.text.tokenId("<think>");
+        const close = h.srv.text.tokenId(h.srv.markers.close);
+        var n: usize = 0;
+        for (toks) |t| n += @intFromBool(h.srv.text.isSpecial(t) or (open != null and t == open.?) or (close != null and t == close.?));
+        return n;
     }
 };
 
@@ -618,6 +966,156 @@ const StopHook = struct {
         const text = h.srv.text.decode(arena.allocator(), tail) catch return false;
         for (h.stops.strings) |stop| if (std.mem.indexOf(u8, text, stop) != null) return true;
         return false;
+    }
+};
+
+/// A request's thinking_fold_texts tokenized (null: none given): the stages' open, resume and close texts and the
+/// label. The close is the marker's line before the stage's resume, as the server's own.
+const FoldTexts = struct { opens: []const []const u32, resumes: []const []const u32, closes: []const []const u32, label: []const u32, close_open: ?[]const u32 = null, close_budget_open: ?[]const u32 = null };
+
+fn foldTexts(srv: *Server, cx: *Cx, field: ?Value) errors.Refused!?FoldTexts {
+    const v = field orelse return null;
+    const bad = "thinking_fold_texts must be {\"label\": text, \"stages\": [{\"open\": text, \"resume\": text}, ...], \"at_close\": {\"open\": text, \"budget_open\": text}} with 1 to 3 stages (at_close and its budget_open may be left out)";
+    const label = v.get("label") orelse return cx.refuse(bad);
+    const stages = v.get("stages") orelse return cx.refuse(bad);
+    if (label != .string or stages != .array or stages.array.len < 1 or stages.array.len > server_mod.fold_stages) return cx.refuse(bad);
+    const a = cx.a;
+    const enc = struct {
+        fn f(s: *Server, c: *Cx, text: []const u8) errors.Refused![]const u32 {
+            return s.text.encode(c.a, text, false) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return c.refuse("thinking_fold_texts: a text could not be tokenized"),
+            };
+        }
+    }.f;
+    const marker = try enc(srv, cx, server_mod.fold_end_marker ++ "\n");
+    const opens = try a.alloc([]const u32, stages.array.len);
+    const resumes = try a.alloc([]const u32, stages.array.len);
+    const closes = try a.alloc([]const u32, stages.array.len);
+    for (stages.array, 0..) |st, k| {
+        const o = st.get("open") orelse return cx.refuse(bad);
+        const r = st.get("resume") orelse return cx.refuse(bad);
+        if (o != .string or r != .string or o.string.len == 0) return cx.refuse(bad);
+        opens[k] = try enc(srv, cx, server_mod.inserted(o.string));
+        resumes[k] = try enc(srv, cx, server_mod.inserted(r.string));
+        closes[k] = try std.mem.concat(a, u32, &.{ marker, resumes[k] });
+    }
+    var close_open: ?[]const u32 = null;
+    var close_budget_open: ?[]const u32 = null;
+    if (v.get("at_close")) |c| {
+        const o = c.get("open") orelse return cx.refuse(bad);
+        if (o != .string or o.string.len == 0) return cx.refuse(bad);
+        close_open = try enc(srv, cx, server_mod.inserted(o.string));
+        if (c.get("budget_open")) |b| {
+            if (b != .string or b.string.len == 0) return cx.refuse(bad);
+            close_budget_open = try enc(srv, cx, server_mod.inserted(b.string));
+        }
+    }
+    return .{ .opens = opens, .resumes = resumes, .closes = closes, .label = try enc(srv, cx, server_mod.inserted(label.string)), .close_open = close_open, .close_budget_open = close_budget_open };
+}
+
+/// A request's thinking_fold_steps tokenized (null: none given): {"midway": step, "budget": step, "close": step,
+/// "unclosed": "keep" | "close"}, any of them, where a step is {"ask": text, "form": "turn" | "inline", "think":
+/// "closed" | "open" | "none", "heading": text, "label": text, "resume": text, "take": "after" | "before", "place":
+/// "replace" | "add" | "show", "min": tokens} and only "ask" is needed. "turn" asks in a user turn after the block
+/// closed, the answer begun as "think" says ("closed": <think></think>, "open": <think>) and at "heading"; "inline"
+/// writes "ask" in the open block in the model's voice, with "heading" after it.
+const FoldSteps = struct { midway: ?api.ThinkStep = null, budget: ?api.ThinkStep = null, close: ?api.ThinkStep = null, unclosed: api.Unclosed = .keep };
+
+const fold_steps_bad = "thinking_fold_steps must be {\"midway\": step, \"budget\": step, \"close\": step, \"unclosed\": \"keep\" | \"close\"} with step {\"ask\": text, \"form\": \"turn\" | \"inline\", \"think\": \"closed\" | \"open\" | \"none\", \"heading\": text, \"label\": text, \"resume\": text, \"take\": \"after\" | \"before\", \"place\": \"replace\" | \"add\" | \"show\", \"min\": tokens} (only ask is needed)";
+
+fn foldSteps(srv: *Server, cx: *Cx, field: ?Value) errors.Refused!?FoldSteps {
+    const v = field orelse return null;
+    if (v != .object) return cx.refuse(fold_steps_bad);
+    if (srv.fold_branch_ask.len == 0 or srv.think_close.len == 0) return cx.refuse("thinking_fold_steps: this model has no think block to rewrite");
+    var out: FoldSteps = .{};
+    if (v.get("midway")) |s| out.midway = try foldStep(srv, cx, s);
+    // shown only, a summary midway would leave the thinking to fold again at once
+    if (out.midway) |m| if (m.place == .show) return cx.refuse("thinking_fold_steps: midway cannot be place show");
+    if (v.get("budget")) |s| out.budget = try foldStep(srv, cx, s);
+    if (v.get("close")) |s| out.close = try foldStep(srv, cx, s);
+    if (v.get("unclosed")) |u| {
+        if (u != .string) return cx.refuse(fold_steps_bad);
+        out.unclosed = std.meta.stringToEnum(api.Unclosed, u.string) orelse return cx.refuse(fold_steps_bad);
+    }
+    return out;
+}
+
+fn foldStep(srv: *Server, cx: *Cx, v: Value) errors.Refused!api.ThinkStep {
+    if (v != .object) return cx.refuse(fold_steps_bad);
+    const a = cx.a;
+    const Texts = struct {
+        fn of(c: *Cx, o: Value, key: []const u8) errors.Refused![]const u8 {
+            const t = o.get(key) orelse return "";
+            if (t != .string) return c.refuse(fold_steps_bad);
+            return t.string;
+        }
+        fn enc(s: *Server, c: *Cx, text: []const u8) errors.Refused![]const u32 {
+            if (text.len == 0) return &.{};
+            return s.text.encode(c.a, text, false) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return c.refuse("thinking_fold_steps: a text could not be tokenized"),
+            };
+        }
+    };
+    const ask = try Texts.of(cx, v, "ask");
+    if (ask.len == 0) return cx.refuse(fold_steps_bad);
+    const form = try Texts.of(cx, v, "form");
+    const in_line = std.mem.eql(u8, form, "inline");
+    if (!in_line and form.len > 0 and !std.mem.eql(u8, form, "turn")) return cx.refuse(fold_steps_bad);
+    const think = try Texts.of(cx, v, "think");
+    const heading = try Texts.enc(srv, cx, try Texts.of(cx, v, "heading"));
+    var asked: []const u32 = undefined;
+    if (in_line) {
+        asked = try std.mem.concat(a, u32, &.{ try Texts.enc(srv, cx, server_mod.inserted(ask)), heading });
+    } else {
+        const end = srv.think_close_end orelse return cx.refuse("thinking_fold_steps: this model has no think block to rewrite");
+        const open = srv.fold_branch_open orelse return cx.refuse("thinking_fold_steps: this model has no think block to rewrite");
+        const user = srv.text.tokenId("<|user|>") orelse return cx.refuse("thinking_fold_steps: this model has no turns to ask in");
+        const assistant = srv.text.tokenId("<|assistant|>") orelse return cx.refuse("thinking_fold_steps: this model has no turns to ask in");
+        const start: []const u32 = if (think.len == 0 or std.mem.eql(u8, think, "closed"))
+            try a.dupe(u32, &.{ open, end })
+        else if (std.mem.eql(u8, think, "open"))
+            try a.dupe(u32, &.{open})
+        else if (std.mem.eql(u8, think, "none"))
+            &.{}
+        else
+            return cx.refuse(fold_steps_bad);
+        asked = try std.mem.concat(a, u32, &.{ &.{ end, user }, try Texts.enc(srv, cx, ask), &.{assistant}, start, heading });
+    }
+    var st: api.ThinkStep = .{
+        .ask = asked,
+        .heading = heading,
+        .label = try Texts.enc(srv, cx, server_mod.inserted(try Texts.of(cx, v, "label"))),
+        .after = try Texts.enc(srv, cx, server_mod.inserted(try Texts.of(cx, v, "resume"))),
+    };
+    if (v.get("take")) |t| {
+        if (t != .string) return cx.refuse(fold_steps_bad);
+        st.take = std.meta.stringToEnum(api.ThinkStep.Take, t.string) orelse return cx.refuse(fold_steps_bad);
+    }
+    if (v.get("place")) |t| {
+        if (t != .string) return cx.refuse(fold_steps_bad);
+        st.place = std.meta.stringToEnum(api.ThinkStep.Place, t.string) orelse return cx.refuse(fold_steps_bad);
+    }
+    if (v.get("min")) |t| {
+        const n = t.int64() orelse return cx.refuse(fold_steps_bad);
+        if (n < 0) return cx.refuse(fold_steps_bad);
+        st.min = @intCast(@min(n, std.math.maxInt(u32)));
+    }
+    return st;
+}
+
+/// The checkpoint fold's end (GLM-5.3): whether the checkpoint written so far ends with the marker (its last tokens
+/// decoded; the engine thread calls it after each token of the checkpoint).
+const FoldHook = struct {
+    srv: *Server,
+
+    fn check(ctx: *anyopaque, written: []const u32) bool {
+        const h: *FoldHook = @ptrCast(@alignCast(ctx));
+        var arena: std.heap.ArenaAllocator = .init(h.srv.gpa);
+        defer arena.deinit();
+        const text = h.srv.text.decode(arena.allocator(), written[written.len -| 24..]) catch return false;
+        return std.mem.indexOf(u8, text, server_mod.fold_end_marker) != null;
     }
 };
 

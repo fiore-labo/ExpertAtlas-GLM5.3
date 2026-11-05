@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! A checkpoint's tokenizer.json and chat template behind ``model_text.Text`` (our tokenizer and template engines).
 const std = @import("std");
 const tokenizer = @import("tokenizer");
@@ -196,6 +197,7 @@ pub const HfText = struct {
             .decode = decodeFn,
             .token_id = tokenIdFn,
             .token_string = tokenStringFn,
+            .token_bytes = tokenBytesFn,
             .vocab_size = vocabFn,
             .eos_ids = eosFn,
             .render = renderFn,
@@ -238,6 +240,10 @@ pub const HfText = struct {
     fn tokenStringFn(ctx: *anyopaque, a: Allocator, id: u32) Allocator.Error![]u8 {
         const piece = self(ctx).tok.id_to_token.get(id) orelse return a.dupe(u8, "");
         return a.dupe(u8, piece);
+    }
+
+    fn tokenBytesFn(ctx: *anyopaque, a: Allocator, id: u32) Allocator.Error!?[]u8 {
+        return self(ctx).tok.tokenBytes(a, id);
     }
 
     fn vocabFn(ctx: *anyopaque) u32 {

@@ -94,6 +94,13 @@ pub fn errorBody(a: Allocator, cx: *const Cx, param: ?[]const u8) Allocator.Erro
     const o = try json.newObject(a);
     try o.put(a, "message", .{ .string = cx.message });
     if (cx.kind == .other or cx.kind == .server) return .{ .object = o };
+    // capacity (busy, no room): a server-side condition to retry, also inside a stream already begun (whose status
+    // is 200): the Messages endpoint maps code overloaded to overloaded_error
+    if (cx.kind == .capacity) {
+        try o.put(a, "type", .{ .string = "server_error" });
+        try o.put(a, "code", .{ .string = "overloaded" });
+        return .{ .object = o };
+    }
     try o.put(a, "type", .{ .string = "invalid_request_error" });
     if (cx.kind == .context_length) {
         try o.put(a, "param", if (param) |p| .{ .string = p } else .null);
@@ -148,7 +155,7 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
         input.temperature = if (t == .float) t.float else std.fmt.parseFloat(f64, t.int) catch 0;
     };
     const sampling = try json.newObject(cx.a);
-    for ([_][]const u8{ "temperature", "top_p", "top_k", "min_p", "seed", "priority", "draft", "thinking_budget", "ignore_eos", "stop" } ++ grammar.fields) |k| if (body.get(k)) |v| try sampling.put(cx.a, k, v);
+    for ([_][]const u8{ "temperature", "top_p", "top_k", "min_p", "seed", "priority", "draft", "thinking_budget", "thinking_fold", "thinking_fold_window", "thinking_fold_max", "thinking_fold_keep", "thinking_fold_stages", "thinking_fold_texts", "thinking_fold_steps", "thinking_fold_cap", "thinking_fold_at_close", "thinking_fold_at_budget", "thinking_fold_margin", "ignore_eos", "stop" } ++ grammar.fields) |k| if (body.get(k)) |v| try sampling.put(cx.a, k, v);
     try grammar.refusal(cx, body);
     if (input.tools.len > 0 and try tool_specs.choiceRequiresCall(cx.a, body.get("tool_choice"))) try sampling.put(cx.a, "tool_call_required", .{ .bool = true });
     const thinking = try fields.thinkingFields(cx, body, srv.effort_levels);
@@ -371,6 +378,7 @@ const Run = struct {
             try message.put(a, "role", .{ .string = "assistant" });
             try message.put(a, "content", if (calls != null) .null else .{ .string = reply.content });
             if (reply.reasoning) |t| if (t.len > 0) try message.put(a, "reasoning_content", .{ .string = t });
+            if (reply.context_reasoning) |t| try message.put(a, "reasoning_details", try foldDetails(a, t));
             if (calls) |c| try message.put(a, "tool_calls", .{ .array = c });
             try choice.put(a, "message", .{ .object = message });
             try choice.put(a, "finish_reason", .{ .string = reply.finish_reason });
@@ -505,6 +513,12 @@ const Run = struct {
                 r.emit(r.chunk(.{ .string = rest }, null) catch return) catch return;
             }
         }
+        // a folded reply: the reasoning as the context held it, as replay details before the last chunk
+        if (r.is_chat) if (reply.context_reasoning) |t| {
+            const d = json.newObject(a) catch return;
+            d.put(a, "reasoning_details", foldDetails(a, t) catch return) catch return;
+            r.emit(r.chunk(.{ .object = d }, null) catch return) catch return;
+        };
         const last = r.chunk(.{ .string = "" }, if (reply.finish_reason.len > 0) reply.finish_reason else "length") catch return;
         if (compaction) |s| compact.stamp(&cx, &reply, s) catch return;
         r.extras(last.object, &reply) catch return;
@@ -523,4 +537,17 @@ const Run = struct {
 
 fn roleDelta(a: Allocator) Allocator.Error!Value {
     return chat.deltaOf(a, "role", "assistant");
+}
+
+/// ``reasoning_details`` for a folded reply: one ``reasoning.text`` entry in ``messages.fold_format`` holding the
+/// reasoning as the model's context held it. Clients that keep replay details (OpenRouter's convention) send it back
+/// in place of the whole reasoning, and ``messages.normalize`` renders it.
+fn foldDetails(a: Allocator, text: []const u8) Allocator.Error!Value {
+    const d = try json.newObject(a);
+    try d.put(a, "type", .{ .string = "reasoning.text" });
+    try d.put(a, "text", .{ .string = text });
+    try d.put(a, "format", .{ .string = messages.fold_format });
+    const list = try a.alloc(Value, 1);
+    list[0] = .{ .object = d };
+    return .{ .array = list };
 }

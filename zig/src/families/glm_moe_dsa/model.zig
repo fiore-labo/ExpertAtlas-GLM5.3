@@ -25,6 +25,11 @@ pub const Layer = struct {
     q_b: linear.Linear,
     wk: Buf, // bf16 [H, nope, lw]: kv_b's first nope rows a head / 各ヘッドの kv_b の先頭 nope 行
     wv: Buf, // bf16 [H, v, lw]: kv_b's last v rows a head / 各ヘッドの kv_b の後ろ v 行
+    /// TF_GLM53_KVB=fp8: wk / wv (and peer_wk) hold e4m3 rows instead, these their fp32 row scales [rows]
+    /// TF_GLM53_KVB=fp8: wk / wv (と peer_wk) は代わりに e4m3 の行を持ち、これがその fp32 の行スケール [rows]
+    wks: ?Buf = null,
+    wvs: ?Buf = null,
+    peer_wks: ?Buf = null,
     o_proj: linear.Linear,
     indexer: ?Indexer,
     router_w: ?Buf, // bf16 [E, D] (MoE layers) / bf16 [E, D] (MoE 層)

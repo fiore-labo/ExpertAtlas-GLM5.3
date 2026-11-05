@@ -30,15 +30,14 @@ making the weights yourself removes that dependency.
 | What | Files | Size | Used for |
 |---|---|---|---|
 | 4-bit bank | `experts-layer-003` … `077.safetensors` | 368.5 GB | the routed experts of the eight-node checkpoint; Expert Atlas's 4 bits |
-| Eight-node checkpoint | the 4-bit bank's files, `nonexperts-5bit.safetensors`, `unquantized-bf16.safetensors`, three `mtp-layer-78-*` files, the official small files, `config.json`, the index, `SHA256SUMS` | 389.9 GB | `./tf-glm53 up` on eight nodes; the rest of every Expert Atlas start |
-| 3-bit bank | `experts-layer-*.safetensors` | 277.9 GB | Expert Atlas's 3 bits; the four-node checkpoint |
+| Eight-node checkpoint | the 4-bit bank's files, `nonexperts-5bit.safetensors`, `unquantized-bf16.safetensors`, three `mtp-layer-78-*` files, the official small files, `config.json`, the index, `SHA256SUMS` | 389.9 GB | every start on eight nodes (on four, it can stand in for the four-node checkpoint): the weights other than the routed experts |
+| 3-bit bank | `experts-layer-*.safetensors` | 277.9 GB | every start: Expert Atlas's 3 bits, the default width; the four-node checkpoint |
 | 2-bit / 5-bit banks | `experts-layer-*.safetensors` | 187.3 / 459.1 GB | Expert Atlas's 2 and 5 bits (optional) |
-| Four-node checkpoint | the eight-node checkpoint with half of the routed experts at 3 bits | 344.6 GB | `./tf-glm53 up` on four nodes |
+| Four-node checkpoint | the eight-node checkpoint with half of the routed experts at 3 bits | 344.6 GB | every start on four nodes: the weights other than the routed experts |
 
-What you need depends on how you run the recipe: eight nodes without the control panel need only the eight-node
-checkpoint; four nodes without it need the four-node checkpoint (made from the eight-node one and the 3-bit bank); the
-control panel needs a checkpoint and the banks of the widths you want (on four nodes the 3- and 4-bit banks, and the
-eight-node checkpoint's directory can serve as the 4-bit bank).
+Every start needs a checkpoint and the 3-bit bank: the eight-node checkpoint on eight nodes, and on four the four-node
+checkpoint (made from the eight-node one and the 3-bit bank) or the eight-node one. The other banks are for the widths
+you want (the eight-node checkpoint's directory can serve as the 4-bit bank).
 
 ## How your files compare with Fiore-lab's
 
@@ -198,7 +197,7 @@ directories `banks.json` names, then:
 ./tf-glm53 deploy
 ./tf-glm53 verify            # the weights against your SHA256SUMS on every node
 ./tf-glm53 verify-banks      # the banks against your manifests on every node
-./tf-glm53 up
+./tf-glm53 up                # the control panel: start the engine there (./tf-glm53 start: without the page)
 ```
 
 ## The files in this directory

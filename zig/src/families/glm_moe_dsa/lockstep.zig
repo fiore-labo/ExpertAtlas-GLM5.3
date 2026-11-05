@@ -11,6 +11,7 @@ const kvdigest = @import("kvdigest.zig");
 const poison = @import("poison.zig");
 const pool_plan = @import("pool/plan.zig");
 const expert_swap = @import("expert_swap.zig");
+const pace_mod = @import("pace.zig");
 
 /// A request's settings as 17 non-negative words: max_tokens, stop_eos, k | mode << 8, seed (3), temperature (3),
 /// top_k, top_p (3), min_p (3), r0 (the slot cache's resume point). max_tokens < 0 tells the followers to stop.
@@ -32,6 +33,11 @@ pub const Header = struct {
     /// スロットキャッシュの 21 語。エンジンがスロットを持つときだけある: resume フラグ、メタデータのダイジェスト (8)、
     /// 計画のダイジェスト (8)、drafter の深さ、信頼度 (3)。
     extra: ?[21]i32 = null,
+    /// Fiore-lab, rank 0 only (not one of the words): the pool slot this request's reply wrote before a re-admission,
+    /// which the pool continues (pool_serve.lead puts it into the slot words' first).
+    /// Fiore-lab、rank 0 だけ (語には入らない): この要求の応答が受け入れ直しの前に書いた pool のスロット。pool はそれを
+    /// 続ける (pool_serve.lead がスロットの語の先頭に入れる)。
+    own_slot: ?u64 = null,
 
     pub const words = 17;
 
@@ -237,6 +243,26 @@ pub const mode_mtp: u8 = 4;
 /// DFlash2's draft tokens a round, the same on every rank.
 /// DFlash2 が 1 ラウンドに出す draft トークン数。全ランクで同じ。
 pub const dflash_depth: usize = 7;
+
+/// The slot words 17..21 rank 0 sends: DFlash2's depth and chain confidence (Engine.dflash_conf), or with the MTP
+/// layer depth 0 and its chain confidence (Engine.mtp_conf, TF_GLM53_MTP_CONF: 0 when off, the words as before); 0
+/// without either. The two are never loaded together (engine error.TwoDrafters).
+/// rank 0 が送るスロットの語 17..21: DFlash2 の深さと連鎖の信頼度 (Engine.dflash_conf)。MTP 層なら深さ 0 とその連鎖の
+/// 信頼度 (Engine.mtp_conf、TF_GLM53_MTP_CONF: 無効なら 0 で語は従来と同じ)。どちらもなければ 0。両方を同時に読み込む
+/// ことはない (engine の error.TwoDrafters)。
+pub fn draftWords(e: *const engine.Engine, out: []i32) void {
+    out[0] = if (e.drafter != null) @intCast(dflash_depth) else 0;
+    f64Words(if (e.drafter != null) e.dflash_conf else if (e.mtp != null) e.mtp_conf else 0, out[1..4]);
+}
+
+/// On every rank, rank 0's chain confidence from the slot words, so the ranks draft alike whatever their own
+/// TF_GLM53_DFLASH_CONF / TF_GLM53_MTP_CONF (an MTP chain's steps are collectives: the ranks must stop it alike).
+/// 全ランクで、スロットの語から rank 0 の連鎖の信頼度を取る。各ランクの TF_GLM53_DFLASH_CONF / TF_GLM53_MTP_CONF に
+/// よらず同じ draft になる (MTP の連鎖の段は collective なので、全ランクが同じ所で止めねばならない)。
+pub fn takeDraftWords(e: *engine.Engine, x: []const i32) void {
+    if (e.drafter != null and x[0] != 0) e.dflash_conf = wordsF64(x[1..4]);
+    if (e.drafter == null and e.mtp != null) e.mtp_conf = wordsF64(x[1..4]);
+}
 
 /// One request on this rank: the slot cache's agreement first when there is one, then the decode the header asks for.
 /// このランクでの 1 要求: スロットキャッシュがあればその合意を先に行い、次にヘッダが求める decode を行う。
@@ -513,16 +539,27 @@ pub const Live = struct {
     // a conversation the round finished: the host releases it (leadRelease) at once, its reply not held for the prefill
     // ラウンドで終わった会話: ホストがすぐに返す (leadRelease)。応答を prefill の終わりまで待たせない
     release: *const fn (ctx: *anyopaque, k: usize) void,
+    // the host's counting of the time between the prefill and those rounds, and the decode's share (percent, read
+    // anew at each round so a change reaches a running prefill); null: no pause, no round
+    // prefill とそのラウンドの時間を数えるホストの Pace と、decode の取り分 (%。ラウンドごとに読み直すので、変更は実行中の
+    // prefill に届く)。null: 止まらず、ラウンドもない
+    pace: ?*pace_mod.Pace = null,
+    share: ?*const std.atomic.Value(u8) = null,
+    // a short prompt (the host's TF_GLM53_MULTI_SHORT_PROMPT): its prefill runs to its end with no pause (its time
+    // still counted)
+    // 短い prompt (ホストの TF_GLM53_MULTI_SHORT_PROMPT): その prefill は止まらずに終わりまで進む (時間は数える)
+    straight: bool = false,
+    // whether this prefill, `left` rows from its end, gives way to a short prompt waiting (true: the host has taken
+    // it as given way and puts the request back in its queue when the prefill ends); null: never
+    // この prefill (終わりまで `left` 行) が、待っている短い prompt に譲るか (true: ホストは譲ったものとして扱い、prefill
+    // が終わったら要求を待ち行列へ戻す)。null: 譲らない
+    yield: ?*const fn (ctx: *anyopaque, left: u64) bool = null,
+    // the time this prefill spent paused for the others (the rounds, a hold by the share), added at each pause (rank
+    // 0's scheduler thread): its chunks' own time is the rest
+    // この prefill がほかのために止まっていた時間 (ラウンド、取り分による待ち)。止まる所ごとに足す (rank 0 のスケジューラ
+    // のスレッド): チャンク自体の時間は残り
+    paused: ?*i96 = null,
 };
-
-/// TF_GLM53_MULTI_PREFILL_LAYERS (default 2; 0: none): the layers of a prefill between two rounds of the other
-/// conversations. The same on every rank (the launcher passes one environment to all).
-/// TF_GLM53_MULTI_PREFILL_LAYERS (既定 2、0 はなし): prefill の中で、ほかの会話のラウンドとラウンドの間に進める層の数。
-/// 全ランクで同じ (launcher は全ランクに同じ環境を渡す)。
-fn midEvery() usize {
-    const v = std.c.getenv("TF_GLM53_MULTI_PREFILL_LAYERS") orelse return 2;
-    return std.fmt.parseInt(usize, std.mem.span(v), 10) catch 2;
-}
 
 const LeadMid = struct {
     ch: *Channel,
@@ -530,19 +567,117 @@ const LeadMid = struct {
     k: usize,
     live: Live,
 
-    fn run(ctx: *anyopaque) anyerror!void {
-        const m: *LeadMid = @ptrCast(@alignCast(ctx));
+    fn now(m: *const LeadMid) i96 {
+        return std.Io.Clock.awake.now(m.e.io).toNanoseconds();
+    }
+
+    fn share(m: *const LeadMid) u8 {
+        return if (m.live.share) |s| s.load(.monotonic) else 0;
+    }
+
+    fn liveCount(m: *LeadMid) usize {
         var ks: [engine.multi_max]u8 = undefined;
         var stops: [engine.multi_max]bool = undefined;
         var sinks: [engine.multi_max]?engine.Sink = undefined;
-        const n = m.live.f(m.live.ctx, m.k, &ks, &stops, &sinks);
-        try leadRound(m.ch, m.e, ks[0..n], stops[0..n], sinks[0..n]);
-        for (ks[0..n]) |k| if (m.e.multi.?.convs[k].done) m.live.release(m.live.ctx, k);
-        const w = [1]i32{ev_mid_end};
+        return m.live.f(m.live.ctx, m.k, &ks, &stops, &sinks);
+    }
+
+    /// Whether this prefill gives way to a short prompt waiting (the host's `yield`): never a short prompt itself;
+    /// only with more rows left than the drafter's window (its resume then needs none of the drafter's saved rows);
+    /// and, unless the share holds the prefill anyway (100), only once a chunk of this admission is done, so each
+    /// admission gets on however many short prompts come.
+    /// この prefill が待っている短い prompt に譲るか (ホストの `yield`): 短い prompt 自身は譲らない。残りの行が drafter の
+    /// ウィンドウより多いときだけ (それなら再開に drafter の保存した行が要らない)。取り分がどうせ prefill を止めている
+    /// (100) とき以外は、この受け入れでチャンクが 1 つ終わってから (短い prompt がいくつ来ても、受け入れごとに進む)。
+    fn yields(m: *LeadMid) bool {
+        if (m.live.straight) return false;
+        const f = m.live.yield orelse return false;
+        const e = m.e;
+        const cv = &e.multi.?.convs[m.k];
+        const left = cv.prompt.items.len -| e.prefill_done;
+        const win: usize = if (cv.drafted) (if (e.drafter) |dr| @as(usize, @intCast(dr.cfg.window)) + 1 else 0) else 0;
+        if (left <= win) return false;
+        if (e.prefill_done <= e.start and m.share() < 100) return false;
+        return f(m.live.ctx, left);
+    }
+
+    /// A chunk's start: the segment that ran to the last chunk's end counted (not as a layer's measure: it stopped
+    /// at the chunk's end), the layers before this chunk's first pause (0, none, for a short prompt: its chunk is
+    /// counted whole and measures no layer, so a long prompt's measure is kept); null: it gives way before this chunk.
+    /// チャンクの始め: 前のチャンクの終わりまで進んだ区間を数え (チャンクの終わりで止まったので 1 層の目安にはしない)、
+    /// このチャンクで最初に止まるまでの層数を返す (短い prompt は 0 で止まらない。チャンクは丸ごと数え、1 層は測らないので、
+    /// 長い prompt で測った値が残る)。null: このチャンクの前で譲る。
+    fn first(ctx: *anyopaque, rows: u32) ?u8 {
+        const m: *LeadMid = @ptrCast(@alignCast(ctx));
+        const pc = m.live.pace orelse return 0;
+        const s = m.share();
+        const t = m.now();
+        pc.cut(s, t);
+        if (m.yields()) return null;
+        if (!m.live.straight) pc.chunk(rows);
+        if (m.liveCount() == 0) {
+            pc.idle();
+            return 0;
+        }
+        if (m.live.straight) {
+            pc.begin(t, 0);
+            return 0;
+        }
+        const n = pc.layers(s, true);
+        pc.begin(t, n);
+        return n;
+    }
+
+    /// A pause: the segment counted, then rounds of the other conversations while the decode is behind its share
+    /// (100: while any decodes, unless this prompt's request is being stopped), then the layers to the next pause,
+    /// shared with the end. null: the prefill gives way here (a short prompt waits), this chunk's work dropped; -1 in
+    /// the end tells the other ranks.
+    /// 止まる所: 区間を数え、decode が取り分に届かない間はほかの会話のラウンドを回し (100 ならどれかが decode している間。
+    /// ただしこの prompt の要求が止められているときは回さない)、次に止まるまでの層数を終わりの合図と一緒に配る。null:
+    /// prefill はここで譲る (短い prompt が待っている)。このチャンクでしたことは捨てる。終わりの合図の -1 でほかのランクに
+    /// 伝える。
+    fn run(ctx: *anyopaque) anyerror!?u8 {
+        const m: *LeadMid = @ptrCast(@alignCast(ctx));
+        const t_in = m.now();
+        defer if (m.live.paused) |p| {
+            p.* += m.now() - t_in;
+        };
+        var ks: [engine.multi_max]u8 = undefined;
+        var stops: [engine.multi_max]bool = undefined;
+        var sinks: [engine.multi_max]?engine.Sink = undefined;
+        var n = m.live.f(m.live.ctx, m.k, &ks, &stops, &sinks);
+        if (m.live.pace) |pc| pc.end(m.share(), m.now());
+        var give = m.yields();
+        while (n > 0 and !give) {
+            const s = m.share();
+            const pc = m.live.pace orelse break;
+            if (!pc.behind(s) or m.e.stop_req.load(.monotonic)) break;
+            const t0 = m.now();
+            try leadRound(m.ch, m.e, ks[0..n], stops[0..n], sinks[0..n]);
+            for (ks[0..n]) |k| if (m.e.multi.?.convs[k].done) m.live.release(m.live.ctx, k);
+            pc.addDecode(s, m.now() - t0);
+            n = m.live.f(m.live.ctx, m.k, &ks, &stops, &sinks);
+            // a short prompt that came during the rounds (a prefill held by share 100 waits here)
+            // ラウンドの間に来た短い prompt (取り分 100 で止められている prefill はここで待っている)
+            give = m.yields();
+        }
+        if (give) {
+            const w = [2]i32{ ev_mid_end, -1 };
+            m.ch.gpa.free(try m.ch.share(&w));
+            if (m.e.drafter) |dr| dr.use(m.k);
+            return null;
+        }
+        var next: u8 = 0;
+        if (m.live.pace) |pc| {
+            next = pc.layers(m.share(), n > 0);
+            if (next > 0) pc.begin(m.now(), next) else pc.idle();
+        }
+        const w = [2]i32{ ev_mid_end, next };
         m.ch.gpa.free(try m.ch.share(&w));
         // the prefill goes on with the admitted conversation's drafter context
         // prefill は受け付け中の会話の drafter の context で続ける
         if (m.e.drafter) |dr| dr.use(m.k);
+        return next;
     }
 };
 
@@ -551,10 +686,18 @@ const FollowMid = struct {
     e: *engine.Engine,
     k: usize,
 
-    fn run(ctx: *anyopaque) anyerror!void {
+    /// Rank 0 decides (chunkAgreed carries its value and its giving way): this rank's is not read.
+    /// rank 0 が決める (chunkAgreed がその値と譲るかを運ぶ): このランクの値は読まれない。
+    fn first(_: *anyopaque, _: u32) ?u8 {
+        return 0;
+    }
+
+    fn run(ctx: *anyopaque) anyerror!?u8 {
         const m: *FollowMid = @ptrCast(@alignCast(ctx));
-        // the round, the releases of the conversations it finished, the end
-        // ラウンド、それで終わった会話の確定、終わり
+        // the rounds, the releases of the conversations they finished, the end with the layers to the next pause (-1:
+        // the prefill gives way)
+        // ラウンド、それで終わった会話の確定、次に止まるまでの層数の付いた終わり (-1: prefill は譲る)
+        var next: ?u8 = 0;
         while (true) {
             const w = try m.ch.share(null);
             defer m.ch.gpa.free(w);
@@ -562,11 +705,16 @@ const FollowMid = struct {
             switch (w[0]) {
                 ev_round => try followRound(m.e, w),
                 ev_release => _ = try pool_serve.commitMulti(m.e, @intCast(w[1])),
-                ev_mid_end => break,
+                ev_mid_end => {
+                    if (w.len < 2 or w[1] < -1 or w[1] > 255) return error.BadEvent;
+                    next = if (w[1] < 0) null else @intCast(w[1]);
+                    break;
+                },
                 else => return error.BadEvent,
             }
         }
         if (m.e.drafter) |dr| dr.use(m.k);
+        return next;
     }
 };
 
@@ -610,13 +758,12 @@ pub fn leadAdmit(ch: *Channel, e: *engine.Engine, k: usize, h0: Header, prompt: 
     ch.gpa.free(try ch.share(ids));
     moved = true;
     try pool_serve.admitMulti(ch, e, k, h, prompt, q);
-    // the other conversations' rounds inside this prefill (every midEvery() layers, the same on every rank)
-    // この prefill の中のほかの会話のラウンド (midEvery() 層ごと、全ランクで同じ)
+    // the other conversations' rounds inside this prefill (when: rank 0's pace, which every rank follows)
+    // この prefill の中のほかの会話のラウンド (いつ: rank 0 の pace。全ランクがそれに従う)
     var lm: LeadMid = .{ .ch = ch, .e = e, .k = k, .live = live orelse .{ .ctx = undefined, .f = noLive, .release = noRelease } };
-    const every = midEvery();
-    e.mid = if (every > 0) .{ .ctx = @ptrCast(&lm), .f = LeadMid.run, .every = every } else null;
+    e.mid = .{ .ctx = @ptrCast(&lm), .first = LeadMid.first, .f = LeadMid.run };
     defer e.mid = null;
-    try e.multiStart(k, prompt, @intCast(h.max_tokens), h.stop_eos, h.mode == mode_dflash, samplingOf(h), sink);
+    try e.multiStart(k, prompt, @intCast(h.max_tokens), h.stop_eos, h.mode == mode_dflash or h.mode == mode_mtp, samplingOf(h), sink);
 }
 
 fn noLive(_: *anyopaque, _: usize, _: []u8, _: []bool, _: []?engine.Sink) usize {
@@ -681,10 +828,9 @@ pub fn followMulti(ch: *Channel, e: *engine.Engine) !void {
                 for (prompt, words) |*t, v| t.* = v;
                 try pool_serve.admitMulti(ch, e, k, h, prompt, null);
                 var fm: FollowMid = .{ .ch = ch, .e = e, .k = k };
-                const every = midEvery();
-                e.mid = if (every > 0) .{ .ctx = @ptrCast(&fm), .f = FollowMid.run, .every = every } else null;
+                e.mid = .{ .ctx = @ptrCast(&fm), .first = FollowMid.first, .f = FollowMid.run };
                 defer e.mid = null;
-                try e.multiStart(k, prompt, @intCast(h.max_tokens), h.stop_eos, h.mode == mode_dflash, samplingOf(h), null);
+                try e.multiStart(k, prompt, @intCast(h.max_tokens), h.stop_eos, h.mode == mode_dflash or h.mode == mode_mtp, samplingOf(h), null);
             },
             ev_round => try followRound(e, w),
             ev_release => _ = try pool_serve.commitMulti(e, @intCast(w[1])),

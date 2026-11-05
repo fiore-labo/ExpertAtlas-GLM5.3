@@ -13,10 +13,6 @@ const tree = @import("slotcache/tree.zig");
 
 pub const Plan = tree.Plan;
 
-/// The drafter's confidence, the same on every rank.
-/// ドラフタの confidence。全ランクで同じ値。
-const dflash_confidence: f64 = 0.4;
-
 fn wantTokens(e: *const engine.Engine, max_tokens: i32, prompt_len: usize) usize {
     const m: usize = @intCast(@max(1, max_tokens));
     return @max(1, @min(m, e.capacity - prompt_len));
@@ -120,8 +116,7 @@ pub fn lead(e: *engine.Engine, h: *lockstep.Header, prompt: []const i64) !Plan {
     x[0] = @intFromBool(resume_ok);
     x[1..9].* = tree.words(p.d0);
     x[9..17].* = tree.words(tree.planDigest(&p));
-    x[17] = if (e.drafter != null) @intCast(lockstep.dflash_depth) else 0;
-    lockstep.f64Words(if (e.drafter != null) dflash_confidence else 0, x[18..21]);
+    lockstep.draftWords(e, x[17..21]);
     h.extra = x;
     h.r0 = @intCast(p.c);
     return p;
@@ -138,6 +133,7 @@ pub const Runner = *const fn (e: *engine.Engine, h: lockstep.Header, prompt: []c
 pub fn serve(ch: *lockstep.Channel, e: *engine.Engine, h: lockstep.Header, prompt: []const i64, sink: ?engine.Sink, prop: ?engine.Proposer, plan0: ?*Plan, run: Runner) !engine.Stats {
     const sl = e.slots.?;
     const x = h.extra orelse return error.MissingSlotWords;
+    lockstep.takeDraftWords(e, x[17..21]);
     const want = wantTokens(e, h.max_tokens, prompt.len);
     var own: ?Plan = null;
     defer if (own) |*p| p.deinit();

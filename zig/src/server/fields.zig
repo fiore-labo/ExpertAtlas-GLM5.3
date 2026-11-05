@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! Request field checks shared by every route: numbers, stops, thinking switches, efforts, probabilities.
 const std = @import("std");
 const json = @import("json.zig");
@@ -54,7 +55,7 @@ pub fn stopOptions(cx: *Cx, fields: Value) errors.Refused!Stops {
     return out;
 }
 
-const integer_fields = [_][]const u8{ "max_completion_tokens", "max_tokens", "seed", "thinking_budget", "top_k" };
+const integer_fields = [_][]const u8{ "max_completion_tokens", "max_tokens", "seed", "thinking_budget", "thinking_fold_window", "thinking_fold_max", "thinking_fold_keep", "thinking_fold_stages", "thinking_fold_cap", "thinking_fold_at_close", "thinking_fold_margin", "top_k" };
 
 /// ``parse_numbers``: the body with its numeric fields as numbers, or Python's refusal.
 pub fn parseNumbers(cx: *Cx, fields: Value) errors.Refused!Value {

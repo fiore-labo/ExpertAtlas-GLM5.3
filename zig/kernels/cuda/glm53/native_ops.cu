@@ -998,6 +998,136 @@ __global__ void tf_glm53_n_expand(ExpandArgs a) {
     }
 }
 
+// TF_GLM53_KVB=fp8 (gr8's G6_KVB, as e4m3 rows each with an fp32 scale; the release's bf16 is not fp8-born, so not
+// exact): kv_b's wk / wv as e4m3 [rows, 512] and sc [rows] fp32, value = code x sc[row].
+// TF_GLM53_KVB=fp8 (gr8 の G6_KVB を、行ごとに fp32 スケールを持つ e4m3 で。配布の bf16 は fp8 由来ではないので厳密では
+// ない): kv_b の wk / wv を e4m3 [rows, 512] と sc [rows] fp32 で持つ。値は code x sc[row]。
+
+// 8 e4m3 at p (8-byte aligned) as fp32 (exact)
+// p にある 8 個の e4m3 (8 バイト境界) を fp32 にする (誤差なし)
+static __device__ __forceinline__ void ld8_e4m3(const uint8_t* p, float* f) {
+    const uint2 v = *(const uint2*)p;
+#pragma unroll
+    for (int i = 0; i < 4; i++) f[i] = e4m3_f32((v.x >> (8 * i)) & 0xffu);
+#pragma unroll
+    for (int i = 0; i < 4; i++) f[4 + i] = e4m3_f32((v.y >> (8 * i)) & 0xffu);
+}
+
+// tf_glm53_n_absorb on e4m3 WK: each of a thread's 6 q values takes its WK row's scale first (q[k] x sc[h, k]), then
+// the same chains, butterflies and warp sums.
+// e4m3 の WK での tf_glm53_n_absorb: スレッドの 6 個の q 値に先に WK の行のスケールを掛け (q[k] x sc[h, k])、
+// あとは同じ連鎖・butterfly・warp の和。
+typedef struct { Dev q, wk, inv, qa, qr, pos; int rows, h, rbk, qa_stride, qr_stride; Dev sc; } Absorb8Args;
+__global__ void tf_glm53_n_absorb8(Absorb8Args a) {
+    __shared__ float sh[128];
+    const int h = blockIdx.x, nb = blockIdx.y, r0 = blockIdx.z * a.rbk, t = threadIdx.x;
+    const int cg = t & 3, k0 = t >> 2, warp = t >> 5;
+    const uint8_t* wk = (const uint8_t*)a.wk + ((long long)h * 192 + k0) * 512 + nb * 32 + cg * 8;
+    const float* sc = (const float*)a.sc + h * 192 + k0;
+    float w[6][8], ws[6];
+    for (int j = 0; j < 6; j++) {
+        ld8_e4m3(wk + (long long)j * 32 * 512, w[j]);
+        ws[j] = sc[32 * j];
+    }
+    for (int jr = 0; jr < a.rbk; jr++) {
+        const int r = r0 + jr;
+        if (r >= a.rows) break;
+        const uint16_t* q = (const uint16_t*)a.q + ((long long)r * a.h + h) * 256;
+        float qv[6], acc[8];
+        for (int j = 0; j < 6; j++) qv[j] = bf16_f32(q[k0 + 32 * j]) * ws[j];
+        for (int c = 0; c < 8; c++) {
+            float s = fmaf(w[0][c], qv[0], w[1][c] * qv[1]);
+            for (int j = 2; j < 6; j++) s = fmaf(w[j][c], qv[j], s);
+            s = s + __shfl_xor_sync(0xffffffffu, s, 16);
+            s = s + __shfl_xor_sync(0xffffffffu, s, 8);
+            s = s + __shfl_xor_sync(0xffffffffu, s, 4);
+            acc[c] = s;
+        }
+        if ((t & 0x1c) == 0)
+            for (int c = 0; c < 8; c++) sh[cg * 32 + c * 4 + warp] = acc[c];
+        __syncthreads();
+        if (t < 32) {
+            const float* v = sh + t * 4;
+            ((uint16_t*)a.qa)[((long long)r * a.h + h) * a.qa_stride + nb * 32 + t] = f32_bf16((v[0] + v[2]) + (v[1] + v[3]));
+            if (nb == 0) {
+                uint16_t* qr = (uint16_t*)a.qr + ((long long)r * a.h + h) * a.qr_stride;
+                const float ang = (float)(((const int*)a.pos)[0] + r) * ((const float*)a.inv)[t];
+                float ra, rb;
+                rope_pair(bf16_f32(q[192 + 2 * t]), bf16_f32(q[192 + 2 * t + 1]), ang, &ra, &rb);
+                qr[t] = f32_bf16(ra);
+                qr[32 + t] = f32_bf16(rb);
+            }
+        }
+        __syncthreads();
+    }
+}
+
+// tf_glm53_n_expand on e4m3 WV: the same sums, each output times its WV row's scale at the end.
+// e4m3 の WV での tf_glm53_n_expand: 同じ和に、最後に各出力の WV の行のスケールを掛ける。
+typedef struct { Dev ol, wv, out; int rows, h, rbk; Dev sc; } Expand8Args;
+__global__ void tf_glm53_n_expand8(Expand8Args a) {
+    __shared__ float sh[32];
+    const int h = blockIdx.x, nb = blockIdx.y, r0 = blockIdx.z * a.rbk, t = threadIdx.x;
+    const int b = t >> 6, g = t & 63, warp = t >> 5;
+    const uint8_t* wv = (const uint8_t*)a.wv + ((long long)h * 256 + nb * 16 + b) * 512 + g * 8;
+    float w[8][8];
+    for (int j = 0; j < 8; j++) ld8_e4m3(wv + (long long)j * 2 * 512, w[j]);
+    const float osc = t < 16 ? ((const float*)a.sc)[h * 256 + nb * 16 + t] : 0.0f;
+    for (int jr = 0; jr < a.rbk; jr++) {
+        const int r = r0 + jr;
+        if (r >= a.rows) break;
+        float o[8], acc[8];
+        ld8_bf16((const uint16_t*)a.ol + ((long long)r * a.h + h) * 512 + g * 8, o);
+        for (int j = 0; j < 8; j++) {
+            float s = fmaf(w[j][0], o[0], w[j][1] * o[1]);
+            for (int c = 2; c < 8; c++) s = fmaf(w[j][c], o[c], s);
+            s = s + __shfl_xor_sync(0xffffffffu, s, 16);
+            s = s + __shfl_xor_sync(0xffffffffu, s, 8);
+            s = s + __shfl_xor_sync(0xffffffffu, s, 4);
+            s = s + __shfl_xor_sync(0xffffffffu, s, 2);
+            s = s + __shfl_xor_sync(0xffffffffu, s, 1);
+            acc[j] = s;
+        }
+        if ((t & 31) == 0)
+            for (int j = 0; j < 8; j++) sh[j * 4 + warp] = acc[j];
+        __syncthreads();
+        if (t < 16)
+            ((uint16_t*)a.out)[((long long)r * a.h + h) * 256 + nb * 16 + t] = f32_bf16((sh[(t >> 1) * 4 + (t & 1) * 2] + sh[(t >> 1) * 4 + (t & 1) * 2 + 1]) * osc);
+        __syncthreads();
+    }
+}
+
+// At the start (TF_GLM53_KVB=fp8): each row of `cols` bf16 (one block a row) -> e4m3 codes and sc[row] = amax / 448
+// (1 for a zero row), code = e4m3(value / sc) round to nearest even.
+// 起動時 (TF_GLM53_KVB=fp8): `cols` 個の bf16 の各行 (1 ブロック 1 行) -> e4m3 の code と sc[row] = amax / 448 (全 0 の
+// 行は 1)。code = e4m3(値 / sc)、最近接偶数丸め。
+__global__ void tf_glm53_n_kvb8_quant(const uint16_t* __restrict__ w, uint8_t* __restrict__ q, float* __restrict__ sc, int cols) {
+    __shared__ float red[32];
+    const long long row = blockIdx.x;
+    const uint16_t* x = w + row * cols;
+    float m = 0.0f;
+    for (int i = threadIdx.x; i < cols; i += blockDim.x) m = fmaxf(m, fabsf(bf16_f32(x[i])));
+    for (int o = 16; o; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
+    if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = m;
+    __syncthreads();
+    if (threadIdx.x < 32) {
+        m = threadIdx.x < (blockDim.x >> 5) ? red[threadIdx.x] : 0.0f;
+        for (int o = 16; o; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
+        if (threadIdx.x == 0) red[0] = m;
+    }
+    __syncthreads();
+    const float s = red[0] > 0.0f ? red[0] / 448.0f : 1.0f;
+    if (threadIdx.x == 0) sc[row] = s;
+    for (int i = threadIdx.x; i < cols; i += blockDim.x) q[row * cols + i] = f32_e4m3(bf16_f32(x[i]) / s);
+}
+
+// The e4m3 rows back to bf16 (code x sc[row]) for the wide rows' cuBLAS GEMMs.
+// 広い行の cuBLAS GEMM 用に e4m3 の行を bf16 に戻す (code x sc[row])。
+__global__ void tf_glm53_n_kvb8_bf16(const uint8_t* __restrict__ q, const float* __restrict__ sc, uint16_t* __restrict__ out, int cols, long long n) {
+    for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (long long)gridDim.x * blockDim.x)
+        out[i] = f32_bf16(e4m3_f32(q[i]) * sc[i / cols]);
+}
+
 // The tensor-core pieces, as the original's: LDGSTS 16-byte copies into shared memory, LDSM, HMMA.16816.F32.BF16.
 // テンソルコア用の部品。元と同じく、共有メモリへの 16 バイトの LDGSTS コピー、LDSM、HMMA.16816.F32.BF16。
 static __device__ __forceinline__ unsigned smem_addr(const void* p) { return (unsigned)__cvta_generic_to_shared(p); }

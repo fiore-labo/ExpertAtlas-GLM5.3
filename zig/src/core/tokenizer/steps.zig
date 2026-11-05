@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! Normalizers, pre-tokenizers and decoders of the Hugging Face tokenizer.json format; unknown kinds fail to load.
 const std = @import("std");
 const unicode = @import("unicode.zig");
@@ -202,6 +203,24 @@ const char_bytes: [0x144]i16 = blk: {
     for (byte_chars, 0..) |cp, b| table[cp] = b;
     break :blk table;
 };
+
+/// Fiore-lab: a ByteLevel token's raw bytes, as the decoder maps them and before its lossy UTF-8 step (a string with a
+/// character outside the table is its own bytes, as there).
+pub fn byteLevelBytes(a: std.mem.Allocator, token: []const u8) std.mem.Allocator.Error![]u8 {
+    var bytes: std.ArrayList(u8) = try .initCapacity(a, token.len);
+    var i: usize = 0;
+    while (i < token.len) {
+        const c = unicode.decodeAt(token, i);
+        if (c.cp >= char_bytes.len or char_bytes[c.cp] < 0) {
+            bytes.clearRetainingCapacity();
+            bytes.appendSliceAssumeCapacity(token);
+            break;
+        }
+        bytes.appendAssumeCapacity(@intCast(char_bytes[c.cp]));
+        i += c.len;
+    }
+    return bytes.items;
+}
 
 const gpt2_pattern = "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+";
 

@@ -12,7 +12,8 @@ Copyright 2026 Fiore-lab
 
 Fiore-lab added the engine of full GLM-5.3 for DGX Spark (zig/src/families/glm_moe_dsa/,
 zig/kernels/cuda/glm53/, zig/native/, zig/src/native/glm53_host.zig, zig/src/cuda/cublas.zig,
-zig/src/cuda/tp.zig, zig/tests/cuda/glm53_*.zig, zig/tests/cuda/tp_main.zig, glm53/) and
+zig/src/cuda/tp.zig, zig/src/server/panel.html, zig/tests/cuda/glm53_*.zig, zig/tests/cuda/roce_main.zig,
+zig/tests/cuda/tp_main.zig, glm53/) and
 changed these TensorFold files, each of which says so in its first lines:
 
   build.zig
@@ -21,6 +22,8 @@ changed these TensorFold files, each of which says so in its first lines:
   zig/build/cuda.zig
   zig/src/core/direct_io.zig
   zig/src/core/engine_api.zig
+  zig/src/core/tokenizer/steps.zig
+  zig/src/core/tokenizer/tokenizer.zig
   zig/src/cuda/abi.zig
   zig/src/cuda/graph.zig
   zig/src/cuda/kernels.zig
@@ -29,12 +32,23 @@ changed these TensorFold files, each of which says so in its first lines:
   zig/src/cuda/root.zig
   zig/src/cuda/stream.zig
   zig/src/native/cuda.zig
+  zig/src/server/anthropic.zig
+  zig/src/server/anthropic_translate.zig
   zig/src/server/chat.zig
+  zig/src/server/cli.zig
+  zig/src/server/fields.zig
+  zig/src/server/hf_text.zig
+  zig/src/server/main.zig
+  zig/src/server/messages.zig
   zig/src/server/metrics.zig
+  zig/src/server/model_text.zig
   zig/src/server/openai.zig
+  zig/src/server/responses.zig
+  zig/src/server/root.zig
   zig/src/server/routes.zig
   zig/src/server/serve.zig
   zig/src/server/server.zig
+  zig/src/server/sse.zig
   zig/src/server/status_routes.zig
   zig/src/server/stream_preflight_test.zig
   zig/src/server/tool_parse.zig
@@ -44,9 +58,9 @@ direct_io.zig, tool_parse.zig and tool_parse_test.zig are TensorFold's own later
 c126fe16: a test's reference read, and GLM tool calls read when the model drops an <arg_key> or the end token leaves
 a value open), taken in unchanged apart from their first line.
 
-Fiore-lab's published tree leaves out TensorFold's documents; its README*.md and packaging/RUNTIME*.md (English,
-Japanese and Simplified Chinese) are Fiore-lab's, and Fiore-lab added the sections "Full GLM-5.3 in Zig" and
-"Unicode data" to THIRD_PARTY_NOTICES.md.
+Fiore-lab's published tree leaves out TensorFold's documents; its README*.md (English, Japanese, Simplified Chinese
+and Korean), packaging/RUNTIME*.md (English, Japanese and Simplified Chinese) and the documents under glm53/ are
+Fiore-lab's, and Fiore-lab added the sections "Full GLM-5.3 in Zig" and "Unicode data" to THIRD_PARTY_NOTICES.md.
 
 The additions include code from TensorFold's Python engine and from b12x, some of it
 modified by Fiore-lab, as THIRD_PARTY_NOTICES.md lists. The additions are licensed under

@@ -88,6 +88,74 @@ pub const Reader = struct {
         r.files.clearRetainingCapacity();
     }
 
+    /// TF_GLM53_LOAD_READERS: the maps closed and their pages left in the page cache: the load pipe drops the ranges
+    /// its readers read once the loader is done with them (load_pipe.Prefetch.done), so the steps read ahead stay.
+    /// TF_GLM53_LOAD_READERS: map を閉じ、ページはページキャッシュに残す: ローダーが使い終えたら、load pipe が reader の
+    /// 読んだ範囲を落とす (load_pipe.Prefetch.done)。先読みしたステップは残る。
+    pub fn releaseKeep(r: *Reader) void {
+        var it = r.files.valueIterator();
+        while (it.next()) |f| f.*.close(r.io);
+        r.files.clearRetainingCapacity();
+    }
+
+    /// TF_GLM53_LOAD_*: `release` with the maps closed before the pages are dropped. POSIX_FADV_DONTNEED leaves the
+    /// pages still mapped in the cache, so `release` drops only those of earlier maps (10-31 on the ring: the page cache
+    /// grew to 55 GB during the load until the kernel reclaimed it).
+    /// TF_GLM53_LOAD_*: map を閉じてからページを落とす `release`。POSIX_FADV_DONTNEED は map 中のページをキャッシュに
+    /// 残すので、`release` が落とすのは前の map のページだけ (10-31 のリングでは、読み込み中にページキャッシュが
+    /// 55 GB まで増え、カーネルが回収するまで残った)。
+    pub fn releaseDrop(r: *Reader) void {
+        var it = r.files.valueIterator();
+        while (it.next()) |f| {
+            f.*.map.destroy(r.io);
+            _ = std.os.linux.fadvise(f.*.file.handle, 0, 0, std.os.linux.POSIX_FADV.DONTNEED);
+            f.*.file.close(r.io);
+            f.*.arena.deinit();
+        }
+        r.files.clearRetainingCapacity();
+    }
+
+    /// TF_GLM53_LOAD_*: a reader of rank `rank`'s shares over `base`'s index, not parsed again (GLM-5.3's: 170 MB of
+    /// JSON, about 1 GiB parsed). `base` outlives it; closing it closes only its own files.
+    /// TF_GLM53_LOAD_*: `base` の索引をそのまま使う、ランク `rank` の分の reader (索引を再び解析しない。GLM-5.3 では
+    /// 170 MB の JSON、解析すると約 1 GiB)。`base` の方が長く生きる。閉じると自分のファイルだけを閉じる。
+    pub fn openSharing(base: *const Reader, rank: usize) Reader {
+        return .{ .gpa = base.gpa, .io = base.io, .arena = .init(base.gpa), .dir = base.dir, .rank = rank, .world = base.world, .stored_world = base.stored_world, .index = base.index };
+    }
+
+    /// Whether `name` is stored as pre-sharded parts (`...P_proj.rank{s}.S`), not whole.
+    /// `name` が完全な形ではなく、事前分割した分 (`...P_proj.rank{s}.S`) として保存されているか。
+    pub fn preSharded(r: *const Reader, name: []const u8) bool {
+        return !r.index.contains(name);
+    }
+
+    /// TF_GLM53_LOAD_PACKERS: this rank's stored parts of the pre-sharded `name`, checked as `join` checks them, with
+    /// the joined share's shape and bytes; nothing is read but the files' headers (the parts are slices of the maps,
+    /// valid until `release`). `joinInto` makes from them the bytes `get` returns.
+    /// TF_GLM53_LOAD_PACKERS: 事前分割した `name` のこのランクの保存された分。`join` と同じく確かめ、連結した分の形と
+    /// バイト数を添える。読むのはファイルの header だけ (分は map の一部で、`release` まで有効)。`joinInto` がそこから
+    /// `get` と同じバイトを作る。
+    pub fn storedParts(r: *Reader, name: []const u8) !Parts {
+        const k = r.stored_world / r.world;
+        const rule = try split.rule(name);
+        var ts: [16]st.Tensor = undefined;
+        if (k > ts.len or k == 0) return error.TooManyStoredRanks;
+        for (0..k) |i| {
+            var buf: [256]u8 = undefined;
+            ts[i] = try r.tensor(try storedName(&buf, name, r.rank * k + i));
+        }
+        const p0 = ts[0];
+        for (ts[1..k]) |p| if (p.dtype != p0.dtype or p.rank != p0.rank or !std.mem.eql(usize, p.shape[0..p.rank], p0.shape[0..p0.rank])) return error.StoredSharesDiffer;
+        var out: Parts = .{ .bytes = undefined, .k = k, .rule = rule, .dtype = p0.dtype, .rank = p0.rank, .shape = p0.shape, .rows = p0.shape[0], .len = if (rule == .rep) p0.bytes.len else p0.bytes.len * k };
+        for (0..k) |i| out.bytes[i] = ts[i].bytes;
+        switch (rule) {
+            .rep => {},
+            .row => out.shape[0] = p0.shape[0] * k,
+            .dim1 => out.shape[1] = p0.shape[1] * k,
+        }
+        return out;
+    }
+
     fn file(r: *Reader, fname: []const u8) !*st.File {
         if (r.files.get(fname)) |f| return f;
         const a = r.arena.allocator();
@@ -199,6 +267,74 @@ fn join(gpa: std.mem.Allocator, parts: []const st.Tensor, rule: split.Rule, name
         @memcpy(s.bytes[(i * parts.len + j) * row ..][0..row], p.bytes[i * row ..][0..row]);
     };
     return s;
+}
+
+/// One rank's stored parts of a pre-sharded tensor (Reader.storedParts): the k parts' bytes, the rule joining them, and the
+/// joined share's dtype, shape and bytes.
+/// 事前分割したテンソルの 1 ランクの保存された分 (Reader.storedParts): k 個の分のバイト、連結の規則、連結した分の dtype・
+/// 形・バイト数。
+pub const Parts = struct {
+    bytes: [16][]const u8,
+    k: usize,
+    rule: split.Rule,
+    dtype: st.DType,
+    rank: u8,
+    shape: [st.max_rank]usize,
+    rows: usize, // the parts' leading axis (join's rows for dim1) / 分の先頭の軸 (dim1 の join の行数)
+    len: usize,
+};
+
+/// `join`'s bytes into `dst` (`pt.len` bytes): the same concatenation, row interleave or replicated check. The
+/// packers' join (load_pipe.Packers), on any thread.
+/// `join` のバイトを `dst` (`pt.len` バイト) に作る: 同じ連結・行の交互の並べ・複製の確認。packer
+/// (load_pipe.Packers) の連結で、どのスレッドからでもよい。
+pub fn joinInto(dst: []u8, pt: *const Parts) !void {
+    if (dst.len != pt.len) return error.JoinSize;
+    const k = pt.k;
+    const p0 = pt.bytes[0];
+    switch (pt.rule) {
+        .rep => {
+            for (pt.bytes[1..k]) |b| if (!std.mem.eql(u8, b, p0)) return error.ReplicatedPartDiffers;
+            @memcpy(dst, p0);
+        },
+        .row => for (pt.bytes[0..k], 0..) |b, i| @memcpy(dst[i * p0.len ..][0..p0.len], b),
+        .dim1 => {
+            if (pt.rows == 0) return error.JoinSize;
+            const row = p0.len / pt.rows;
+            for (0..pt.rows) |i| for (pt.bytes[0..k], 0..) |b, j| {
+                @memcpy(dst[(i * k + j) * row ..][0..row], b[i * row ..][0..row]);
+            };
+        },
+    }
+}
+
+test "joinInto makes join's bytes (dim1, row, rep)" {
+    const gpa = std.testing.allocator;
+    var a: [2 * 4 * 3]u8 = undefined;
+    var b: [2 * 4 * 3]u8 = undefined;
+    for (&a, &b, 0..) |*x, *y, i| {
+        x.* = @intCast(i);
+        y.* = @intCast(100 + i);
+    }
+    const parts = [_]st.Tensor{ .{ .dtype = .u8, .rank = 3, .shape = .{ 2, 4, 3, 0 }, .bytes = &a }, .{ .dtype = .u8, .rank = 3, .shape = .{ 2, 4, 3, 0 }, .bytes = &b } };
+    for ([_]split.Rule{ .dim1, .row }) |rule| {
+        var s = try join(gpa, &parts, rule, "x.y");
+        defer s.deinit(gpa);
+        var pt: Parts = .{ .bytes = undefined, .k = 2, .rule = rule, .dtype = .u8, .rank = 3, .shape = parts[0].shape, .rows = 2, .len = 2 * a.len };
+        pt.bytes[0] = &a;
+        pt.bytes[1] = &b;
+        var out: [2 * a.len]u8 = undefined;
+        try joinInto(&out, &pt);
+        try std.testing.expectEqualSlices(u8, s.bytes, &out);
+    }
+    var rp: Parts = .{ .bytes = undefined, .k = 2, .rule = .rep, .dtype = .u8, .rank = 3, .shape = parts[0].shape, .rows = 2, .len = a.len };
+    rp.bytes[0] = &a;
+    rp.bytes[1] = &a;
+    var ro: [a.len]u8 = undefined;
+    try joinInto(&ro, &rp);
+    try std.testing.expectEqualSlices(u8, &a, &ro);
+    rp.bytes[1] = &b;
+    try std.testing.expectError(error.ReplicatedPartDiffers, joinInto(&ro, &rp));
 }
 
 test "cut and join agree: a dim1 share of a full tensor equals its stored halves joined" {

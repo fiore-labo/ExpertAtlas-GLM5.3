@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! The tokenizer and chat template a server renders prompts and replies with (the tok and jinja branches plug in here).
 const std = @import("std");
 const json = @import("json.zig");
@@ -36,6 +37,8 @@ pub const Text = struct {
         template_source: *const fn (ctx: *anyopaque) []const u8,
         /// Whether an id is a special token (an added token flagged special); null: none are known.
         special: ?*const fn (ctx: *anyopaque, id: u32) bool = null,
+        /// Fiore-lab: a token's raw bytes, before decode's U+FFFD; null: this tokenizer cannot say, or no such id.
+        token_bytes: ?*const fn (ctx: *anyopaque, a: Allocator, id: u32) Allocator.Error!?[]u8 = null,
         /// Fiore-lab: whether an id is an added token (special or not: GLM-5.3's <think> / </think> are not flagged
         /// special); null: none are known.
         added: ?*const fn (ctx: *anyopaque, id: u32) bool = null,
@@ -77,6 +80,11 @@ pub const Text = struct {
 
     pub fn templateSource(t: Text) []const u8 {
         return t.vtable.template_source(t.ctx);
+    }
+
+    pub fn tokenBytes(t: Text, a: Allocator, id: u32) Allocator.Error!?[]u8 {
+        const f = t.vtable.token_bytes orelse return null;
+        return f(t.ctx, a, id);
     }
 
     pub fn isSpecial(t: Text, id: u32) bool {

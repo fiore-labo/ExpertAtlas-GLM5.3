@@ -101,6 +101,14 @@ authors.
   plain CUDA), Apache-2.0, Copyright (c) 2025 by the b12x authors.
 - [ExLlamaV3](https://github.com/turboderp-org/exllamav3)'s EXL3 format, MIT License, Copyright © 2025 Turboderp.
 - [z-lab/dflash](https://github.com/z-lab/dflash)'s DFlash2 architecture, MIT License, Copyright © 2026 Z Lab.
+- The decode speed-ups of the gr8 recipe,
+  [knapcio/GLM-5.3-gr8-4x-DGX-Spark-TP4](https://github.com/knapcio/GLM-5.3-gr8-4x-DGX-Spark-TP4), MIT License,
+  Copyright (c) 2026 knapcio, and of its engine, [kindlingai/gr8](https://github.com/kindlingai/gr8), MIT License,
+  Copyright (c) 2026 gr8 engine contributors: `TF_GLM53_SPLIT_QA`, `TF_GLM53_KVB`, `TF_GLM53_L2PF`,
+  `TF_GLM53_DFLASH_HEAD4` and `TF_GLM53_DFLASH_CONF` take their ideas, implemented with this engine's own code.
+- [ollama/ollama#12375](https://github.com/ollama/ollama/issues/12375), the report on KV caches and token ids: Byte
+  Resume (`TF_GLM53_BYTE_RESUME`) takes its idea of matching a prompt to the cache by its text past the first id that
+  differs, implemented with this engine's own code.
 
 It also includes code of other projects, as each file's first lines say:
 
@@ -157,9 +165,13 @@ The container image built from the archive's `docker/Dockerfile` adds to the arc
 system and the packages it installs, each under its own license (listed in the image's `/usr/share/doc`); NVIDIA's
 cuBLAS 13 (`libcublas-13-0` from NVIDIA's CUDA repository), under the NVIDIA CUDA Toolkit End User License Agreement
 (its text in the image's `/usr/share/doc/libcublas-13-0/`); rdma-core's `libibverbs1` and `ibverbs-providers`, under
-the GNU General Public License version 2 or the OpenIB.org BSD license; and NCCL 2.30.7 (NVIDIA's `nvidia-nccl-cu13`
-wheel, unpacked in `/opt/nccl`), Copyright (c) 2015-2020 NVIDIA CORPORATION, under a BSD 3-clause license (its text in
-`/opt/nccl/nvidia_nccl_cu13-2.30.7.dist-info/licenses/License.txt`). The image carries no model weights.
+the GNU General Public License version 2 or the OpenIB.org BSD license; and NCCL 2.30.7 twice. At `/opt/nccl-fenced`,
+the one the engine reads: built by Fiore-lab from NCCL's source at tag v2.30.7-1, for sm_121 only, with commit `05d026f4`
+(NVIDIA/nccl#2393, an acquire fence in `ncclIbIsend`) added; mostly Apache-2.0, with parts under their original BSD
+license and NVTX under Apache-2.0 with LLVM exceptions (its `LICENSE.txt` and `ThirdPartyNotices.txt` beside the
+library). At `/opt/nccl`, kept for comparison: NVIDIA's `nvidia-nccl-cu13` wheel, Copyright (c) 2015-2020 NVIDIA
+CORPORATION, under the BSD 3-clause license in its
+`/opt/nccl/nvidia_nccl_cu13-2.30.7.dist-info/licenses/License.txt`. The image carries no model weights.
 
 The archive's binaries are built with Zig 0.17.0, whose standard library and compiler runtime are linked in (MIT
 License, Copyright (c) Zig contributors, text below). Their GPU code is compiled with NVIDIA's CUDA 13.0 compiler and

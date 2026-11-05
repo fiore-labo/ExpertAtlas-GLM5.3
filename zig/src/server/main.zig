@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! ``tensorfold-native``: ``capabilities --json`` for the Python switch, and ``serve MODEL [flags]`` with no Python.
 const std = @import("std");
 const json = @import("json.zig");
@@ -9,7 +10,7 @@ const serve = @import("serve.zig");
 const hf_text = @import("hf_text.zig");
 const checkpoint_cli = @import("checkpoint_cli");
 
-const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--alias ALIAS] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard] [--context CONTEXT] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB] [--max-tokens MAX_TOKENS] [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P] [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}] [--thinking-budget THINKING_BUDGET] [--loop-guard] [--no-drafts] [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP] [--compact-memory COMPACT_MEMORY] [--parallel PARALLEL] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE] [--segments SEGMENTS] model\n";
+const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--alias ALIAS] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard] [--context CONTEXT] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB] [--max-tokens MAX_TOKENS] [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P] [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}] [--thinking-budget THINKING_BUDGET] [--thinking-share THINKING_SHARE] [--thinking-notice THINKING_NOTICE] [--thinking-fold {off,recent,checkpoint,branch}] [--thinking-fold-window THINKING_FOLD_WINDOW] [--thinking-fold-share THINKING_FOLD_SHARE] [--thinking-fold-max THINKING_FOLD_MAX] [--thinking-fold-at-budget THINKING_FOLD_AT_BUDGET] [--thinking-fold-margin THINKING_FOLD_MARGIN] [--thinking-fold-prompt THINKING_FOLD_PROMPT] [--thinking-close-prompt THINKING_CLOSE_PROMPT] [--thinking-fold-keep THINKING_FOLD_KEEP] [--thinking-fold-at-close-share THINKING_FOLD_AT_CLOSE_SHARE] [--thinking-fold-cap THINKING_FOLD_CAP] [--thinking-fold-cap-share THINKING_FOLD_CAP_SHARE] [--loop-guard] [--no-drafts] [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP] [--compact-memory COMPACT_MEMORY] [--parallel PARALLEL] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE] [--segments SEGMENTS] model\n";
 
 pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;

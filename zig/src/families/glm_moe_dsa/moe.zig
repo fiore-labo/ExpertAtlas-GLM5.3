@@ -7,6 +7,7 @@ const cuda = @import("cuda");
 const Config = @import("config.zig").Config;
 const weights = @import("weights.zig");
 const experts = @import("experts.zig");
+const load_pipe = @import("load_pipe.zig");
 
 const Buf = cuda.DeviceBuffer;
 
@@ -124,6 +125,86 @@ pub fn loadFrom(gpa: std.mem.Allocator, d: *const cuda.Driver, src: Source, cfg:
     out.svh_u = try stack(gpa, d, scales[1][1]);
     out.suh_d = try stack(gpa, d, scales[2][0]);
     out.svh_d = try stack(gpa, d, scales[2][1]);
+    out.cb = try codebook(src.of(0), layer, 0, "gate");
+    if (src.pick != null) for (0..E) |e| for (projs) |proj| {
+        if (try codebook(src.of(e), layer, e, proj) != out.cb) {
+            std.log.err("glm53: layer {d} expert {d} {s}: its codebook differs from expert 0's", .{ layer, e, proj });
+            return error.MixedCodebooks;
+        }
+    };
+    return out;
+}
+
+/// TF_GLM53_LOAD_PACKERS: `loadFrom` with the trellis shares (nearly all of a layer's bytes) joined by the load pipe's
+/// packers straight into pinned chunks and copied from there, one copy an expert at loadFrom's offsets; the scales and
+/// tables as loadFrom makes them, in the same order of allocations. The same buffers, bit for bit (the alignment gaps
+/// are not written by either). A layer whose trellis is stored whole (cut on the host) is left to loadFrom.
+/// TF_GLM53_LOAD_PACKERS: trellis の分 (層のバイトのほぼすべて) を load pipe の packer が pin したチャンクへ直接連結し、
+/// そこから写す `loadFrom` (expert ごとに 1 回、loadFrom と同じ位置へ)。スケールと表は loadFrom と同じく、同じ確保の
+/// 順で作る。バッファはビットまで同じ (整列の隙間はどちらも書かない)。trellis を完全な形で保存した層 (ホストで切る)
+/// は loadFrom に任せる。
+pub fn loadFromPacked(gpa: std.mem.Allocator, d: *const cuda.Driver, src: Source, cfg: Config, layer: usize, pk: *load_pipe.Packers) !Routed {
+    const E = cfg.experts;
+    const projs = [_][]const u8{ "gate", "up", "down" };
+    var buf: [192]u8 = undefined;
+    for (0..E) |e| for (projs) |proj| {
+        if (!src.of(e).preSharded(try std.fmt.bufPrint(&buf, "model.layers.{d}.mlp.experts.{d}.{s}_proj.trellis", .{ layer, e, proj }))) return loadFrom(gpa, d, src, cfg, layer);
+    };
+    var scales: [3][2]std.ArrayList(weights.Share) = .{ .{ .empty, .empty }, .{ .empty, .empty }, .{ .empty, .empty } };
+    defer for (0..3) |p| for (0..2) |j| {
+        for (scales[p][j].items) |*s| s.deinit(gpa);
+        scales[p][j].deinit(gpa);
+    };
+    for (0..3) |p| for (0..2) |j| try scales[p][j].ensureTotalCapacity(gpa, E);
+    for (projs, 0..) |proj, p| for (0..E) |e| {
+        const r = src.of(e);
+        scales[p][0].appendAssumeCapacity(try r.get(try std.fmt.bufPrint(&buf, "model.layers.{d}.mlp.experts.{d}.{s}_proj.suh", .{ layer, e, proj })));
+        scales[p][1].appendAssumeCapacity(try r.get(try std.fmt.bufPrint(&buf, "model.layers.{d}.mlp.experts.{d}.{s}_proj.svh", .{ layer, e, proj })));
+        if (scales[p][0].items[e].dtype != .f16 or scales[p][1].items[e].dtype != .f16) return error.PackedScalesUnsupported;
+    };
+    const pieces = try gpa.alloc(load_pipe.Piece, E);
+    defer gpa.free(pieces);
+    const ptrs = try gpa.alloc(i64, E);
+    defer gpa.free(ptrs);
+    const k2 = try gpa.alloc(i32, E);
+    defer gpa.free(k2);
+    var out: Routed = undefined;
+    out.count = @intCast(E);
+    var k2s: [3][2]u32 = .{ .{ 99, 0 }, .{ 99, 0 }, .{ 99, 0 } };
+    for (projs, 0..) |proj, p| {
+        // the parts resolved (headers only) and laid out as loadFrom lays the joined shares out
+        // 分を解決し (header だけ)、loadFrom が連結した分を並べるのと同じ位置に置く
+        var total: usize = 0;
+        for (0..E) |e| {
+            const pt = try src.of(e).storedParts(try std.fmt.bufPrint(&buf, "model.layers.{d}.mlp.experts.{d}.{s}_proj.trellis", .{ layer, e, proj }));
+            if (pt.dtype != .i16 or pt.rank != 3 or pt.shape[2] % 8 != 0) return error.BadTrellis;
+            // Reader.get counts a share's bytes as it makes the share; the packers make these
+            // Reader.get は分を作るときにそのバイトを数える。この分は packer が作る
+            weights.read_bytes += pt.len;
+            pieces[e] = .{ .pt = pt, .off = total };
+            k2[e] = @intCast(pt.shape[2] / 8);
+            k2s[p][0] = @min(k2s[p][0], @as(u32, @intCast(k2[e])));
+            k2s[p][1] = @max(k2s[p][1], @as(u32, @intCast(k2[e])));
+            total += alignUp(pt.len);
+        }
+        if (p == 0) {
+            out.dims = @intCast(pieces[0].pt.shape[0] * 16);
+            out.width = @intCast(pieces[0].pt.shape[1] * 16);
+        }
+        out.trellis[p] = try Buf.alloc(d, total);
+        for (pieces, 0..) |pc, e| ptrs[e] = @intCast(out.trellis[p].ptr + pc.off);
+        try pk.run(pieces, out.trellis[p]);
+        out.ptr[p] = try Buf.fromHost(d, std.mem.sliceAsBytes(ptrs));
+        out.k2[p] = try Buf.fromHost(d, std.mem.sliceAsBytes(k2));
+    }
+    out.k2_gu = .{ @min(k2s[0][0], k2s[1][0]), @max(k2s[0][1], k2s[1][1]) };
+    out.k2_d = k2s[2];
+    out.suh_g = try stack(gpa, d, scales[0][0].items);
+    out.suh_u = try stack(gpa, d, scales[1][0].items);
+    out.svh_g = try stack(gpa, d, scales[0][1].items);
+    out.svh_u = try stack(gpa, d, scales[1][1].items);
+    out.suh_d = try stack(gpa, d, scales[2][0].items);
+    out.svh_d = try stack(gpa, d, scales[2][1].items);
     out.cb = try codebook(src.of(0), layer, 0, "gate");
     if (src.pick != null) for (0..E) |e| for (projs) |proj| {
         if (try codebook(src.of(e), layer, e, proj) != out.cb) {

@@ -20,10 +20,18 @@ const slot_alignment = 4096;
 const threads = 512; // threads a block / ブロックあたりのスレッド数
 const max_blocks = 8; // a power of two: the arrival counters' modulus / 2 のべき乗: 到着カウンタの法
 const counter_classes = 4; // one class a grid size: 1, 2, 4, 8 blocks / grid の大きさごとに 1 つ: 1, 2, 4, 8 ブロック
-const abi_version = 4; // 4: the share mode (allReduce2) / 4: 取り分のモード (allReduce2)
+// 4: the share mode (allReduce2); 5: each peer's stripes over the HCAs in its subnet (up to 4 HCAs, a triangle of
+// direct links)
+// 4: 取り分のモード (allReduce2)。5: 相手ごとの stripe はそのサブネットの HCA だけ (HCA 4 つまで、直結の三角形)
+// 6: a ring of four (roce_set_ring4): the opposite rank's payload relayed by both neighbours (glm53/R3RT-102.md)
+// 6: 4 台のリング (roce_set_ring4): 向かいのランクの payload は両隣が中継する
+// 7: roce_pin and roce_tid (the proxy thread kept on one CPU, pinProxies; its id for the CPU it runs on, cpuOf)
+// 7: roce_pin と roce_tid (proxy のスレッドを 1 つの CPU に留める pinProxies、動いている CPU を見る cpuOf 用の id)
+const abi_version = 7;
+const max_hcas = 4;
 // sizeof(roce_blob_t) on aarch64 (checked against the library's roce_blob_bytes)
 // aarch64 での sizeof(roce_blob_t) (ライブラリの roce_blob_bytes と照合する)
-const blob_bytes = 192;
+const blob_bytes = 392;
 
 /// roce.cu's Region, passed by value.
 /// roce.cu の Region。値渡し。
@@ -49,6 +57,30 @@ comptime {
     std.debug.assert(@sizeOf(Region) == 96);
 }
 
+/// roce.cu's Pf (TF_GLM53_L2PF): up to 4 byte ranges the threads that do not poll ask the L2 for while a collective
+/// waits on its peers (gr8's paced L2 prefetch of the next weights, here in the wait itself). Writes nothing.
+/// roce.cu の Pf (TF_GLM53_L2PF): 集団通信が peer を待つ間に、poll しないスレッドが L2 に求める最大 4 つのバイト
+/// 範囲 (gr8 の次の重みの L2 先読みを、ここでは待ちの中で)。何も書かない。
+pub const Prefetch = extern struct {
+    p: [4]u64 = @splat(0),
+    n: [4]u32 = @splat(0),
+    count: c_int = 0,
+
+    /// `bytes` at `ptr` as one more range (the first 4 only; a range is cut at 4 GiB).
+    /// `ptr` の `bytes` を範囲に加える (最初の 4 つまで。範囲は 4 GiB で切る)。
+    pub fn add(pf: *Prefetch, ptr: u64, bytes: usize) void {
+        if (pf.count >= 4 or bytes == 0 or ptr == 0) return;
+        const i: usize = @intCast(pf.count);
+        pf.p[i] = ptr;
+        pf.n[i] = @intCast(@min(bytes, std.math.maxInt(u32)));
+        pf.count += 1;
+    }
+};
+
+comptime {
+    std.debug.assert(@sizeOf(Prefetch) == 56);
+}
+
 const Ctx = opaque {};
 
 /// The proxy library's functions.
@@ -62,6 +94,11 @@ const Proxy = struct {
     local_blob: *const fn (*Ctx, ?*anyopaque, u64) callconv(.c) c_int,
     connect: *const fn (*Ctx, ?*const anyopaque, u64) callconv(.c) c_int,
     start: *const fn (*Ctx) callconv(.c) c_int,
+    stripes: *const fn (*Ctx) callconv(.c) c_int,
+    stripe_hca: *const fn (*Ctx, c_int, c_int) callconv(.c) c_int,
+    set_ring4: *const fn (*Ctx, c_int) callconv(.c) c_int,
+    pin: *const fn (*Ctx, c_int) callconv(.c) c_int,
+    tid: *const fn (*Ctx) callconv(.c) c_int,
     failed: *const fn (*Ctx) callconv(.c) c_int,
     err: *const fn (*Ctx) callconv(.c) [*:0]const u8,
     destroy: *const fn (*Ctx) callconv(.c) void,
@@ -86,6 +123,11 @@ const Proxy = struct {
         p.local_blob = try L.get(&p.lib, @TypeOf(p.local_blob), "roce_local_blob");
         p.connect = try L.get(&p.lib, @TypeOf(p.connect), "roce_connect");
         p.start = try L.get(&p.lib, @TypeOf(p.start), "roce_start");
+        p.stripes = try L.get(&p.lib, @TypeOf(p.stripes), "roce_stripes");
+        p.stripe_hca = try L.get(&p.lib, @TypeOf(p.stripe_hca), "roce_stripe_hca");
+        p.set_ring4 = try L.get(&p.lib, @TypeOf(p.set_ring4), "roce_set_ring4");
+        p.pin = try L.get(&p.lib, @TypeOf(p.pin), "roce_pin");
+        p.tid = try L.get(&p.lib, @TypeOf(p.tid), "roce_tid");
         p.failed = try L.get(&p.lib, @TypeOf(p.failed), "roce_failed");
         p.err = try L.get(&p.lib, @TypeOf(p.err), "roce_error");
         p.destroy = try L.get(&p.lib, @TypeOf(p.destroy), "roce_destroy");
@@ -108,6 +150,110 @@ pub const Kernels = struct {
     }
 };
 
+/// TF_GLM53_ROCE_PROXY_CORES: the cores the proxy threads poll on. They spin while the decode runs; on the fast
+/// Cortex-X925 cores the scheduler often gives them they heat the SoC (measured 10-31 on four GB10: TSOC 5-16 °C lower on
+/// A725, decode unchanged; GitHub MiaAI-Lab DeepSeek-V4.1 TensorFold issue 40). `a725` (the default) / `x925`: the first
+/// core of that kind and the one halfway down their list (GB10: A725 0 and 10, X925 5 and 15, one a cluster), the
+/// world's proxy then the DCP group's; `os`: left to the scheduler.
+/// TF_GLM53_ROCE_PROXY_CORES: proxy のスレッドが待つコア。decode の間ずっと回るので、スケジューラが選びがちな速い
+/// Cortex-X925 では SoC を熱する (10-31 に GB10 4 台で実測: A725 では TSOC が 5〜16 °C 下がり、decode は変わらない。
+/// GitHub MiaAI-Lab DeepSeek-V4.1 TensorFold の issue 40)。`a725` (既定) / `x925`: その種類の最初のコアと、その一覧の
+/// 半分の所 (GB10: A725 は 0 と 10、X925 は 5 と 15、クラスタに 1 つずつ)。world の proxy、次に DCP グループのもの。
+/// `os`: スケジューラに任せる。
+pub const Mode = enum { a725, x925, os };
+
+/// A core's kind from /proc/cpuinfo's CPU part (Cortex-A725 0xd87, Cortex-X925 0xd85).
+/// /proc/cpuinfo の CPU part によるコアの種類 (Cortex-A725 は 0xd87、Cortex-X925 は 0xd85)。
+pub const Kind = enum { unknown, a725, x925 };
+
+pub const max_cpus = 256;
+
+/// Every CPU's kind (unknown past what /proc/cpuinfo names).
+/// 各 CPU の種類 (/proc/cpuinfo にないものは unknown)。
+pub fn coreKinds(io: std.Io) [max_cpus]Kind {
+    var kinds: [max_cpus]Kind = @splat(.unknown);
+    var buf: [64 * 1024]u8 = undefined;
+    const text = std.Io.Dir.cwd().readFile(io, "/proc/cpuinfo", &buf) catch return kinds;
+    var cpu: ?u16 = null;
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const key = std.mem.trim(u8, line[0..colon], " \t");
+        const val = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        if (std.mem.eql(u8, key, "processor")) {
+            cpu = std.fmt.parseInt(u16, val, 10) catch null;
+        } else if (std.mem.eql(u8, key, "CPU part")) {
+            const c = cpu orelse continue;
+            if (c >= max_cpus) continue;
+            kinds[c] = if (std.mem.eql(u8, val, "0xd87")) .a725 else if (std.mem.eql(u8, val, "0xd85")) .x925 else .unknown;
+        }
+    }
+    return kinds;
+}
+
+/// The two CPUs `mode` gives the proxies (null: none, the scheduler's choice).
+/// `mode` が proxy に与える 2 つの CPU (null はなし、スケジューラが選ぶ)。
+pub fn proxyCpus(kinds: *const [max_cpus]Kind, mode: Mode) [2]?u16 {
+    const want: Kind = switch (mode) {
+        .a725 => .a725,
+        .x925 => .x925,
+        .os => return .{ null, null },
+    };
+    var list: [max_cpus]u16 = undefined;
+    var n: usize = 0;
+    for (kinds, 0..) |k, c| if (k == want) {
+        list[n] = @intCast(c);
+        n += 1;
+    };
+    if (n == 0) return .{ null, null };
+    return .{ list[0], list[n / 2] };
+}
+
+/// The proxies of `rs` (the world's, the DCP group's) kept on `cpus` (this rank's own threads). Returns where each is
+/// kept: its CPU, -1 when left to the scheduler (asked to, or the pin failed: logged), -2 when there is no such proxy.
+/// `rs` の proxy (world のもの、DCP グループのもの) を `cpus` に留める (このランク自身のスレッド)。それぞれをどこに
+/// 留めたかを返す: その CPU、スケジューラ任せなら -1 (そう指定されたか、留められなかった: ログに出す)、その proxy が
+/// なければ -2。
+pub fn pinProxies(rank: usize, mode: Mode, rs: [2]?*Runtime, cpus: [2]?u16) [2]i16 {
+    var out: [2]i16 = .{ -2, -2 };
+    const what = [2][]const u8{ "the world's", "the DCP group's" };
+    for (rs, cpus, what, &out) |r, c, w, *o| {
+        const rt = r orelse continue;
+        o.* = -1;
+        const cpu = c orelse {
+            std.log.info("roce: rank {d}: {s} proxy polls where the scheduler puts it ({s})", .{ rank, w, @tagName(mode) });
+            continue;
+        };
+        const rc = rt.proxy.pin(rt.ctx, cpu);
+        if (rc != 0) {
+            std.log.warn("roce: rank {d}: {s} proxy not kept on CPU {d} (error {d}); it polls where the scheduler puts it", .{ rank, w, cpu, rc });
+            continue;
+        }
+        o.* = @intCast(cpu);
+        std.log.info("roce: rank {d}: {s} proxy polls on CPU {d} ({s})", .{ rank, w, cpu, @tagName(mode) });
+    }
+    return out;
+}
+
+/// The CPU thread `tid` of this process last ran on (/proc/self/task/<tid>/stat, field 39), null if unknown.
+/// このプロセスのスレッド `tid` が最後に動いた CPU (/proc/self/task/<tid>/stat の 39 番目)。分からなければ null。
+pub fn cpuOf(io: std.Io, tid: i32) ?u16 {
+    if (tid <= 0) return null;
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/proc/self/task/{d}/stat", .{tid}) catch return null;
+    var buf: [1024]u8 = undefined;
+    const text = std.Io.Dir.cwd().readFile(io, path, &buf) catch return null;
+    // the fields after the command (which may hold spaces) start past its closing parenthesis, at field 3
+    // コマンド名 (空白を含みうる) より後の項目は、その閉じ括弧の後の 3 番目から始まる
+    const close = std.mem.lastIndexOfScalar(u8, text, ')') orelse return null;
+    var it = std.mem.tokenizeScalar(u8, text[close + 1 ..], ' ');
+    var field: usize = 3;
+    while (it.next()) |f| : (field += 1) {
+        if (field == 39) return std.fmt.parseInt(u16, f, 10) catch null;
+    }
+    return null;
+}
+
 /// One runtime over a communicator's ranks (the world, or a DCP group).
 /// 1 つの communicator のランクにまたがるランタイム (world 全体か DCP グループ)。
 pub const Runtime = struct {
@@ -121,16 +267,23 @@ pub const Runtime = struct {
     ks: *const Kernels,
 
     /// Every rank of `group` calls this together (the blobs and configurations are exchanged over it). `hcas`: the
-    /// RDMA devices (B12X_ROCE_HCA / NCCL_IB_HCA), `gid`: their GID index. Fails on every rank alike.
+    /// RDMA devices (B12X_ROCE_HCA / NCCL_IB_HCA, up to 4), `gid`: their GID index (< 0: each device's last IPv4
+    /// GID, in TF_ROCE_ADDR_RANGE when set). Each peer is reached over the devices in its subnet (the library's
+    /// stripes). Fails on every rank alike.
     /// `group` の全ランクが一緒に呼ぶ (blob と設定はこの group で交換する)。`hcas`: RDMA デバイス (B12X_ROCE_HCA /
-    /// NCCL_IB_HCA)、`gid`: その GID index。失敗するときは全ランクがそろって失敗する。
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, group: *const cuda.tp.Group, ks: *const Kernels, lib_path: []const u8, hcas: []const [:0]const u8, gid: u32, spin_limit: u32, stream: cuda.Stream) !Runtime {
+    /// NCCL_IB_HCA、4 つまで)、`gid`: その GID index (負ならデバイスごとに最後の IPv4 の GID、TF_ROCE_ADDR_RANGE が
+    /// あればその範囲で)。相手にはそのサブネットのデバイスで送る (ライブラリの stripe)。失敗するときは全ランクが
+    /// そろって失敗する。
+    /// `ring4`: the group is a ring of four in ring order (tp.Group.topology): the opposite rank is reached through
+    /// both neighbours' relays; the share mode (allReduce2) fails there.
+    /// `ring4`: group はリング順の 4 台のリング: 向かいのランクには両隣の中継で届く。取り分のモード (allReduce2) は失敗する。
+    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, group: *const cuda.tp.Group, ks: *const Kernels, lib_path: []const u8, hcas: []const [:0]const u8, gid: i32, spin_limit: u32, ring4: bool, stream: cuda.Stream) !Runtime {
         const world = group.world;
         // a rank that cannot open the proxy still takes part in the exchange below (with a failed status), so every
         // rank reaches the same verdict instead of the others waiting in the collective
         // proxy を開けないランクも下の交換には (失敗の状態で) 加わる。そうすれば他のランクが集団通信で待ち続けず、
         // 全ランクが同じ判定になる
-        const words = 8;
+        const words = 9;
         const rec = (words * 4 + blob_bytes + 15) / 16 * 16;
         const opened: ?Proxy = Proxy.open(lib_path) catch null;
         if (opened == null or opened.?.blob_bytes() != blob_bytes) {
@@ -155,19 +308,23 @@ pub const Runtime = struct {
         var counters = try Buf.alloc(d, 4 * (2 + 2 * counter_classes));
         errdefer counters.free();
         try counters.fill8(0, null);
-        var names: [2][*:0]const u8 = undefined;
-        const nh = @min(hcas.len, 2);
+        var names: [max_hcas][*:0]const u8 = undefined;
+        const nh = @min(hcas.len, max_hcas);
         for (0..nh) |i| names[i] = hcas[i].ptr;
         var err: [512]u8 = @splat(0);
-        const ctx = proxy.create(@intCast(world), @intCast(group.rank), &names, @intCast(nh), @intCast(gid), region.bytes.ptr, lay[4], slot_bytes, &err, err.len);
+        const ctx = proxy.create(@intCast(world), @intCast(group.rank), &names, @intCast(nh), gid, region.bytes.ptr, lay[4], slot_bytes, &err, err.len);
         // every rank's blob and status in one exchange: [ok, config words..., blob]
         // 全ランクの blob と状態を 1 回の交換で: [ok, 設定の語..., blob]
         const blob_n: usize = blob_bytes;
         const mine = try gpa.alloc(u8, rec);
         defer gpa.free(mine);
         @memset(mine, 0);
-        const cfg = [words]u32{ @intFromBool(ctx != null), @intCast(nh), @intCast(slot_bytes / 4096), @intCast(lay[5]), @intCast(lay[6]), spin_limit, threads, max_blocks };
+        const cfg = [words]u32{ @intFromBool(ctx != null), @intCast(nh), @intCast(slot_bytes / 4096), @intCast(lay[5]), @intCast(lay[6]), spin_limit, threads, max_blocks, @intFromBool(ring4) };
         @memcpy(mine[0 .. words * 4], std.mem.sliceAsBytes(&cfg));
+        if (ctx) |c| if (ring4 and proxy.set_ring4(c, 1) != 0) {
+            std.log.err("roce: rank {d}: {s}", .{ group.rank, std.mem.span(proxy.err(c)) });
+            mine[0] = 0;
+        };
         if (ctx) |c| if (proxy.local_blob(c, mine[words * 4 ..].ptr, blob_n) != 0) {
             mine[0] = 0;
         };
@@ -192,13 +349,18 @@ pub const Runtime = struct {
             std.log.err("roce: rank {d}: connect: {s}", .{ group.rank, std.mem.span(proxy.err(ctx.?)) });
             good = 0;
         }
-        var verdict = [16]u8{ good, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        // every peer's stripes (the GPU waits for that many flags a peer): the same count on every rank
+        // 相手ごとの stripe (GPU は相手ごとにその数の flag を待つ): どのランクでも同じ数
+        const stripes: u8 = if (good == 1) @intCast(@max(0, proxy.stripes(ctx.?))) else 0;
+        var verdict = [16]u8{ good, stripes, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
         const vs = try exchange(gpa, d, group, &verdict, stream);
         defer gpa.free(vs);
-        for (0..world) |r| if (vs[r * 16] != 1) {
+        for (0..world) |r| if (vs[r * 16] != 1 or vs[r * 16 + 1] != stripes or stripes == 0) {
+            if (vs[r * 16] == 1 and vs[r * 16 + 1] != stripes) std.log.err("roce: rank {d} reaches each peer over {d} HCAs, rank {d} over {d}", .{ group.rank, stripes, r, vs[r * 16 + 1] });
             proxy.destroy(ctx.?);
             return error.RoceConnectFailed;
         };
+        logStripes(&proxy, ctx.?, group, hcas[0..nh], stripes);
         const ep = counters.ptr;
         return .{
             .proxy = proxy,
@@ -209,14 +371,30 @@ pub const Runtime = struct {
             .reg = .{
                 .recv = host + lay[0], .flag = host + lay[1], .send = host + lay[2], .ctrl = host + lay[3], .slot_bytes = slot_bytes,
                 .epoch = ep, .stage_ctr = ep + 4, .tail_ctr = ep + 4 * (1 + counter_classes), .poison = ep + 4 * (1 + 2 * counter_classes),
-                .spin_limit = spin_limit, .world = @intCast(world), .rank = @intCast(group.rank), .slots = @intCast(lay[6]), .hcas = @intCast(nh), .flag_stride = @intCast(lay[5]),
+                .spin_limit = spin_limit, .world = @intCast(world), .rank = @intCast(group.rank), .slots = @intCast(lay[6]), .hcas = stripes, .flag_stride = @intCast(lay[5]),
             },
         };
     }
 
+    /// One line: the devices each peer is reached over.
+    /// 1 行: 相手ごとに使うデバイス。
+    fn logStripes(proxy: *const Proxy, ctx: *Ctx, group: *const cuda.tp.Group, hcas: []const [:0]const u8, stripes: u8) void {
+        var buf: [512]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        for (0..group.world) |p| {
+            if (p == group.rank) continue;
+            w.print(" peer {d}:", .{p}) catch break;
+            for (0..stripes) |s| {
+                const h = proxy.stripe_hca(ctx, @intCast(p), @intCast(s));
+                w.print(" {s}", .{if (h >= 0 and h < hcas.len) hcas[@intCast(h)] else if (h < 0) "relay" else "?"}) catch break;
+            }
+        }
+        std.log.info("roce (world {d}, rank {d}): {d} HCAs a peer;{s}", .{ group.world, group.rank, stripes, w.buffered() });
+    }
+
     /// Every rank's `local` bytes in rank order over NCCL (the setup exchange; staged through device memory).
     /// 全ランクの `local` のバイト列を NCCL でランク順に集める (準備用の交換。デバイスメモリを経由する)。
-    fn exchange(gpa: std.mem.Allocator, d: *const cuda.Driver, group: *const cuda.tp.Group, local: []const u8, stream: cuda.Stream) ![]u8 {
+    pub fn exchange(gpa: std.mem.Allocator, d: *const cuda.Driver, group: *const cuda.tp.Group, local: []const u8, stream: cuda.Stream) ![]u8 {
         var src = try Buf.fromHost(d, local);
         defer src.free();
         var dst = try Buf.alloc(d, local.len * group.world);
@@ -227,6 +405,12 @@ pub const Runtime = struct {
         errdefer gpa.free(out);
         try dst.download(0, out);
         return out;
+    }
+
+    /// The proxy thread's id (0 before it runs).
+    /// proxy のスレッドの id (動く前は 0)。
+    pub fn proxyTid(r: *const Runtime) i32 {
+        return r.proxy.tid(r.ctx);
     }
 
     /// A power-of-two grid of about two 16-byte packs a thread, at most max_blocks, and its counters.
@@ -247,6 +431,12 @@ pub const Runtime = struct {
     /// out = the rank-order sum of every rank's `in` (`nbytes`, a multiple of 16, 16-byte aligned; fp32 or bf16).
     /// out = 全ランクの `in` をランク順に足した和 (`nbytes` は 16 の倍数、16 バイト境界。fp32 か bf16)。
     pub fn allReduce(r: *const Runtime, s: cuda.Stream, in: u64, out: u64, nbytes: u32, bf16: bool) !void {
+        return r.allReducePf(s, in, out, nbytes, bf16, .{});
+    }
+
+    /// `allReduce`, prefetching `pf` into L2 while it waits on its peers (TF_GLM53_L2PF).
+    /// peer を待つ間に `pf` を L2 に先読みする `allReduce` (TF_GLM53_L2PF)。
+    pub fn allReducePf(r: *const Runtime, s: cuda.Stream, in: u64, out: u64, nbytes: u32, bf16: bool, pf: Prefetch) !void {
         if (nbytes % 16 != 0 or nbytes > max_bytes or in % 16 != 0 or out % 16 != 0) return error.RoceShape;
         const packs = nbytes / 16;
         const g = r.grid(packs);
@@ -256,6 +446,7 @@ pub const Runtime = struct {
         a.add(@as(c_int, @intCast(packs)));
         a.add(nbytes);
         a.add(g.reg);
+        a.add(pf);
         try cuda.launch.launch(if (bf16) r.ks.reduce_bf16 else r.ks.reduce_f32, .{ .grid = .{ .x = g.blocks, .y = 1, .z = 1 }, .block = .{ .x = threads, .y = 1, .z = 1 } }, s, &a);
     }
 
@@ -284,6 +475,12 @@ pub const Runtime = struct {
     /// out = every rank's `in` (nbytes each) concatenated in rank order (dim 0).
     /// out = 全ランクの `in` (各 nbytes) をランク順につないだもの (dim 0)。
     pub fn allGather(r: *const Runtime, s: cuda.Stream, in: u64, out: u64, nbytes: u32) !void {
+        return r.allGatherPf(s, in, out, nbytes, .{});
+    }
+
+    /// `allGather`, prefetching `pf` into L2 while it waits on its peers (TF_GLM53_L2PF).
+    /// peer を待つ間に `pf` を L2 に先読みする `allGather` (TF_GLM53_L2PF)。
+    pub fn allGatherPf(r: *const Runtime, s: cuda.Stream, in: u64, out: u64, nbytes: u32, pf: Prefetch) !void {
         if (nbytes % 16 != 0 or nbytes > max_bytes or in % 16 != 0 or out % 16 != 0) return error.RoceShape;
         const packs = nbytes / 16;
         const g = r.grid(packs);
@@ -294,6 +491,7 @@ pub const Runtime = struct {
         a.add(nbytes);
         a.add(@as(c_int, @intCast(packs)));
         a.add(g.reg);
+        a.add(pf);
         try cuda.launch.launch(r.ks.gather, .{ .grid = .{ .x = g.blocks, .y = 1, .z = 1 }, .block = .{ .x = threads, .y = 1, .z = 1 } }, s, &a);
     }
 
@@ -301,7 +499,7 @@ pub const Runtime = struct {
     /// 待ちがタイムアウトした (制御レコードの error 語) か proxy が失敗したら false。どちらかをログに出す。
     pub fn healthy(r: *const Runtime) bool {
         const ctrl: *const volatile [7]u32 = @ptrFromInt(r.reg.ctrl);
-        if (ctrl[2] != 0) std.log.err("roce (world {d}, rank {d}): wait timed out at seq {d} on peer {d} hca {d}", .{ r.reg.world, r.reg.rank, ctrl[2], ctrl[3], ctrl[6] });
+        if (ctrl[2] != 0) std.log.err("roce (world {d}, rank {d}): wait timed out at seq {d} on peer {d} stripe {d}", .{ r.reg.world, r.reg.rank, ctrl[2], ctrl[3], ctrl[6] });
         if (r.proxy.failed(r.ctx) != 0) std.log.err("roce (world {d}, rank {d}): proxy failed: {s}", .{ r.reg.world, r.reg.rank, std.mem.span(r.proxy.err(r.ctx)) });
         return ctrl[2] == 0 and r.proxy.failed(r.ctx) == 0;
     }

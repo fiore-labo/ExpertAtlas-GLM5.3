@@ -29,14 +29,14 @@
 | もの | ファイル | 大きさ | 使い道 |
 |---|---|---|---|
 | 4 bit のバンク | `experts-layer-003` … `077.safetensors` | 368.5 GB | 8 台用チェックポイントの routed expert。Expert Atlas の 4 bit |
-| 8 台用チェックポイント | 4 bit バンクのファイル、`nonexperts-5bit.safetensors`、`unquantized-bf16.safetensors`、`mtp-layer-78-*` の 3 ファイル、公式の小さなファイル、`config.json`、インデックス、`SHA256SUMS` | 389.9 GB | 8 台での `./tf-glm53 up`。Expert Atlas で起動するときの expert 以外の部分 |
-| 3 bit のバンク | `experts-layer-*.safetensors` | 277.9 GB | Expert Atlas の 3 bit。4 台用チェックポイント |
+| 8 台用チェックポイント | 4 bit バンクのファイル、`nonexperts-5bit.safetensors`、`unquantized-bf16.safetensors`、`mtp-layer-78-*` の 3 ファイル、公式の小さなファイル、`config.json`、インデックス、`SHA256SUMS` | 389.9 GB | 8 台でのすべての起動 (4 台なら 4 台用チェックポイントの代わりにもなります): routed expert 以外の重み |
+| 3 bit のバンク | `experts-layer-*.safetensors` | 277.9 GB | すべての起動: Expert Atlas の 3 bit、既定の幅。4 台用チェックポイント |
 | 2 bit / 5 bit のバンク | `experts-layer-*.safetensors` | 187.3 / 459.1 GB | Expert Atlas の 2 bit と 5 bit (任意) |
-| 4 台用チェックポイント | 8 台用チェックポイントの routed expert の半分を 3 bit にしたもの | 344.6 GB | 4 台での `./tf-glm53 up` |
+| 4 台用チェックポイント | 8 台用チェックポイントの routed expert の半分を 3 bit にしたもの | 344.6 GB | 4 台でのすべての起動: routed expert 以外の重み |
 
-要るものは動かし方で決まります。コントロールパネルを使わず 8 台で動かすなら 8 台用チェックポイントだけ。使わずに 4 台なら 4 台用
-チェックポイント (8 台用と 3 bit バンクから作ります)。コントロールパネルを使うなら、チェックポイントと使いたい幅のバンク (4 台なら
-3 bit と 4 bit。8 台用チェックポイントのディレクトリを 4 bit バンクとして使えます) です。
+どの起動にも、チェックポイントと 3 bit のバンクが要ります。8 台なら 8 台用チェックポイント、4 台なら 4 台用チェックポイント
+(8 台用と 3 bit バンクから作ります) か 8 台用チェックポイントです。ほかのバンクは使いたい幅の分だけです (8 台用チェックポイントの
+ディレクトリを 4 bit バンクとして使えます)。
 
 ## Fiore-lab のファイルとの違い
 
@@ -194,7 +194,7 @@ $P bank_manifest.py banks banks.json /data/banks/3bit /data/banks/4bit      # �
 ./tf-glm53 deploy
 ./tf-glm53 verify            # 全ノードで重みをあなたの SHA256SUMS と照合
 ./tf-glm53 verify-banks      # 全ノードでバンクをあなたのマニフェストと照合
-./tf-glm53 up
+./tf-glm53 up                # コントロールパネル: そこからエンジンを起動 (パネルなしは ./tf-glm53 start)
 ```
 
 ## このディレクトリのファイル

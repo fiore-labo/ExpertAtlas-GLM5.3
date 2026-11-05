@@ -2,19 +2,59 @@
 
 # 在四台或八台 DGX Spark 上运行完整版 GLM-5.3
 
-完整版 GLM-5.3（755B，`glm_moe_dsa`）由四台或八台 NVIDIA DGX Spark 系统（每台一个 GB10）以张量并行 4 或 8 提供服务：一次处理一个请求，速度快，并为智能体（agent）和编程提供长上下文。引擎用 Zig 编写，使用纯 CUDA 内核，运行时不需要 Python。
+完整版 GLM-5.3（755B，`glm_moe_dsa`）由四台或八台 NVIDIA DGX Spark 系统（每台一个 GB10）以张量并行 4 或 8 提供服务，连接方式为一台 RoCE 交换机，四个节点时也可以是直连线缆组成的环：速度快，并为智能体（agent）和编程提供长上下文。默认一次处理一个请求；`MULTI` 可同时解码最多四个对话。引擎用 Zig 编写，使用纯 CUDA 内核，运行时不需要 Python。
 
 这是 Fiore-lab 基于 [TensorFold](https://github.com/ashhart/TensorFold) 1.0.2 制作的非官方衍生版本，并非 TensorFold 项目的发布版本。它包含 TensorFold 的代码，增加了完整版 GLM-5.3 的引擎（`zig/src/families/glm_moe_dsa/`、`zig/kernels/cuda/glm53/`），并去掉了 TensorFold 的文档（这些文档描述的是其他模型、权重和机器）。关于 TensorFold 本身，请参阅其仓库。
 
-**如果借助 AI 助手来理解或运行本系统**，请把 [glm53/release/AI-GUIDE.md](glm53/release/AI-GUIDE.md)（发布归档中为 `AI-GUIDE.md`）交给它：这是专为 AI 助手编写的一页说明，涵盖系统的整体结构、目的、准备与使用方法、能做和不能做的事（附实测数值）以及详细信息所在的位置（英文）。
+## 文档
+
+每个页面都有英文、日文（`.ja.md`）和简体中文（`.zh-CN.md`）版本。在发布归档和镜像中，它们都放在顶层目录。
+
+| 页面 | 内容 |
+|---|---|
+| [QUICKSTART](glm53/release/QUICKSTART.zh-CN.md) | 首次启动：权重、一行 `docker run`、所有选项、常见的 `STOP` 消息 |
+| [BEFORE-START](glm53/release/BEFORE-START.zh-CN.md) | 首次启动前要决定的事项，以及可以以后再决定的事项 |
+| [PANEL-GUIDE](glm53/release/PANEL-GUIDE.zh-CN.md) | 控制面板的各个界面，逐项说明 |
+| [CONFIG](glm53/release/CONFIG.zh-CN.md) | `glm53.conf` 的全部设置项：默认值、由谁读取、修改何时生效 |
+| [RUNTIME](packaging/RUNTIME.zh-CN.md) | 从归档或手动运行：所有命令、缓存、Claude Code、故障 |
+| [T4](glm53/release/T4.zh-CN.md) | 四个节点：检查点、设置、测量结果 |
+| [RING](glm53/release/RING.zh-CN.md) | 不用交换机、连成环的四个节点：连线、fenced NCCL、测量结果 |
+| [AGENT-API](glm53/release/AGENT-API.zh-CN.md) | 面向 AI 代理的控制 API，不需要仪表板 |
+| [AI-GUIDE](glm53/release/AI-GUIDE.zh-CN.md) | 用一页说明整个系统，供帮助你理解或运行它的 AI 助手使用 |
+| [ATLAS-TESTS](glm53/release/ATLAS-TESTS.zh-CN.md) | 专家重新排序的测量结果 |
+| [weights](glm53/weights/README.zh-CN.md) | 从 Z.AI 官方的 BF16 检查点自行制作所有权重文件 |
 
 ## 功能
 
-- 张量并行 8 或 4，KV 缓存在 rank 对之间切分（解码上下文并行 2）。引擎和模型最多支持 1M（1,048,576 个 token），**八个节点和四个节点都能达到 1M**。八个节点：使用 4 bit KV 缓存（`KV=fp4`，`NEED_GB=100`）时，除 `CONTEXT=1048576` 外还可设 `STORE=1048576`（每个节点约余 23 GiB），使用 8 bit 缓存时为 `STORE=589824`。四个节点：在控制面板中将 70 % 的路由专家设为 3 bit、其余设为 4 bit，可设 `CONTEXT=1048576`（`KV=fp4`，`STORE` 512；每个节点约余 7.5 GiB，足以在运行中重排专家）；只用四节点检查点时为 `CONTEXT=819200` `STORE=18080`。以上均用一个约 1,019,000 个 token 的提示词实测。4 bit KV 缓存会略微降低精度（相同权重下 KL 为 0.0190，8 bit 缓存为 0.0156：[glm53/release/T4.zh-CN.md](glm53/release/T4.zh-CN.md)）；下文八个节点的速度使用 8 bit 缓存。设置示例中为 819,200 和 737,280（KV 池保存 `CONTEXT` + `STORE` 个 token）。
+- 张量并行 8 或 4，KV 缓存在 rank 对之间切分（解码上下文并行 2）。引擎和模型的上下文长度最多为 1M（1,048,576 个 token），**八个节点和四个节点都能达到 1M**。八个节点：使用 4 bit KV 缓存（`KV=fp4`，`NEED_GB=100`）时为 `CONTEXT_LENGTH=1048576`、`KV_SIZE=2097152`（每个节点约余 23 GiB），使用 8 bit 缓存时为 `KV_SIZE=1638400`。四个节点：在控制面板中将 70 % 的路由专家设为 3 bit、其余设为 4 bit，可设 `CONTEXT_LENGTH=1048576`（`KV=fp4`，`KV_SIZE=1049088`，即上下文长度加 512，是 KV 池的最小值；每个节点约余 7.5 GiB，足以在运行中重排专家）；只用四节点检查点时为 `CONTEXT_LENGTH=819200` `KV_SIZE=837280`。以上均用一个约 1,019,000 个 token 的提示词实测。4 bit KV 缓存会略微降低精度（相同权重下 KL 为 0.0190，8 bit 缓存为 0.0156：[glm53/release/T4.zh-CN.md](glm53/release/T4.zh-CN.md)）；下文八个节点的速度使用 8 bit 缓存。设置示例中上下文长度为 819,200 和 737,280，KV 大小为 1,638,400 和 837,280（KV 大小即整个 KV 缓存，是所有对话共用的一个池：一个请求最多用到上下文长度，其余部分把之前对话的 KV 留在任意空闲的块中）。
 - 长提示词按序列并行分段读入；解码步的集合通信走 RoCE。
 - 所有对话共用一个对话缓存，以 256 个 token为一块：请求会从任意对话中已缓存的最长前缀接着处理；开头相同的对话（智能体的系统提示词、其子智能体）共享的块只保存一份。
 - 每一轮由模型校验草稿：草稿默认来自 GLM-5.3 自带的 MTP 层，也可来自可选的 DFlash2 草稿模型。无论哪种情况，回复都由模型本身决定。
+- 控制思考的长度：上限按回复上限的比例设定，过长的思考可以在中途或结束时整理；既可以按请求设置，也可以在引擎运行中设置。
 - `/metrics`（Prometheus 文本格式）和 `/health` 也统计正在运行的请求，因此监控程序在请求运行期间也能读取 prefill 与解码速度、缓存命中和草稿接受情况。设置 `METRICS_LISTEN` 后，这两个端点会在单独的地址上以只读方式开放，供其他主机上的监控程序使用。
+
+## r3.3-102 的变化
+
+**需要你处理的变化：**
+
+- **3 bit bank 始终必需**，与检查点一起准备；没有计划的启动以 3 bit 载入所有专家。`BITS` 或已保存的分配可以选择其他位宽，此时也需要相应的 bank。
+- **设置改名：** `CONTEXT_LENGTH`（单个请求的最大长度）和 `KV_SIZE`（整个 KV 缓存）取代 `CONTEXT` 和 `STORE`。旧的 `glm53.conf` 仍可读取。
+- **回复的默认上限**从 4,096 个 token 改为上下文长度的 70 %（`MAX_TOKENS_SHARE`）。客户端的 `max_tokens` 优先。
+- **设置中的选项更少了：** `CACHE` 为 `pool`，`DCP` 为 2，`ROCE_PROXY_CORES` 为 `a725` 或 `os`。
+- **`./tf-glm53 up` 只启动控制面板；** 引擎从面板启动，或用 `./tf-glm53 start` 启动。`./tf-glm53 engine-up` 手动启动引擎。
+
+**新增：**
+
+- **一行命令让引擎运行：** `docker run ... IMAGE up` 把发布内容写到第一个节点，找到节点，查找权重，启动引擎并发送一次请求。最后输出 `READY` 和地址，或输出 `STOP`、`FIX` 和 `THEN`，说明接下来要做什么。每项设置都是一个 `-e NAME=VALUE` 选项（[QUICKSTART](glm53/release/QUICKSTART.zh-CN.md)）。
+- **四个节点连成环**，不需要交换机（[RING](glm53/release/RING.zh-CN.md)）。
+- **镜像包含带 AArch64 fence 的 NCCL：** 交换机和环都使用。这是 NVIDIA/nccl#2393 的修复，NCCL 的正式版本尚未包含。没有它时，Arm 上的代理线程可能在没有任何错误的情况下挂起（[RING](glm53/release/RING.zh-CN.md) 的“fenced NCCL”）。
+- **节点检查**根据连线找到环或交换机上的节点，检查并登记（`glm53.nodes.conf`），因此不必填写 `TOPOLOGY`、`SOCKET_IFNAME` 和 `IB_HCA`。
+- **Reasoning Control：** 思考的上限（回复上限的比例）、中途整理和思考结束时的整理，可以在引擎运行中通过面板或 `POST /v1/thinking` 更改（[CONFIG](glm53/release/CONFIG.zh-CN.md)）。
+- **同时处理多个对话：** `MULTI`（1 至 4）现在也可以与 MTP 层一起使用。运行中可以通过面板或 `POST /v1/schedule` 设置 GPU 在 prefill 和解码之间的分配，短提示词也可以优先处理。
+- **Byte Resume**（默认开启）：模型切分文本的位置与分词器不同时，下一轮提示词中相同的字节会对应其他 token id；现在缓存会越过该位置继续，不再重新计算其余部分。
+- **面板：** 引擎设置界面、权重的位置及其检查（[ WEIGHTS ]）、启动流程、圆上的 KV 池、各节点的温度。
+- **面向 AI 代理的控制 API：** 不需要仪表板即可启动、停止和设置引擎（[AGENT-API](glm53/release/AGENT-API.zh-CN.md)）。
+- **更快、温度更低：** 权重并行载入（在环上测得，就绪时间从 366 s 缩短到 127 s）。草稿的置信度下降时，MTP 会停止该轮的草稿（`TF_GLM53_MTP_CONF`，默认 0.7）。RoCE 代理线程留在 Cortex-A725 核心上（`ROCE_PROXY_CORES`），相同速度下 SoC 温度降低 5 至 16 °C。
 
 ## r3.2-102 的变化
 
@@ -33,11 +73,11 @@
 GLM-5.3 为每个 token 在每层 256 个路由专家中选出 8 个，而不同专家被选中的频率相差很大。Expert Atlas 让 19,200 个路由专家（第 3 至 77 层）各自以自己的位宽（2、3、4 或 5 bit）载入，在有限的内存中让使用最多的专家得到最多的位：
 
 - **bank**：每种位宽的路由专家，位于 Hugging Face：[fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit)、[-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit)、[-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) 和 [-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit)。面板提供每个节点都具备的位宽。
-- **控制面板**：由启动器（`./tf-glm53 launcher`）提供的页面。启动前它规划位宽，并显示每个节点的内存、计划能否容纳以及 KV 缓存还剩多少；也从这里启动和停止引擎。引擎运行时，它显示每个 token 选中的专家、被选中专家的平均位宽和速度。
+- **控制面板**：由启动器（用 `./tf-glm53 up` 启动）提供的页面。启动前它规划位宽，并显示每个节点的内存、计划能否容纳以及计划留下的 KV 大小；也从这里启动和停止引擎。引擎运行时，它显示每个 token 选中的专家、被选中专家的平均位宽和速度。
 - **使用记录**：引擎统计每个提示行和每个解码 token 选中的专家。保存的配置带有保存它的那些运行的使用记录，记录随配置一起移动：打开后再次运行，这次运行的部分会加入记录。计划按该记录为专家排序（没有记录的计划按 Fiore-lab 测得并随页面提供的次数排序）。不会自动保存任何内容：停止时为配置及其记录命名并保存。
 - **专家优化**：保持每种位宽的专家数量不变，按本次运行的使用记录重新排列已载入的专家：相同内存下，模型实际选中的专家的平均位宽更高。在运行中的引擎上进行（在四个节点上，75 层的完整更改用了 83 至 90 秒，在请求之间进行）；需要时为结果命名并保存，供以后启动时打开。
 
-控制面板可在四个或八个节点上运行，节点数在启动界面上选择；`./tf-glm53 up` 仍按检查点的位宽启动。详见 `packaging/RUNTIME.zh-CN.md`（“控制面板”）和 `glm53/release/T4.zh-CN.md`。
+控制面板可在四个或八个节点上运行，节点数在启动界面上选择。不使用面板时，`./tf-glm53 start` 和 `./tf-glm53 engine-up` 按上一次启动的计划启动，或以 3 bit 载入所有专家。详见 [PANEL-GUIDE](glm53/release/PANEL-GUIDE.zh-CN.md)、`packaging/RUNTIME.zh-CN.md`（“控制面板”）和 `glm53/release/T4.zh-CN.md`。
 
 ## Hugging Face 上的权重
 
@@ -46,20 +86,21 @@ GLM-5.3 为每个 token 在每层 256 个路由专家中选出 8 个，而不同
 | 八节点检查点：全部权重（路由专家为 4 位） | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | 八节点运行；四节点或八节点的控制面板（同时作为 4 位专家 bank） |
 | 四节点检查点：使用最少的一半路由专家为 3 位 | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | 不使用控制面板的四节点运行 |
 | 专家 bank，2 位 | [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit) | 187.3 GB | 控制面板 |
-| 专家 bank，3 位 | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | 控制面板（四节点时用于取满上下文） |
+| 专家 bank，3 位 | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | 控制面板（四节点时用于取满上下文长度） |
 | 专家 bank，4 位 | [fiore-lab/GLM-5.3-EXL3-Experts-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) | 368.5 GB | 控制面板（在没有八节点检查点的节点上） |
 | 专家 bank，5 位 | [fiore-lab/GLM-5.3-EXL3-Experts-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit) | 459.1 GB | 控制面板 |
 
-专家 bank 是把 19,200 个路由专家统一为一种位宽的权重；控制面板为每个专家从其计划位宽的 bank 中加载。**只需下载你想用的位宽的
-bank**（面板只提供每个节点都具备的位宽）。在四个节点上使用控制面板时，八节点检查点加 3 位专家 bank（共 668 GB）即可。每个节点
-都需要在相同路径下放置相同的文件。在一台机器上下载后复制到其他节点，例如：
+专家 bank 是把 19,200 个路由专家统一为一种位宽的权重；引擎为每个专家从其计划位宽的 bank 中加载。
+**每次启动都需要与节点数相符的检查点和 3 bit bank；其他 bank 只需下载你想用的位宽**（面板只提供每个节点都具备的位宽）。
+四个节点时即四节点检查点和 3 bit bank，共 622.5 GB。每个节点都需要在相同路径下放置相同的文件。在一台机器上下载后复制到其他节点，例如：
 
 ```sh
 python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
-~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks --local-dir ~/models/GLM-5.3-EXL3-8x-DGX-Sparks
+~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks --local-dir ~/models/GLM-5.3-EXL3-4x-DGX-Sparks
+~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-Experts-3bit --local-dir ~/models/GLM-5.3-EXL3-Experts-3bit
 ```
 
-复制到其他节点的方法以及校验（`./tf-glm53 verify`、`./tf-glm53 verify-banks`）见 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)。
+复制到其他节点的方法见 [QUICKSTART](glm53/release/QUICKSTART.zh-CN.md)，校验（`./tf-glm53 verify`、`./tf-glm53 verify-banks`）见 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)。
 
 ## 自己制作权重
 
@@ -70,25 +111,28 @@ python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
 
 ## 所需环境
 
-- 四台或八台 DGX Spark 系统（GB10），位于同一 RoCE v2 网络上，且每台都能从第一台通过 ssh 免密码访问。四个节点时，每个节点一个 100 Gb/s 端口即可。
-- DGX OS（Ubuntu 24.04），NVIDIA 驱动 580 或更高版本，以及 cuBLAS 13。
-- 每个节点上都有 NCCL 2.30.7：即 NVIDIA 的 `nvidia-nccl-cu13` wheel，由 pip 解包（见 `packaging/RUNTIME.md`）。
+- 四台或八台 DGX Spark 系统（GB10），位于同一 RoCE v2 网络上，或四台连成环。第一台通过 ssh 访问每个节点，包括它自己，使用没有口令的密钥。四个节点接在交换机上时，每个节点一个 100 Gb/s 端口即可。
+- 使用镜像时：每个节点上有 Docker 和 NVIDIA Container Toolkit（DGX OS 两者都有）以及 `python3`，并且启动前每个节点约有 115 GiB 空闲内存。
+- 改用归档时：DGX OS（Ubuntu 24.04），NVIDIA 驱动 580 或更高版本，以及 cuBLAS 13；每个节点上都有 NCCL 2.30.7：即 NVIDIA 的 `nvidia-nccl-cu13` wheel，由 pip 解包（见 `packaging/RUNTIME.zh-CN.md`）。
+- 使用归档时，带 AArch64 fence 的 NCCL 在交换机上推荐使用，在环上必须使用；NVIDIA 的 wheel 没有这个 fence（[RING](glm53/release/RING.zh-CN.md)）。镜像已包含它。
 - 与节点数相符的 Fiore-lab EXL3 检查点（Hugging Face），在每个节点上放在相同路径下：八个节点用 [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks)（390 GB），四个节点用 [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks)（344.6 GB）。四节点检查点中，第 3 至 77 层的路由专家里使用最少的一半为 3 bit，其余为 4 bit；其他部分与八节点检查点相同。
 - 所有权重文件也都可以不使用 Fiore-lab 的任何文件，从 Z.AI 官方的 BF16 检查点自行制作（[glm53/weights](glm53/weights/README.zh-CN.md)）。
-- 控制面板需要所用位宽的专家 bank，四个节点时为 3 bit 和 4 bit 的 bank（277.9 GB 和 368.5 GB；八节点检查点可以作为 4 bit bank；只有 4 bit 时上下文会更短），以及供启动器使用的各节点上的 `python3`。
+- 3 bit bank（277.9 GB），在每个节点上放在相同路径下：每次启动都需要它。其他 bank 只需要用到的位宽（八节点检查点可以作为 4 bit bank；只有 4 bit 时上下文长度会更短）。
+- 各节点上的 `python3`，供启动器和日志保管进程使用。
 
 ## 运行
 
-发布以容器镜像和内容相同的归档两种形式提供；推荐使用镜像。使用镜像时，每个节点只需要 Docker 和 NVIDIA Container Toolkit（DGX OS 两者都有），不需要服务器的库：
+发布以容器镜像和内容相同的归档两种形式提供；推荐使用镜像。权重就位后，在第一个节点上运行一行命令即可启动引擎：
 
 ```sh
-docker pull ghcr.io/fiore-labo/expertatlas-glm5.3:r3.2-102            # 在每个节点上
-mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out ghcr.io/fiore-labo/expertatlas-glm5.3:r3.2-102 install /out
+docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3-102 up
 ```
 
-然后在 `glm53.conf` 中设置 `RUNTIME=docker` 和 `IMAGE`，再按下文继续（[packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)“在容器中运行”）。不使用 Docker 时：下载发布归档 `tensorfold-r3.2-102-linux-aarch64.tar.gz`，并按照其中的 `RUNTIME.md`（本仓库中为 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)）操作。四个节点和八个节点使用同一个归档和同一个启动脚本：将 `glm53.conf.example`（八个节点）或 `glm53.t4.conf.example`（四个节点，见 [glm53/release/T4.zh-CN.md](glm53/release/T4.zh-CN.md)）复制为 `glm53.conf`，填写节点、网络名称、NCCL、权重和草稿模型，然后执行 `./tf-glm53 deploy` 和 `./tf-glm53 up`。服务器默认在所有地址（`HOST=0.0.0.0`）上提供 OpenAI chat API。API 没有密钥，任何能访问到它的人都可以使用：请只在封闭网络中使用，或在其前面加一层 TLS 和访问控制（设置 `HOST=127.0.0.1` 后只能从第一个节点访问）。
+最后输出 `READY` 和地址：API 在 `http://FIRST-NODE:8000/v1`，控制面板在 `http://FIRST-NODE:8010/panel`。如果缺少什么，则以 `STOP` 结束，并说明要做什么以及接下来要运行的一行。步骤和所有选项见 [QUICKSTART](glm53/release/QUICKSTART.zh-CN.md)。
 
-若要用控制面板代替 `./tf-glm53 up`，请在第一个节点上运行 `./tf-glm53 launcher`，并打开 `http://FIRST-NODE:LAUNCHER_PORT/panel`（四节点示例中端口为 8010）：引擎在那里启动和停止（[packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)“控制面板”）。`glm53.conf` 的全部设置项、由谁读取以及修改何时生效，见 [glm53/release/CONFIG.zh-CN.md](glm53/release/CONFIG.zh-CN.md)。
+手动完成同样的事：使用镜像时，在每个节点上 `docker pull` 它，运行 `mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out`，并在 `glm53.conf` 中设置 `RUNTIME=docker` 和 `IMAGE`（[packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)“在容器中运行”）。不使用 Docker 时：下载发布归档 `tensorfold-r3.3-102-linux-aarch64.tar.gz`，并按照其中的 `RUNTIME.md`（本仓库中为 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)）操作。两种方式都要将 `glm53.conf.example`（八个节点）或 `glm53.t4.conf.example`（四个节点，见 [glm53/release/T4.zh-CN.md](glm53/release/T4.zh-CN.md)）复制为 `glm53.conf`，填写其中要求的内容，然后执行 `./tf-glm53 deploy` 和 `./tf-glm53 up`（启动控制面板），再在那里启动引擎。`./tf-glm53 start` 按上一次启动的计划启动，`./tf-glm53 down` 停止。
+
+服务器默认在所有地址（`HOST=0.0.0.0`）上提供 OpenAI chat API，以及供 Claude Code 使用的 Anthropic Messages API。API 和控制面板都没有密钥，任何能访问到它们的人都可以使用：请把节点放在封闭网络中，或在其前面加一层 TLS 和访问控制（设置 `HOST=127.0.0.1` 和 `LAUNCHER_HOST=127.0.0.1` 后只能从第一个节点访问）。
 
 ## 草稿模型
 
@@ -96,11 +140,11 @@ mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out g
 - `dflash2`：incoai/GLM-5.3-DFlash2。**由于其许可证，本仓库和归档均不包含它**：其模型卡注明的许可证为 CC BY-NC-ND 4.0（非商业性使用，禁止演绎），用于研究和评估；商业许可由 Inco AI 提供。如果你的使用在该许可证允许的范围内，请按照 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md#使用-dflash2-的步骤) 中的“使用 DFlash2 的步骤”操作：以固定的 revision 下载一次，复制到每个节点的相同路径并核对副本，然后设置 `DRAFTER_KIND=dflash2` 和 `DRAFTER`。引擎在启动时于内存中将其量化为 4 bit，不向磁盘写入任何内容。解码会更快（见“速度”）。
 - `none`：不使用草稿。
 
-由 `glm53.conf` 中的 `DRAFTER_KIND` 选择；`./tf-glm53 -d KIND up` 只为这一次启动选择。
+由 `glm53.conf` 中的 `DRAFTER_KIND` 选择；启动界面或 `./tf-glm53 -d KIND start`（或 `engine-up`）只为这一次启动选择。
 
 ## 速度
 
-**测量时每个节点的 GPU 时钟上限均设为 2.1 GHz（2,100 MHz）。** 使用尚未缓存的编程提示词，一次一个请求（reasoning effort 为 low，回复最多 4,000 个 token），本归档分别采用 `glm53.conf.example`（八个节点，FP8 KV 缓存）和 `glm53.t4.conf.example`（四个节点，4 bit KV 缓存）的设置，以及 Fiore-lab 公开发布的检查点。你的结果取决于检查点、提示词和时钟。完整的测量条件见 `packaging/RUNTIME.md`。
+**使用 r2-102 版本测量，测量时每个节点的 GPU 时钟上限均设为 2.1 GHz（2,100 MHz）。** 此后引擎已有变化，这些数字没有针对本版本重新测量。使用尚未缓存的编程提示词，一次一个请求（reasoning effort 为 low，回复最多 4,000 个 token），采用 `glm53.conf.example`（八个节点，FP8 KV 缓存）和 `glm53.t4.conf.example`（四个节点，4 bit KV 缓存）的设置，以及 Fiore-lab 公开发布的检查点。速度因环境而异（检查点、提示词、时钟等），这些数字仅供参考。完整的测量条件见 `packaging/RUNTIME.zh-CN.md`。
 
 | 节点数 | 提示词 | MTP（k=3）：首 token 时间 / 解码 | DFlash2：首 token 时间 / 解码 |
 |---|---|---|---|
@@ -127,7 +171,7 @@ mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out g
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so
-zig build dist -Dversion=r3.2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.3-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 
@@ -135,9 +179,10 @@ zig build dist -Dversion=r3.2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-pla
 
 ## 限制
 
-- 仅支持四台或八台 GB10 系统；不支持其他 GPU，也不支持其他 rank 数量。
-- 一次只运行一个请求；其他请求最多 32 个按到达顺序等待（聊天标题生成请求排在最后），超过 32 个时服务器会拒绝（返回 503，流式请求则为错误事件）。对于并行运行子智能体的智能体，最好让子智能体改用另一个模型。
-- 其余限制见 `packaging/RUNTIME.md`。
+- 支持四台或八台 GB10 系统。两台和三台的配置正在测试中。不支持其他 GPU，也不支持其他 rank 数量。
+- 默认一次只运行一个请求；其他请求最多 32 个按到达顺序等待（聊天标题生成请求排在最后），超过 32 个时服务器会拒绝（返回 503，流式请求则为错误事件）。`MULTI` 可同时解码最多四个请求，但要占用节点内存。除此之外，对于并行运行子智能体的智能体，最好让子智能体改用另一个模型。
+- 控制面板的界面只有英文和日文。
+- 其余限制见 `packaging/RUNTIME.zh-CN.md`。
 
 ## 许可证与致谢
 
@@ -149,6 +194,8 @@ zig build dist -Dversion=r3.2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-pla
 - [MiaAI-Lab 的 GLM-5.3-Flash on 2x DGX Spark](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold)：参考其提示词处理内核编写了 GLM-5.3 的提示词处理内核。
 - [MiaAI-Lab 的 GLM-5.3 EXL3 on 3x DGX Spark](https://github.com/MiaAI-Lab/GLM-5.3-EXL3-3x-DGX-Sparks-TensorFold)：4 bit KV 缓存采用其布局，并用本引擎自己的代码实现。
 - [ExLlamaV3](https://github.com/turboderp-org/exllamav3)：检查点用它量化，引擎读取其 EXL3 格式。
+- [gr8 方案](https://github.com/knapcio/GLM-5.3-gr8-4x-DGX-Spark-TP4)和[引擎](https://github.com/kindlingai/gr8)：若干解码加速借鉴了其思路，并用本引擎自己的代码实现。
+- [ollama/ollama#12375](https://github.com/ollama/ollama/issues/12375)：Byte Resume 的思路来自这份报告。
 
 ## TensorFold 的贡献者
 

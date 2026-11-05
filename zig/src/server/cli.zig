@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! ``tensorfold serve`` flags: one table for parsing them and for ``capabilities --json``.
 const std = @import("std");
 const builtin = @import("builtin");
@@ -52,6 +53,20 @@ pub const flags = [_]Flag{
     .{ .name = "--no-thinking", .kind = .store_true, .native = true },
     .{ .name = "--reasoning-effort", .choices = &.{ "low", "medium", "high", "xhigh" }, .native = true },
     .{ .name = "--thinking-budget", .native = true },
+    .{ .name = "--thinking-share", .native = true },
+    .{ .name = "--thinking-notice", .native = true },
+    .{ .name = "--thinking-fold", .choices = &.{ "off", "recent", "checkpoint", "branch" }, .native = true },
+    .{ .name = "--thinking-fold-window", .native = true },
+    .{ .name = "--thinking-fold-share", .native = true },
+    .{ .name = "--thinking-fold-max", .native = true },
+    .{ .name = "--thinking-fold-at-budget", .native = true },
+    .{ .name = "--thinking-fold-margin", .native = true },
+    .{ .name = "--thinking-fold-prompt", .native = true },
+    .{ .name = "--thinking-close-prompt", .native = true },
+    .{ .name = "--thinking-fold-keep", .native = true },
+    .{ .name = "--thinking-fold-at-close-share", .native = true },
+    .{ .name = "--thinking-fold-cap", .native = true },
+    .{ .name = "--thinking-fold-cap-share", .native = true },
     .{ .name = "--loop-guard", .kind = .store_true, .native = true },
     .{ .name = "--no-drafts", .kind = .store_true, .native = true },
     .{ .name = "--keep-warm", .native = true },
@@ -124,6 +139,20 @@ pub const Args = struct {
     thinking: bool = true,
     reasoning_effort: ?[]const u8 = null,
     thinking_budget: i64 = 0,
+    thinking_share: i64 = 0, // the percent of max_tokens the think block may use when no budget is set (0: none)
+    thinking_notice: i64 = 0, // think tokens between notices of how much it used (0: none; GLM-5.3)
+    thinking_fold: []const u8 = "off", // how a long think block is folded: off, recent, checkpoint, branch (GLM-5.3)
+    thinking_fold_window: i64 = 0, // a fold no later than this many think tokens in the context (0: when the thinking fills its share of the context)
+    thinking_fold_share: i64 = 0, // the same as a percent of the reply's max_tokens (0: none)
+    thinking_fold_max: i64 = 0, // a reply's folds at most (0: no limit)
+    thinking_fold_at_budget: i64 = 1, // the summary at the budget's end when a request names no steps (0: none)
+    thinking_fold_margin: i64 = 10, // how far before the budget's end that summary starts, a percent of the budget
+    thinking_fold_prompt: []const u8 = "", // what that summary asks, percent-encoded in the flag (empty: the built-in text)
+    thinking_close_prompt: []const u8 = "", // what the summary at the close asks, the same way
+    thinking_fold_keep: i64 = 0, // the recent fold's last tokens kept (0: half the window)
+    thinking_fold_at_close_share: i64 = 0, // a closed think block at least this percent of the thinking's limit is summarized before the answer (0: never)
+    thinking_fold_cap: i64 = 4096, // a checkpoint's tokens at most when the request names none
+    thinking_fold_cap_share: i64 = 0, // above 0: a percent of the thinking it organises, in place of that
     loop_guard: bool = false,
     no_drafts: bool = false,
     keep_warm: i64 = 900, // seconds the idle keepalive runs after the last request ends (0: off)
@@ -190,6 +219,33 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     return out;
 }
 
+/// `s` with its %XX decoded. A text in a flag: tf-glm53's settings file is a shell script and its flags split on spaces.
+fn percentDecoded(a: Allocator, s: []const u8) ![]const u8 {
+    const out = try a.alloc(u8, s.len);
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) : (n += 1) {
+        if (s[i] != '%') {
+            out[n] = s[i];
+            i += 1;
+            continue;
+        }
+        if (i + 3 > s.len) return error.BadPercent;
+        out[n] = std.fmt.parseInt(u8, s[i + 1 .. i + 3], 16) catch return error.BadPercent;
+        i += 3;
+    }
+    return out[0..n];
+}
+
+test "percentDecoded takes what urllib.parse.quote writes" {
+    const a = std.testing.allocator;
+    const t = try percentDecoded(a, "Keep%20code%2C%20%E6%97%A5%E6%9C%AC.%0Aend");
+    defer a.free(t);
+    try std.testing.expectEqualStrings("Keep code, \xe6\x97\xa5\xe6\x9c\xac.\nend", t);
+    try std.testing.expectError(error.BadPercent, percentDecoded(a, "a%2"));
+    try std.testing.expectError(error.BadPercent, percentDecoded(a, "a%zz"));
+}
+
 fn int(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, OutOfMemory }!i64 {
     return std.fmt.parseInt(i64, std.mem.trim(u8, v, " "), 10) catch fail(u, a, "argument {s}: invalid int value: '{s}'", .{ name, v });
 }
@@ -223,7 +279,55 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     } else if (is(name, "--learn-gib")) {
         out.learn = true;
         out.learn_gib = try gib(u, a, name, v);
-    } else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--compact-at")) {
+    } else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--thinking-share")) {
+        const n = try int(u, a, name, v);
+        if (n < 0 or n > 100) return fail(u, a, "argument --thinking-share: expected a percent from 0 to 100: '{s}'", .{v});
+        out.thinking_share = n;
+    } else if (is(name, "--thinking-notice")) {
+        const n = try int(u, a, name, v);
+        if (n != 0 and n < 256) return fail(u, a, "argument --thinking-notice: expected 0 or a token count from 256: '{s}'", .{v});
+        out.thinking_notice = n;
+    } else if (is(name, "--thinking-fold")) out.thinking_fold = v else if (is(name, "--thinking-fold-window")) {
+        const n = try int(u, a, name, v);
+        if (n != 0 and n < 1024) return fail(u, a, "argument --thinking-fold-window: expected 0 or a token count from 1024: '{s}'", .{v});
+        out.thinking_fold_window = n;
+    } else if (is(name, "--thinking-fold-share")) {
+        const n = try int(u, a, name, v);
+        if (n < 0 or n > 100) return fail(u, a, "argument --thinking-fold-share: expected a percent from 0 to 100: '{s}'", .{v});
+        out.thinking_fold_share = n;
+    } else if (is(name, "--thinking-fold-max")) {
+        const n = try int(u, a, name, v);
+        if (n < 0 or n > 1000) return fail(u, a, "argument --thinking-fold-max: expected a count from 0 to 1000: '{s}'", .{v});
+        out.thinking_fold_max = n;
+    } else if (is(name, "--thinking-fold-at-budget")) {
+        const n = try int(u, a, name, v);
+        if (n != 0 and n != 1) return fail(u, a, "argument --thinking-fold-at-budget: expected 0 or 1: '{s}'", .{v});
+        out.thinking_fold_at_budget = n;
+    } else if (is(name, "--thinking-fold-margin")) {
+        const n = try int(u, a, name, v);
+        if (n < 0 or n > 50) return fail(u, a, "argument --thinking-fold-margin: expected a percent from 0 to 50: '{s}'", .{v});
+        out.thinking_fold_margin = n;
+    } else if (is(name, "--thinking-fold-prompt")) {
+        out.thinking_fold_prompt = percentDecoded(a, v) catch return fail(u, a, "argument --thinking-fold-prompt: expected percent-encoded text: '{s}'", .{v});
+    } else if (is(name, "--thinking-close-prompt")) {
+        out.thinking_close_prompt = percentDecoded(a, v) catch return fail(u, a, "argument --thinking-close-prompt: expected percent-encoded text: '{s}'", .{v});
+    } else if (is(name, "--thinking-fold-keep")) {
+        const n = try int(u, a, name, v);
+        if (n < 0) return fail(u, a, "argument --thinking-fold-keep: expected a token count from 0: '{s}'", .{v});
+        out.thinking_fold_keep = n;
+    } else if (is(name, "--thinking-fold-at-close-share")) {
+        const n = try int(u, a, name, v);
+        if (n < 0 or n > 100) return fail(u, a, "argument --thinking-fold-at-close-share: expected a percent, 0 to 100: '{s}'", .{v});
+        out.thinking_fold_at_close_share = n;
+    } else if (is(name, "--thinking-fold-cap")) {
+        const n = try int(u, a, name, v);
+        if (n < 128 or n > 16384) return fail(u, a, "argument --thinking-fold-cap: expected a token count from 128 to 16384: '{s}'", .{v});
+        out.thinking_fold_cap = n;
+    } else if (is(name, "--thinking-fold-cap-share")) {
+        const n = try int(u, a, name, v);
+        if (n < 0 or n > 100) return fail(u, a, "argument --thinking-fold-cap-share: expected a percent from 0 to 100: '{s}'", .{v});
+        out.thinking_fold_cap_share = n;
+    } else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--compact-at")) {
         if (std.mem.eql(u8, v, "auto")) out.compact_auto = true else {
             const f = try float(u, a, name, v);
             if (!(f > 0 and f <= 1)) return fail(u, a, "argument --compact-at: expected auto or a fraction in (0, 1]: '{s}'", .{v});

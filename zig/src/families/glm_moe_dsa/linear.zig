@@ -32,6 +32,30 @@ pub const Linear = struct {
     }
 };
 
+/// Rank r's share [b0, b1) of nb output blocks over `world` ranks: the first nb % world ranks hold one block more.
+/// nb 個の出力ブロックを `world` ランクで分けたときのランク r の取り分 [b0, b1): 先頭の nb % world ランクが 1 つ多い。
+pub fn share(nb: u32, world: u32, r: u32) struct { b0: u32, b1: u32 } {
+    const base = nb / world;
+    const extra = nb % world;
+    const b0 = r * base + @min(r, extra);
+    return .{ .b0 = b0, .b1 = b0 + base + @intFromBool(r < extra) };
+}
+
+/// Output blocks [b0, b1) of `l` (128 columns each) as a linear of their own: a view of l's words, svh and counters
+/// (never deinit), with l's K splits and warps, so each of its columns is computed as in `l`, bit for bit.
+/// `l` の出力ブロック [b0, b1) (各 128 列) を 1 つの linear として見たもの: l の words・svh・counters を指すだけ
+/// (deinit しない)。K 分割数と warp 数は l のままなので、各列は `l` と同じ計算になる (ビットまで同じ)。
+pub fn colBlocks(l: *const Linear, b0: u32, b1: u32) Linear {
+    const per: u64 = @intCast(l.strides().nb); // int32 words a block / ブロックあたりの int32 語数
+    const nb: u64 = b1 - b0;
+    var v = l.*;
+    v.words = .{ .d = l.words.d, .ptr = l.words.ptr + b0 * per * 4, .len = @intCast(nb * per * 4) };
+    v.svh = .{ .d = l.svh.d, .ptr = l.svh.ptr + b0 * 128 * 2, .len = @intCast(nb * 128 * 2) };
+    v.counters = .{ .d = l.counters.d, .ptr = l.counters.ptr + b0 * 8 * 4, .len = @intCast(nb * 8 * 4) };
+    v.n = @intCast(nb * 128);
+    return v;
+}
+
 /// The default (K splits, warps a program), from the shape alone.
 /// 既定の (K 分割数, プログラムあたりの warp 数)。形だけで決まる。
 pub fn plan(k: u32, n: u32) struct { sk: u32, wk: u32 } {

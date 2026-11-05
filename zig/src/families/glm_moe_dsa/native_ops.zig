@@ -15,6 +15,8 @@ const MergeLseArgs = extern struct { po: u64, pm: u64, pl: u64, osend: u64, lsen
 const DcpCombineArgs = extern struct { orecv: u64, lrecv: u64, out: u64, rows: c_int, ss: c_int, ssl: c_int, h: c_int, world: c_int };
 const AbsorbArgs = extern struct { q: u64, wk: u64, inv: u64, qa: u64, qr: u64, pos: u64, rows: c_int, h: c_int, rbk: c_int, qa_stride: c_int, qr_stride: c_int };
 const ExpandArgs = extern struct { ol: u64, wv: u64, out: u64, rows: c_int, h: c_int, rbk: c_int };
+const Absorb8Args = extern struct { q: u64, wk: u64, inv: u64, qa: u64, qr: u64, pos: u64, rows: c_int, h: c_int, rbk: c_int, qa_stride: c_int, qr_stride: c_int, sc: u64 };
+const Expand8Args = extern struct { ol: u64, wv: u64, out: u64, rows: c_int, h: c_int, rbk: c_int, sc: u64 };
 const RouterPartArgs = extern struct { x: u64, w: u64, part: u64, m: c_int, x_stride: c_int, d: c_int, ne: c_int, ks: c_int };
 const IndexScoresArgs = extern struct { q: u64, w: u64, ic: u64, pos: u64, out: u64, n: c_int, t: c_int, r0: c_int, dcp: c_int, rank: c_int, pack: c_int, rb: c_int, wscale: f32, qscale: f32, pmap: u64 };
 const IqFp8Args = extern struct { q: u64, q8: u64, qs: u64, rows: c_int };
@@ -74,6 +76,12 @@ pub const Kernels = struct {
     f_pick_hist: cuda.Function,
     f_absorb: cuda.Function,
     f_expand: cuda.Function,
+    // TF_GLM53_KVB=fp8: absorb / expand on e4m3 rows with fp32 row scales, and the start's conversion (and back)
+    // TF_GLM53_KVB=fp8: fp32 の行スケールつき e4m3 の行での absorb / expand と、起動時の変換 (と逆変換)
+    f_absorb8: cuda.Function,
+    f_expand8: cuda.Function,
+    f_kvb8_quant: cuda.Function,
+    f_kvb8_bf16: cuda.Function,
     f_router_part: cuda.Function,
     f_index_scores: cuda.Function,
     // TF_GLM53_INDEX_FP8: the scores on the FP8 tensor-core product (other bits than f_index_scores)
@@ -160,6 +168,10 @@ pub const Kernels = struct {
             .f_pick_hist = try m.function("tf_glm53_n_pick_hist"),
             .f_absorb = try m.function("tf_glm53_n_absorb"),
             .f_expand = try m.function("tf_glm53_n_expand"),
+            .f_absorb8 = try m.function("tf_glm53_n_absorb8"),
+            .f_expand8 = try m.function("tf_glm53_n_expand8"),
+            .f_kvb8_quant = try m.function("tf_glm53_n_kvb8_quant"),
+            .f_kvb8_bf16 = try m.function("tf_glm53_n_kvb8_bf16"),
             .f_router_part = try m.function("tf_glm53_n_router_part"),
             .f_index_scores = try m.function("tf_glm53_n_index_scores"),
             .f_index_scores8 = try m.function("tf_glm53_n_index_scores8"),
@@ -291,14 +303,44 @@ pub const Kernels = struct {
     /// qr = qa + 512 elements writes the packed queries of the DCP exchange in place).
     /// `qa_stride` / `qr_stride`: QA と QR の (row, head) レコード間の要素数 (512 / 64。576 / 576 で qr = qa + 512
     /// 要素なら、DCP の交換用に pack した query へその場で書く)。
-    pub fn absorb(k: *const Kernels, s: cuda.Stream, q: u64, wk: u64, inv: u64, qa: u64, qr: u64, pos: u64, r: u32, h: u32, qa_stride: u32, qr_stride: u32) !void {
+    /// `sc` (TF_GLM53_KVB=fp8): wk is e4m3 [h, 192, 512] with these fp32 row scales; 0: bf16.
+    /// `sc` (TF_GLM53_KVB=fp8): wk は e4m3 [h, 192, 512] で、これが fp32 の行スケール。0 なら bf16。
+    pub fn absorb(k: *const Kernels, s: cuda.Stream, q: u64, wk: u64, sc: u64, inv: u64, qa: u64, qr: u64, pos: u64, r: u32, h: u32, qa_stride: u32, qr_stride: u32) !void {
         if (wk % 16 != 0) return error.UnalignedNativeOperand;
+        if (sc != 0) return goRows(k.f_absorb8, s, h, 16, r, Absorb8Args{ .q = q, .wk = wk, .inv = inv, .qa = qa, .qr = qr, .pos = pos, .rows = @intCast(r), .h = @intCast(h), .rbk = @intCast(@min(r, 16)), .qa_stride = @intCast(qa_stride), .qr_stride = @intCast(qr_stride), .sc = sc });
         try goRows(k.f_absorb, s, h, 16, r, AbsorbArgs{ .q = q, .wk = wk, .inv = inv, .qa = qa, .qr = qr, .pos = pos, .rows = @intCast(r), .h = @intCast(h), .rbk = @intCast(@min(r, 16)), .qa_stride = @intCast(qa_stride), .qr_stride = @intCast(qr_stride) });
     }
 
-    pub fn expand(k: *const Kernels, s: cuda.Stream, ol: u64, wv: u64, out: u64, r: u32, h: u32) !void {
+    /// `sc` (TF_GLM53_KVB=fp8): wv is e4m3 [h, 256, 512] with these fp32 row scales; 0: bf16.
+    /// `sc` (TF_GLM53_KVB=fp8): wv は e4m3 [h, 256, 512] で、これが fp32 の行スケール。0 なら bf16。
+    pub fn expand(k: *const Kernels, s: cuda.Stream, ol: u64, wv: u64, sc: u64, out: u64, r: u32, h: u32) !void {
         if (wv % 16 != 0 or ol % 16 != 0) return error.UnalignedNativeOperand;
+        if (sc != 0) return goRows(k.f_expand8, s, h, 16, r, Expand8Args{ .ol = ol, .wv = wv, .out = out, .rows = @intCast(r), .h = @intCast(h), .rbk = @intCast(@min(r, 16)), .sc = sc });
         try goRows(k.f_expand, s, h, 16, r, ExpandArgs{ .ol = ol, .wv = wv, .out = out, .rows = @intCast(r), .h = @intCast(h), .rbk = @intCast(@min(r, 16)) });
+    }
+
+    /// rows x cols bf16 at `w` -> e4m3 codes at `q` and fp32 row scales at `sc` (TF_GLM53_KVB=fp8, at the start).
+    /// `w` の rows x cols の bf16 -> `q` に e4m3 の code、`sc` に fp32 の行スケール (TF_GLM53_KVB=fp8、起動時)。
+    pub fn kvb8Quant(k: *const Kernels, s: cuda.Stream, w: u64, q: u64, sc: u64, rows: u32, cols: u32) !void {
+        var a: cuda.Args = .{};
+        a.add(w);
+        a.add(q);
+        a.add(sc);
+        a.add(@as(c_int, @intCast(cols)));
+        try cuda.launch.launch(k.f_kvb8_quant, .{ .grid = .{ .x = rows, .y = 1, .z = 1 }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &a);
+    }
+
+    /// The e4m3 rows (codes `q`, scales `sc`) back to bf16 at `out` (the wide rows' cuBLAS GEMMs).
+    /// e4m3 の行 (code `q`、スケール `sc`) を `out` の bf16 に戻す (広い行の cuBLAS GEMM 用)。
+    pub fn kvb8Bf16(k: *const Kernels, s: cuda.Stream, q: u64, sc: u64, out: u64, rows: u32, cols: u32) !void {
+        const n: u64 = @as(u64, rows) * cols;
+        var a: cuda.Args = .{};
+        a.add(q);
+        a.add(sc);
+        a.add(out);
+        a.add(@as(c_int, @intCast(cols)));
+        a.add(@as(c_longlong, @intCast(n)));
+        try cuda.launch.launch(k.f_kvb8_bf16, .{ .grid = .{ .x = @intCast(@min((n + 255) / 256, 4096)), .y = 1, .z = 1 }, .block = .{ .x = 256, .y = 1, .z = 1 } }, s, &a);
     }
 
     /// part[s, m, ne] fp32 = x bf16 [m, d] (rows x_stride apart) @ w^T over K slice s of ks; d / ks a multiple of 64.

@@ -33,6 +33,7 @@ const expert_live = @import("expert_live.zig");
 const expert_swap = @import("expert_swap.zig");
 const expert_plan = @import("expert_plan.zig");
 const load_progress = @import("load_progress.zig");
+const load_pipe = @import("load_pipe.zig");
 pub const ExpertLive = expert_live.Live;
 /// A request's sampling: keyed draws by (seed, position, id), so drafted and serial replies match.
 /// 要求のサンプリング: (seed, 位置, id) をキーにした抽選なので、draft ありと逐次の応答は一致する。
@@ -71,6 +72,21 @@ pub const Options = struct {
     /// TF_GLM53_DRAFTER=mtp: チェックポイントの MTP 層で draft する (mode 4)。1 ラウンドの数は TF_GLM53_MTP_K
     mtp: bool = false,
     mtp_k: usize = 3,
+    /// TF_GLM53_MTP_CONF (default 0.7, the best of 0.3 / 0.5 / 0.7 on the ring, 10-31; 0 = off): the MTP drafts' chain
+    /// confidence, a round's chain stopped where the product of its drafts' probabilities falls under it (mtp.Cut).
+    /// Rank 0's is every rank's (the slot words, lockstep.draftWords)
+    /// TF_GLM53_MTP_CONF (既定 0.7。リングで 0.3 / 0.5 / 0.7 のうち最良、10-31。0 は無効): MTP の draft の連鎖の信頼度。
+    /// draft の確率の積がこれを下回った所でラウンドの連鎖を止める (mtp.Cut)。rank 0 の値を全ランクが使う (スロットの語、
+    /// lockstep.draftWords)
+    mtp_conf: f64 = 0.7,
+    /// TF_GLM53_DFLASH_CONF: DFlash2's chain confidence, a round's drafts cut where it falls under it (0: every draft
+    /// the depth allows, as gr8 runs DFlash2). Rank 0's is every rank's (the slot words, lockstep.draftWords)
+    /// TF_GLM53_DFLASH_CONF: DFlash2 の連鎖の信頼度。下回った所でラウンドの draft を切る (0 は深さいっぱい、gr8 の
+    /// DFlash2 と同じ)。rank 0 の値を全ランクが使う (スロットの語、lockstep.draftWords)
+    dflash_conf: f64 = 0.4,
+    /// TF_GLM53_DFLASH_HEAD4=1: DFlash2's head on 4-bit records of lm_head (drafter.Drafter.head4)
+    /// TF_GLM53_DFLASH_HEAD4=1: DFlash2 の head を lm_head の 4 bit の記録で計算する (drafter.Drafter.head4)
+    dflash_head4: bool = false,
     // TF_GLM53_KV=fp8: e4m3 latent and index-key caches
     // TF_GLM53_KV=fp8: e4m3 の latent と index キーのキャッシュ
     kv_fp8: bool = false,
@@ -140,6 +156,21 @@ pub const Options = struct {
     roce: bool = false,
     dcp_roce: bool = true,
     decode_bf16: bool = false,
+    /// TF_GLM53_SPLIT_QA=1 (with TF_GLM53_ROCE): decode windows compute this rank's share of q_a's and kv_a's output
+    /// blocks and all-gather them (forward.Ctx.split), instead of both whole on every rank
+    /// TF_GLM53_SPLIT_QA=1 (TF_GLM53_ROCE と): decode ウィンドウで q_a と kv_a の出力ブロックのこのランクの分だけを
+    /// 計算して all-gather する (forward.Ctx.split)。全ランクが両方を丸ごと計算する代わりに
+    split_qa: bool = false,
+    /// TF_GLM53_KVB=fp8: kv_b's wk / wv as e4m3 rows with fp32 scales (model.Layer.wks / wvs), made from the bf16 at
+    /// the start and the bf16 freed: half the bytes a decode step reads of them (gr8's G6_KVB=fp8; here not exact)
+    /// TF_GLM53_KVB=fp8: kv_b の wk / wv を fp32 スケールつきの e4m3 の行で持つ (model.Layer.wks / wvs)。起動時に bf16
+    /// から作り、bf16 は解放する。decode の 1 step で読むバイトが半分になる (gr8 の G6_KVB=fp8。ここでは厳密ではない)
+    kvb8: bool = false,
+    /// TF_GLM53_L2PF=1 (with TF_GLM53_ROCE): in decode windows each RoCE wait of a layer prefetches into L2 what the
+    /// layer reads next (forward.Ctx.l2pf; gr8's G6_L2PF, here inside the collectives' wait)
+    /// TF_GLM53_L2PF=1 (TF_GLM53_ROCE と): decode ウィンドウで、層の RoCE の待ちごとに層が次に読むものを L2 に先読み
+    /// する (forward.Ctx.l2pf。gr8 の G6_L2PF を、ここでは集団通信の待ちの中で)
+    l2pf: bool = false,
 };
 
 /// `o` with the settings read from the environment (see Options). With DCP > 1, TF_GLM53_PROMPT_SP=1 and
@@ -160,6 +191,9 @@ pub fn withEnv(o: Options) Options {
     r.prompt_experts = std.mem.eql(u8, F.get("TF_EXL3_PROMPT_EXPERTS") orelse "0", "1");
     r.mtp = std.mem.eql(u8, F.get("TF_GLM53_DRAFTER") orelse "", "mtp");
     r.mtp_k = @intCast(std.math.clamp(F.num("TF_GLM53_MTP_K", 3), 1, mtp_mod.max_rows - 1));
+    r.mtp_conf = std.math.clamp(std.fmt.parseFloat(f64, F.get("TF_GLM53_MTP_CONF") orelse "0.7") catch 0.7, 0, 1);
+    r.dflash_conf = std.math.clamp(std.fmt.parseFloat(f64, F.get("TF_GLM53_DFLASH_CONF") orelse "0.4") catch 0.4, 0, 1);
+    r.dflash_head4 = std.mem.eql(u8, F.get("TF_GLM53_DFLASH_HEAD4") orelse "0", "1");
     r.ring = std.mem.eql(u8, F.get("TF_GLM53_PREFILL_REDUCE") orelse "ring", "ring");
     r.topk_words = !std.mem.eql(u8, F.get("TF_GLM53_TOPK_WORDS") orelse "1", "0");
     r.topk_any = !std.mem.eql(u8, F.get("TF_GLM53_TOPK_ANY") orelse "1", "0");
@@ -173,6 +207,9 @@ pub fn withEnv(o: Options) Options {
     r.roce = std.mem.eql(u8, F.get("TF_GLM53_ROCE") orelse "0", "1");
     r.dcp_roce = !std.mem.eql(u8, F.get("TF_GLM53_DCP_ROCE") orelse "1", "0");
     r.decode_bf16 = std.mem.eql(u8, F.get("TF_GLM53_DECODE_BF16") orelse "0", "1");
+    r.split_qa = std.mem.eql(u8, F.get("TF_GLM53_SPLIT_QA") orelse "0", "1");
+    r.kvb8 = std.mem.eql(u8, F.get("TF_GLM53_KVB") orelse "bf16", "fp8");
+    r.l2pf = std.mem.eql(u8, F.get("TF_GLM53_L2PF") orelse "0", "1");
     const on = std.mem.eql(u8, F.get("TF_GLM53_PROMPT_SP") orelse "0", "1") and std.mem.eql(u8, F.get("TF_GLM53_SP_DCP") orelse "0", "1");
     // SP splits a chunk across the DCP pair: with DCP 1 it is left off, said once (POOL.md 12.2e finding 5)
     // SP はチャンクを DCP の組に分ける: DCP 1 では使わず、そのことを一度だけ出す (POOL.md 12.2e の見つかったこと 5)
@@ -219,6 +256,9 @@ pub const Conv = struct {
     // temperature > 0: keyed sampling (seed, position, id), the same draws as one request alone; null: greedy
     // temperature > 0: キー付きの抽選 (seed、位置、id)。単独の要求と同じ抽選。null なら greedy
     samp: ?Sampling = null,
+    // with the MTP layer: the conversation's decode state (its backlog, carry, drafts and rows' range)
+    // MTP 層があるとき: 会話の decode の状態 (バックログ、carry、draft、行の範囲)
+    mtp: ?mtp_mod.Dec = null,
     plan: ?pool_plan.Plan = null,
     st: Stats = .{},
     t1: std.Io.Timestamp = undefined,
@@ -226,23 +266,49 @@ pub const Conv = struct {
 
 const MultiKey = struct { n: u8, conv: [multi_max]u8, rows: [multi_max]u8, t: [multi_max]u32 };
 
-/// TF_GLM53_MULTI: what the prefill of one conversation calls between layers (both streams drained first): one
-/// batched round of the other conversations, the same on every rank (lockstep.zig shares its contents). `every`: the
-/// layers between two calls for a 16,384-row chunk; a chunk of R rows waits every x 16,384 / R layers (the same work
-/// between calls, so a short prompt is not slowed by them; set by rows alone, so the same on every rank).
-/// TF_GLM53_MULTI: 1 つの会話の prefill が層の間で呼ぶもの (先に両方の stream を空にする): ほかの会話をまとめた
-/// ラウンド 1 回。全ランクで同じ (中身は lockstep.zig が配る)。`every`: 16,384 行のチャンクでの呼び出しの間の層数。
-/// R 行のチャンクは every x 16,384 / R 層ごと (呼び出しの間の仕事を同じにして、短い prompt を遅くしない。行数だけで
-/// 決まるので全ランクで同じ)。
+/// TF_GLM53_MULTI: the pauses of one conversation's prefill for the others (pace.zig). `first`: at a chunk's start,
+/// the layers before its first pause (0: none in this chunk), rank 0's counting (the others' is not read; every rank
+/// takes rank 0's in chunkAgreed). `f`: at a pause (both streams drained first), the other conversations' rounds, the
+/// same on every rank (lockstep.zig shares them), and the layers to the next pause (0: none in this chunk), rank 0's
+/// on every rank. null from either: the prefill gives way (a short prompt waits, TF_GLM53_MULTI_SHORT_PROMPT): it
+/// ends before this chunk (`first`) or drops what this chunk did (`f`), as a stop between chunks, the chunks done kept.
+/// TF_GLM53_MULTI: 1 つの会話の prefill がほかの会話のために止まる所 (pace.zig)。`first`: チャンクの始めに、最初に
+/// 止まるまでの層数 (0 はこのチャンクでは止まらない)。使うのは rank 0 のもの (ほかのランクの値は読まず、chunkAgreed で
+/// 全ランクが rank 0 の値を受け取る)。`f`: 止まった所で (先に両方の stream を空にする) ほかの会話のラウンドを回し
+/// (全ランクで同じ。lockstep.zig が配る)、次に止まるまでの層数を返す (0 はこのチャンクではもう止まらない。全ランクで
+/// rank 0 の値)。どちらも null なら prefill は譲る (短い prompt が待っている、TF_GLM53_MULTI_SHORT_PROMPT): このチャンク
+/// の前で終わるか (`first`)、このチャンクでしたことを捨てる (`f`)。チャンクの間での停止と同じで、終わったチャンクは残る。
+/// The ranks /health tells the RoCE proxies of (TF_GLM53_ROCE_PROXY_CORES).
+pub const roce_ranks = 8;
+
+/// TF_GLM53_ROCE_PROXY_CORES as rank 0 tells it (Engine.roceView): every rank's two proxies (the world's, the DCP
+/// group's): `present`, the CPU (this rank's read now, `live`; another's where it was kept, null when the scheduler's)
+/// and that CPU's kind.
+/// rank 0 が出す TF_GLM53_ROCE_PROXY_CORES (Engine.roceView): 各ランクの 2 つの proxy (world のもの、DCP グループのもの):
+/// `present`、CPU (このランクのものは今読んだ値で `live`。ほかのランクのものは留めた所、スケジューラ任せなら null)、その
+/// CPU の種類。
+pub const RoceView = struct {
+    mode: roce.Mode,
+    ranks: usize,
+    present: [roce_ranks][2]bool = @splat(.{ false, false }),
+    cpu: [roce_ranks][2]?u16 = @splat(.{ null, null }),
+    kind: [roce_ranks][2]roce.Kind = @splat(.{ .unknown, .unknown }),
+    live: [roce_ranks][2]bool = @splat(.{ false, false }),
+};
+
 pub const MidHook = struct {
     ctx: *anyopaque,
-    f: *const fn (ctx: *anyopaque) anyerror!void,
-    every: usize,
-
-    fn layersFor(mh: MidHook, rows: usize) usize {
-        return @max(mh.every, (mh.every * 16384 + rows - 1) / @max(rows, 1));
-    }
+    first: *const fn (ctx: *anyopaque, rows: u32) ?u8,
+    f: *const fn (ctx: *anyopaque) anyerror!?u8,
 };
+
+/// TF_GLM53_MTP_CONF_PAD: a drafted conversation's window beside others while MTP's confidence cut is on (Multi.conf_pad):
+/// 1 + its drafts (none, the default), the round's widest such (max), or the width as without the cut (full: only the
+/// MTP steps are saved). Without the cut the windows are padded as before.
+/// TF_GLM53_MTP_CONF_PAD: MTP の信頼度の打ち切りが有効なときの、ほかの会話と並ぶ draft する会話のウィンドウ
+/// (Multi.conf_pad): 1 + その draft 数 (none、既定)、そのラウンドで最も広いもの (max)、打ち切りなしと同じ幅 (full: 省ける
+/// のは MTP の段だけ)。打ち切りがなければ従来どおり詰め物をする。
+pub const ConfPad = enum { none, max, full };
 
 /// The batched decode's own buffers (rows of every conversation's window), streams for the per-conversation graph
 /// branches, the conversations and the windows' graphs (by conversations, rows and key buckets; least recently used
@@ -252,6 +318,18 @@ pub const MidHook = struct {
 pub const Multi = struct {
     n: usize,
     rows: usize, // a conversation's window: vrows with a drafter, else 1 / 会話のウィンドウ: drafter があれば vrows、なければ 1
+    // TF_GLM53_MULTI_DRAFT_ROWS (2 .. rows, default rows): a drafted conversation's window when three or more are in a
+    // round, so the window stays under the two-shot reduce (DFlash2: 4 rows each, 16 in all); the same on every rank
+    // (the round's conversations come from rank 0's event)
+    // TF_GLM53_MULTI_DRAFT_ROWS (2 .. rows、既定は rows): 3 つ以上の会話のラウンドでの、draft する会話のウィンドウ。
+    // ウィンドウを 2 段の reduce の手前に保つ (DFlash2 なら 4 行ずつで計 16 行)。全ランクで同じ (ラウンドの会話は
+    // rank 0 の出来事から来る)
+    rows3: usize,
+    // TF_GLM53_MTP_CONF_PAD (ConfPad, default none): the windows beside others while MTP's cut is on; the same on every
+    // rank (the start's environment, and the cut is rank 0's)
+    // TF_GLM53_MTP_CONF_PAD (ConfPad、既定 none): MTP の打ち切りが有効なときのほかと並ぶウィンドウ。全ランクで同じ
+    // (起動の環境変数、打ち切りは rank 0 の値)
+    conf_pad: ConfPad = .none,
     convs: [multi_max]Conv,
     b: forward.Buffers,
     xs: moe.Scratch,
@@ -282,6 +360,13 @@ pub const Multi = struct {
     // TF_GLM53_MULTI_BUCKET (行数、0 は使わない): ウィンドウの indexer のキー範囲を次の 2 のべき乗でなくこの倍数に
     // 切り上げる (長くはしない)。128K を超えたところで top-k が走査する詰め物のキーを減らす
     bucket_rows: usize = 0,
+    // TF_GLM53_MULTI_MTP=batch (the default): the MTP layer's drafts in one pass a step over every conversation
+    // (multiMtpAll), its staging rows; serial: one conversation after another (multiMtp). Both give the same output as
+    // one request at a time (TP4 10-30: 23 / 23 tokens' sha); batch drafts 4 conversations in 17 ms instead of 50
+    // TF_GLM53_MULTI_MTP=batch (既定): MTP 層の draft を段ごとに全会話で 1 回に (multiMtpAll)。その段の行。serial:
+    // 会話を 1 つずつ (multiMtp)。どちらも出力は 1 要求ずつと同じ (TP4 10-30: トークンの sha 23 / 23)。batch は
+    // 4 会話の draft が 50 ms でなく 17 ms
+    mtp_stage: ?mtp_mod.Stage = null,
 };
 
 /// A prompt chunk's shape class: its row count up to 16 (each its own row block), the router's BM class, the path
@@ -441,9 +526,15 @@ pub const Engine = struct {
     tap_slot: []i8 = &.{},
     n_taps: u32 = 0,
     drafter: ?*drafter_mod.Drafter = null,
+    // DFlash2's chain confidence (Options.dflash_conf); a follower takes rank 0's from each request's slot words
+    // DFlash2 の連鎖の信頼度 (Options.dflash_conf)。follower は要求ごとにスロットの語から rank 0 の値を取る
+    dflash_conf: f64 = 0.4,
     // TF_GLM53_DRAFTER=mtp: its caches are State entry layers.len
     // TF_GLM53_DRAFTER=mtp: そのキャッシュは State のエントリ layers.len
     mtp: ?mtp_mod.Mtp = null,
+    // TF_GLM53_MTP_CONF's floor (Options.mtp_conf, 0: off); every rank takes rank 0's from each request's slot words
+    // TF_GLM53_MTP_CONF の下限 (Options.mtp_conf、0 は無効)。全ランクが要求ごとにスロットの語から rank 0 の値を取る
+    mtp_conf: f64 = 0,
     chk_send: cuda.DeviceBuffer = undefined, // the agreement points' words (int32) / 合意点の語 (int32)
     chk_recv: cuda.DeviceBuffer = undefined,
     n_graphs: usize = 0,
@@ -507,8 +598,26 @@ pub const Engine = struct {
     ucache: ?unpack_cache.Cache = null,
     rk: roce.Kernels = undefined,
     fast: ?roce.Runtime = null,
+    // TF_GLM53_ROCE_PROXY_CORES: the setting, this host's core kinds, and every rank's two proxies as
+    // roce.pinProxies placed them (the CPU, -1 the scheduler's, -2 none); every rank holds all after the start's
+    // exchange (rank 0 serves them, roceView)
+    // TF_GLM53_ROCE_PROXY_CORES: 設定、このホストのコアの種類、各ランクの 2 つの proxy を roce.pinProxies がどこに置いたか
+    // (CPU、-1 はスケジューラ任せ、-2 はなし)。起動時の交換の後は全ランクが全部を持つ (rank 0 が出す、roceView)
+    roce_mode: roce.Mode = .os,
+    roce_kinds: [roce.max_cpus]roce.Kind = @splat(.unknown),
+    roce_pins: [roce_ranks][2]i16 = @splat(.{ -2, -2 }),
     dfast: ?roce.Runtime = null,
+    // TF_GLM53_SPLIT_QA: the split q_a / kv_a front's send area (split_cap bytes), then world x split_cap received
+    // TF_GLM53_SPLIT_QA: q_a / kv_a の分担の送る領域 (split_cap バイト)、続いて受ける world x split_cap
+    split_buf: ?cuda.DeviceBuffer = null,
+    split_cap: usize = 0,
+    // TF_GLM53_L2PF: the decode windows' RoCE waits prefetch the next weights (forward.Ctx.l2pf)
+    // TF_GLM53_L2PF: decode ウィンドウの RoCE の待ちで次の重みを先読みする (forward.Ctx.l2pf)
+    l2pf: bool = false,
     decode_bf16: bool = false,
+    // ring4 (tp.Group.topology): gatherRs's all-to-all relay area (forward.Ctx.relay)
+    // ring4 (tp.Group.topology): gatherRs の all-to-all の中継の領域 (forward.Ctx.relay)
+    relay: ?cuda.DeviceBuffer = null,
     // the slot cache (TF_GLM53_PREFIX=slots, slots.zig): the store; this request's resume point and the drafter's
     // window sources (Drafter.resume); the previous request's drafter ends; the reply's tokens for the commit
     // スロットキャッシュ (TF_GLM53_PREFIX=slots、slots.zig): ストア、この要求の再開位置と drafter のウィンドウの
@@ -566,8 +675,18 @@ pub const Engine = struct {
         errdefer gpa.destroy(e);
         const rank: u32 = @intCast(group.rank);
         const world: u32 = @intCast(group.world);
+        // four nodes cabled as a ring (glm53/R3RT-102.md): what would talk to the opposite rank directly is refused
+        // here, the same on every rank; the rest relays (tp.Group.allToAllRelay) or stays on a link (DCP <= 2)
+        // リングに結線した 4 台 (R3RT-102.md): 向かいのランクと直接話すものはここで断る (どのランクでも同じ)。残りは中継する
+        // (tp.Group.allToAllRelay) か、線の上にとどまる (DCP <= 2)
+        if (group.topology == .ring4) {
+            if (world != 4) return error.Ring4World;
+            if (o.dcp > 2) return error.Ring4Dcp;
+            if (!o.ring) return error.Ring4PrefillReduce; // PREFILL_REDUCE=rs: a world all-to-all of each SP part
+        }
         var mt: usize = 0; // TF_GLM53_MEMTRACE (memMark)
         memMark(ctx, rank, "-", &mt);
+        const t_load = std.Io.Clock.awake.now(io); // TF_GLM53_LOAD_STATS
         const cfg = try Config.read(gpa, io, o.ckpt);
         const heads: u32 = @intCast(cfg.heads / world);
         const n = o.layers orelse cfg.layers;
@@ -604,11 +723,30 @@ pub const Engine = struct {
             pg.plan = p.name;
             pg.plan_digest = p.digest;
         };
+        // TF_GLM53_LOAD_READERS / _PACKERS (default 16 / 8; 0 / 0: the load below runs as before, on this thread
+        // alone): the load pipe (load_pipe.zig), set up on every rank or on none (agreed like the plan's checks). Its
+        // steps follow the load's order: the layers, the MTP layer, the partner's q_b / kv_b (PEER_Q), the embedding
+        // and head
+        // TF_GLM53_LOAD_READERS / _PACKERS (既定 16 / 8。0 / 0 なら以下の読み込みは従来どおりこのスレッドだけで行う):
+        // load pipe (load_pipe.zig)。全ランクで用意するか、どのランクでも用意しない (計画の検査と同じく合意する)。
+        // ステップは読み込みの順: 層、MTP 層、相手の q_b / kv_b (PEER_Q)、embedding と head
+        const lenv = try load_pipe.Env.fromEnv();
         var reader = try weights.Reader.open(gpa, io, o.ckpt, rank, world, o.stored_world);
         defer reader.close();
+        const peer_q = o.peer_q and o.fuse and o.dcp == 2 and world % 2 == 0;
+        var lp: load_pipe.Pipe = .{ .env = lenv };
+        defer lp.deinit();
+        if (lenv.on()) {
+            var made = load_pipe.Pipe.init(gpa, io, d, lenv, &reader, if (plan) |*p| p else null, cfg, .{ .n = n, .mtp = o.mtp, .peer = peer_q }, rank);
+            if (prog) |*pg| if (!try pg.agree(if (made) |_| true else |_| false)) {
+                if (made) |*m| m.deinit() else |err| return err;
+                return error.LoadFailedOnAnotherRank;
+            };
+            lp = try made;
+        }
         const layers = try gpa.alloc(model.Layer, n);
         for (layers, 0..) |*L, i| {
-            const step = loadLayerAt(gpa, io, d, &reader, if (plan) |*p| p else null, cfg, i, heads, rank, world, o.stored_world, L);
+            const step = if (lp.active()) loadLayerPiped(gpa, io, d, &reader, if (plan) |*p| p else null, cfg, i, heads, rank, world, o.stored_world, L, &lp) else loadLayerAt(gpa, io, d, &reader, if (plan) |*p| p else null, cfg, i, heads, rank, world, o.stored_world, L);
             if (prog) |*pg| if (!try pg.layerDone(i, cfg.isMoe(i), if (step) |_| true else |_| false)) return if (step) |_| error.LoadFailedOnAnotherRank else |err| err;
             try step;
         }
@@ -616,38 +754,63 @@ pub const Engine = struct {
         var mtp: ?mtp_mod.Mtp = null;
         if (o.mtp) {
             if (o.drafter != null) return error.TwoDrafters;
+            lp.wait(lp.lay.mtpStep());
             mtp = try mtp_mod.Mtp.load(gpa, d, &reader, cfg, heads, n, o.mtp_k, @max(o.prompt_rows, forward.max_rows));
-            reader.release();
+            if (lp.active()) lp.finish(&reader, lp.lay.mtpStep()) else reader.release();
+            if (o.mtp_conf > 0 and rank == 0) std.log.info("glm53: MTP chains stop where their probability falls under {d:.3} (TF_GLM53_MTP_CONF; rank 0's, every rank's)", .{o.mtp_conf});
             try memCheck(io, n);
         }
         memMark(ctx, rank, "MTP layer", &mt);
-        const peer_q = o.peer_q and o.fuse and o.dcp == 2 and world % 2 == 0;
         if (peer_q) {
-            var peer = try weights.Reader.open(gpa, io, o.ckpt, rank ^ 1, world, o.stored_world);
+            // with the load pipe the partner's reader shares this rank's index (not parsed a second time)
+            // load pipe があれば、相手の reader はこのランクの索引を共有する (2 度目の解析をしない)
+            var peer = if (lp.active()) weights.Reader.openSharing(&reader, rank ^ 1) else try weights.Reader.open(gpa, io, o.ckpt, rank ^ 1, world, o.stored_world);
             defer peer.close();
             for (layers, 0..) |*L, i| {
+                lp.wait(lp.lay.peerStep(i));
                 const pq = try model.loadPeerQuery(gpa, d, &peer, cfg, i, heads);
                 L.peer_q_b = pq.q_b;
                 L.peer_wk = pq.wk;
-                peer.release();
+                if (lp.active()) lp.finish(&peer, lp.lay.peerStep(i)) else peer.release();
             }
             if (mtp) |*m| {
+                lp.wait(lp.lay.peerStep(n));
                 const pq = try model.loadPeerQuery(gpa, d, &peer, cfg, cfg.layers, heads);
                 m.layer.peer_q_b = pq.q_b;
                 m.layer.peer_wk = pq.wk;
-                peer.release();
+                if (lp.active()) lp.finish(&peer, lp.lay.peerStep(n)) else peer.release();
             }
             std.log.info("glm53: the DCP partner's q_b / wk loaded (rank {d}): its queries of prompt chunks are computed here (TF_GLM53_PEER_Q)", .{rank ^ 1});
         }
         memMark(ctx, rank, "the DCP partner's q_b / wk (PEER_Q)", &mt);
+        lp.wait(lp.lay.tail());
         const embed = try upload(gpa, d, &reader, "model.embed_tokens.weight");
         var lm = try reader.get("lm_head.weight");
         const vshare: u32 = @intCast(lm.shape[0]);
         const lm_head = try cuda.DeviceBuffer.fromHost(d, lm.bytes);
         lm.deinit(gpa);
         const final_norm = try upload(gpa, d, &reader, "model.norm.weight");
-        reader.release();
+        if (lp.active()) lp.finish(&reader, lp.lay.tail()) else reader.release();
         memMark(ctx, rank, "embed + lm_head + final norm", &mt);
+        // the pipe's threads, buffers, pinned memory and files gone before the tuning and the buffers (and its
+        // statistics with TF_GLM53_LOAD_STATS=1)
+        // pipe のスレッド・バッファ・pin したメモリ・ファイルを、調整とバッファの前に返す (TF_GLM53_LOAD_STATS=1 なら
+        // 統計も出す)
+        lp.end(io, rank, t_load);
+        // TF_GLM53_LOAD_DIGEST=1: every weight just loaded hashed, a line a layer (load_pipe.digest), before anything
+        // changes them (TF_GLM53_KVB=fp8 below)
+        // TF_GLM53_LOAD_DIGEST=1: 読み込んだばかりの全重みのハッシュを層ごとに 1 行 (load_pipe.digest)。何かが重みを
+        // 変える前に (下の TF_GLM53_KVB=fp8)
+        if (lenv.digest) {
+            var rest: [7]cuda.DeviceBuffer = undefined;
+            rest[0..3].* = .{ embed, lm_head, final_norm };
+            var nr: usize = 3;
+            if (mtp) |*m| {
+                rest[3..7].* = .{ m.enorm, m.hnorm, m.head_norm, m.eh_proj };
+                nr = 7;
+            }
+            try load_pipe.digest(gpa, rank, layers, if (mtp) |*m| &m.layer else null, rest[0..nr]);
+        }
         if (prog) |*pg| {
             pg.endLoad();
             pg.setPhase(.kv);
@@ -703,8 +866,19 @@ pub const Engine = struct {
         const nat = try native_ops.Kernels.load(d);
         const exk = try experts.Kernels.load(d, @intCast(try ctx.attribute(.max_shared_memory_per_block_optin)));
         memMark(ctx, rank, "glue / native / experts kernel modules", &mt);
-        const bufs = try forward.Buffers.init(d, cfg, heads, world, @intCast(partRows(o, world)), vshare, &inv, &had, keys, o.dcp, true, if (o.sp_parts > 0 and o.ring) forward.sp_min_rows else @intCast(partRows(o, world)));
+        if (o.kvb8) {
+            for (layers) |*L| try kvb8Layer(&nat, stream, d, L, cfg, heads);
+            if (mtp) |*m| try kvb8Layer(&nat, stream, d, &m.layer, cfg, heads);
+            if (rank == 0) std.log.info("glm53: kv_b as e4m3 rows with fp32 scales (TF_GLM53_KVB=fp8)", .{});
+            memMark(ctx, rank, "kv_b as e4m3 (TF_GLM53_KVB=fp8)", &mt);
+        }
+        const reduce_rows: usize = if (o.sp_parts > 0 and o.ring) forward.sp_min_rows else partRows(o, world);
+        const bufs = try forward.Buffers.init(d, cfg, heads, world, @intCast(partRows(o, world)), vshare, &inv, &had, keys, o.dcp, true, @intCast(reduce_rows));
         memMark(ctx, rank, "main buffers (prompt part 0)", &mt);
+        // ring4: gatherRs's all-to-all relays a block a rank (reduce_rows x hidden / world fp32)
+        // ring4: gatherRs の all-to-all はランクあたり 1 ブロックを中継する (reduce_rows x hidden / world の fp32)
+        var relay: ?cuda.DeviceBuffer = if (group.topology == .ring4) try cuda.DeviceBuffer.alloc(d, reduce_rows * cfg.hidden / world * 4) else null;
+        errdefer if (relay) |*r| r.free();
         const vbufs = try forward.Buffers.init(d, cfg, heads, world, vrows, vshare, &inv, &had, keys, o.dcp, true, vrows);
         const vxs = if (first_moe) |x| try moe.Scratch.init(d, x, vrows, @intCast(cfg.top_k)) else undefined;
         memMark(ctx, rank, "decode window buffers + experts scratch", &mt);
@@ -757,6 +931,7 @@ pub const Engine = struct {
             .part_rows = partRows(o, world),
             .bufs = bufs,
             .vbufs = vbufs,
+            .relay = relay,
             // the routed experts' scratch, sized from the first MoE layer (rows x top-k slots)
             // routed expert の作業領域。最初の MoE 層から大きさを決める (行数 x top-k スロット)
             .xs = undefined, // after pe_ok (xs_rows) / pe_ok の後で (xs_rows)
@@ -765,6 +940,7 @@ pub const Engine = struct {
             // DCP: 位置 p はメンバー p % dcp のローカル行 p / dcp に置く (メンバーごとに ceil(capacity / dcp) + 1 行)
             .state = state,
             .mtp = mtp,
+            .mtp_conf = if (o.mtp) o.mtp_conf else 0,
             .kv8 = o.kv_fp8,
             .kv4 = o.kv_fp4,
             .dcp = o.dcp,
@@ -819,9 +995,10 @@ pub const Engine = struct {
             e.drafter = try drafter_mod.Drafter.create(gpa, io, d, dir, .{
                 .stream = e.stream, .ops = .{ .k = &e.nat, .stream = e.stream, .kv8 = e.kv8, .kv4 = e.kv4 }, .glue = &e.glue, .group = group,
                 .blas = &e.blas, .handle = e.handle, .embed = e.embed.ptr, .lm_head = e.lm_head.ptr, .vshare = vshare,
-                .rank = rank, .world = world,
+                .rank = rank, .world = world, .head4 = o.dflash_head4,
             });
             e.drafter.?.graphs = o.graphs;
+            e.dflash_conf = o.dflash_conf;
         }
         memMark(ctx, rank, "DFlash2 drafter + taps", &mt);
         if (o.prompt_experts) if (first_moe) |fm| {
@@ -846,6 +1023,16 @@ pub const Engine = struct {
         e.prompt_rows = forward.max_rows;
         if (o.sp_parts > 0) try e.initSp(o, &inv, &had, keys, first_moe orelse return error.SpNeedsMoeLayer);
         memMark(ctx, rank, "sequence-parallel parts (buffers of parts 1..)", &mt);
+        if (o.kvb8) {
+            // every buffer set's scratch for wk / wv back to bf16 (prompt chunks over MAX_LIN_ROWS rows)
+            // 各バッファの組に、bf16 に戻した wk / wv の作業域 (MAX_LIN_ROWS 行を超える prompt チャンク用)
+            const kvbw_bytes = @as(usize, heads) * @max(cfg.qk_nope, cfg.v_head) * cfg.kv_lora * 2;
+            e.bufs.kvbw = try cuda.DeviceBuffer.alloc(d, kvbw_bytes);
+            e.vbufs.kvbw = try cuda.DeviceBuffer.alloc(d, kvbw_bytes);
+            if (e.n_sp > 1) for (e.sp_bufs[0 .. e.n_sp - 1]) |*b| {
+                b.kvbw = try cuda.DeviceBuffer.alloc(d, kvbw_bytes);
+            };
+        }
         if (o.prompt_rows > forward.max_rows and e.n_sp == 0) return error.PromptRowsNeedSp;
         // the init-time legacy-stream memsets land before the non-blocking stream reads them
         // 初期化時の legacy stream の memset を、non-blocking stream が読む前に終わらせる
@@ -866,20 +1053,40 @@ pub const Engine = struct {
             }
         };
         const hca_env = F.env("B12X_ROCE_HCA", "NCCL_IB_HCA") orelse return error.RoceNoHca;
-        var names: [2][:0]const u8 = undefined;
+        // up to 4 devices (both ports' two PCIe halves: three nodes cabled as a triangle); the library sends each peer
+        // over the devices in its subnet
+        // 4 つまで (両ポートの PCIe の半分 2 つずつ: 三角形に直結した 3 台)。ライブラリは相手ごとにそのサブネットの
+        // デバイスで送る
+        var names: [4][:0]const u8 = undefined;
         var nh: usize = 0;
         var it = std.mem.tokenizeScalar(u8, hca_env, ',');
         while (it.next()) |h| : (nh += 1) {
-            if (nh == 2) break;
+            if (nh == 4) break;
             const name = std.mem.trimStart(u8, h, "=^");
             names[nh] = try e.gpa.dupeSentinel(u8, name[0 .. std.mem.indexOfScalar(u8, name, ':') orelse name.len], 0);
         }
-        const gid = try std.fmt.parseInt(u32, F.env("B12X_ROCE_GID_INDEX", "NCCL_IB_GID_INDEX") orelse "3", 10);
+        // B12X_ROCE_GID_INDEX=-1: each device's own IPv4 GID (the index can differ between a triangle's devices)
+        // B12X_ROCE_GID_INDEX=-1: デバイスごとの IPv4 の GID (三角形のデバイスでは番号が違いうる)
+        const gid = try std.fmt.parseInt(i32, F.env("B12X_ROCE_GID_INDEX", "NCCL_IB_GID_INDEX") orelse "3", 10);
         const spin = try std.fmt.parseInt(u32, F.env("B12X_ROCE_SPIN_LIMIT", "B12X_ROCE_SPIN_LIMIT") orelse "20000000", 10);
         const lib = F.env("TF_ROCE_PROXY_LIB", "TF_ROCE_PROXY_LIB") orelse "./libroce_proxy.so";
         e.rk = try roce.Kernels.load(e.d);
-        e.fast = try roce.Runtime.init(e.gpa, e.d, e.group, &e.rk, lib, names[0..nh], gid, spin, e.stream);
-        if (e.dgroup != null and o.dcp_roce) e.dfast = try roce.Runtime.init(e.gpa, e.d, &e.dgroup.?, &e.rk, lib, names[0..nh], gid, spin, e.stream);
+        e.fast = try roce.Runtime.init(e.gpa, e.d, e.group, &e.rk, lib, names[0..nh], gid, spin, e.group.topology == .ring4, e.stream);
+        if (e.dgroup != null and o.dcp_roce) e.dfast = try roce.Runtime.init(e.gpa, e.d, &e.dgroup.?, &e.rk, lib, names[0..nh], gid, spin, false, e.stream);
+        // TF_GLM53_ROCE_PROXY_CORES (a725, the default; x925; os): the cores the proxies spin on, then every rank's
+        // placement to every rank in one exchange (the same environment on every rank: a bad value fails them all)
+        // TF_GLM53_ROCE_PROXY_CORES (a725 が既定、x925、os): proxy が回るコア。続いて各ランクの置き場所を 1 回の交換で
+        // 全ランクへ (全ランクが同じ環境なので、悪い値なら全ランクがそろって失敗する)
+        const cores = F.env("TF_GLM53_ROCE_PROXY_CORES", "TF_GLM53_ROCE_PROXY_CORES") orelse "a725";
+        e.roce_mode = std.meta.stringToEnum(roce.Mode, cores) orelse {
+            std.log.err("glm53: TF_GLM53_ROCE_PROXY_CORES={s}: a725, x925 or os", .{cores});
+            return error.RoceProxyCores;
+        };
+        e.roce_kinds = roce.coreKinds(e.io);
+        const mine = roce.pinProxies(e.rank, e.roce_mode, .{ if (e.fast) |*r| r else null, if (e.dfast) |*r| r else null }, roce.proxyCpus(&e.roce_kinds, e.roce_mode));
+        const all = try roce.Runtime.exchange(e.gpa, e.d, e.group, std.mem.asBytes(&mine), e.stream);
+        defer e.gpa.free(all);
+        for (0..@min(e.world, roce_ranks)) |r| @memcpy(std.mem.asBytes(&e.roce_pins[r]), all[r * 4 ..][0..4]);
         e.decode_bf16 = o.decode_bf16;
         if (e.decode_bf16) {
             // dpart / dred: [small, D] bf16 in every buffer set (prompt chunks of up to 16 rows too)
@@ -890,10 +1097,41 @@ pub const Engine = struct {
                 b.dred = try cuda.DeviceBuffer.alloc(e.d, n);
             }
         }
+        e.l2pf = o.l2pf;
+        if (e.rank == 0 and o.l2pf) std.log.info("glm53: decode windows' RoCE waits prefetch the next weights into L2 (TF_GLM53_L2PF)", .{});
+        if (o.split_qa) {
+            const kv_n: u32 = @intCast(std.mem.alignForward(usize, e.cfg.kv_lora + e.cfg.qk_rope, 128));
+            e.split_cap = forward.splitCap(@intCast(e.cfg.q_lora), kv_n, @intCast(e.world));
+            e.split_buf = try cuda.DeviceBuffer.alloc(e.d, e.split_cap * (1 + e.world));
+            if (e.rank == 0) std.log.info("glm53: decode windows split q_a / kv_a over the world (TF_GLM53_SPLIT_QA, {d} B a rank)", .{e.split_cap});
+        }
         // the drafter's row and candidate gathers too
         // drafter の行と候補の gather も
         if (e.drafter) |dr| dr.t.fast = &e.fast.?;
         if (e.rank == 0) std.log.info("glm53: decode collectives on RoCE one-shot (world{s}{s})", .{ if (e.dfast != null) ", DCP group" else "", if (e.decode_bf16) ", bf16 reduce" else "" });
+    }
+
+    /// TF_GLM53_KVB=fp8: L's wk / wv (and the DCP partner's wk) as e4m3 rows with fp32 scales (native_ops.kvb8Quant),
+    /// each bf16 freed once converted.
+    /// TF_GLM53_KVB=fp8: L の wk / wv (と DCP の相手の wk) を fp32 スケールつきの e4m3 の行にする
+    /// (native_ops.kvb8Quant)。変換し終えた bf16 は解放する。
+    fn kvb8Layer(nat: *const native_ops.Kernels, s: cuda.Stream, d: *const cuda.Driver, L: *model.Layer, cfg: Config, heads: u32) !void {
+        const lw: u32 = @intCast(cfg.kv_lora);
+        const F = struct {
+            fn one(k: *const native_ops.Kernels, st: cuda.Stream, dd: *const cuda.Driver, w: *cuda.DeviceBuffer, rows: u32, cols: u32) !cuda.DeviceBuffer {
+                var q = try cuda.DeviceBuffer.alloc(dd, @as(usize, rows) * cols);
+                errdefer q.free();
+                const scales = try cuda.DeviceBuffer.alloc(dd, @as(usize, rows) * 4);
+                try k.kvb8Quant(st, w.ptr, q.ptr, scales.ptr, rows, cols);
+                try st.synchronize();
+                w.free();
+                w.* = q;
+                return scales;
+            }
+        };
+        L.wks = try F.one(nat, s, d, &L.wk, heads * @as(u32, @intCast(cfg.qk_nope)), lw);
+        L.wvs = try F.one(nat, s, d, &L.wv, heads * @as(u32, @intCast(cfg.v_head)), lw);
+        if (L.peer_wk) |*pw| L.peer_wks = try F.one(nat, s, d, pw, heads * @as(u32, @intCast(cfg.qk_nope)), lw);
     }
 
     fn lap(e: *Engine, t: *std.Io.Timestamp, i: usize) void {
@@ -1002,6 +1240,7 @@ pub const Engine = struct {
                 cv.prompt.deinit(e.gpa);
                 cv.out.deinit(e.gpa);
                 if (cv.plan) |*q| q.deinit(e.gpa);
+                if (cv.mtp) |d| e.gpa.free(d.host_ids); // its device buffers go with the context / デバイスのバッファは context とともに
             }
             if (e.drafter) |dr| {
                 for (dr.sets, 0..) |st, k| {
@@ -1020,6 +1259,7 @@ pub const Engine = struct {
         if (e.dfast) |*f| f.deinit();
         if (e.fast) |*f| f.deinit();
         if (e.dgroup) |*g| g.deinit();
+        if (e.relay) |*r| r.free();
         if (e.slots) |sl| sl.deinit();
         e.out.deinit(e.gpa);
         e.blas.close();
@@ -1084,6 +1324,13 @@ pub const Engine = struct {
             .pek = if (e.pek) |*k| k else null, .pes = &e.pes, .pe_ok = e.pe_ok, .ring = e.ring, .topk_words = e.topk_words, .topk_any = e.topk_any, .pe_f16 = e.pe_f16, .topk16 = e.topk16, .fuse = e.fuse, .xgroup = e.xgroup, .peer_q = e.peer_q, .index_fp8 = e.index_fp8, .probe_select = e.probe_select,
             .fast = if (e.fast) |*f| f else null, .dfast = if (e.dfast) |*f| f else null, .decode_bf16 = e.decode_bf16,
             .pick_log = if (b == &e.vbufs) e.pick_log_dev else 0,
+            .relay = if (e.relay) |r| r.ptr else 0, .relay_bytes = if (e.relay) |r| r.len else 0,
+            // the split front for decode windows only: one area, used by the decode stream alone
+            // 分担の前段は decode ウィンドウだけ: 領域は 1 つで、decode の stream だけが使う
+            .split = if (b == &e.vbufs) (if (e.split_buf) |sb| sb.ptr else 0) else 0,
+            .split_recv = if (b == &e.vbufs) (if (e.split_buf) |sb| sb.ptr + e.split_cap else 0) else 0,
+            .split_cap = e.split_cap,
+            .l2pf = b == &e.vbufs and e.l2pf,
         };
     }
 
@@ -1482,7 +1729,13 @@ pub const Engine = struct {
     /// 全ランクの `words` を集める: words[0] は rank 0 の意思 (stop_req) で、それを返す。残りは全ランクで rank 0 の
     /// ものと一致しなければならない (違えば error.RanksDiverged)。
     fn agree(e: *Engine, words: []const i32) !bool {
-        if (e.world == 1) return words[0] != 0;
+        return (try e.agreeLead(words)) != 0;
+    }
+
+    /// As agree, rank 0's first word itself (the others' first words are not read).
+    /// agree と同じで、rank 0 の最初の語そのものを返す (ほかのランクの最初の語は読まない)。
+    fn agreeLead(e: *Engine, words: []const i32) !i32 {
+        if (e.world == 1) return words[0];
         const n = words.len;
         try e.chk_send.uploadAsync(0, std.mem.sliceAsBytes(words), e.stream.handle);
         const lib = e.group.lib;
@@ -1496,7 +1749,7 @@ pub const Engine = struct {
         // poison された one-shot は何も書かないので、語は前のラウンドのものになってしまう
         try e.roceCheck();
         for (1..e.world) |r| if (!std.mem.eql(i32, all[r * n + 1 ..][0 .. n - 1], all[1..n])) return error.RanksDiverged;
-        return all[0] != 0;
+        return all[0];
     }
 
     /// A prompt chunk's rows a .. a + rows - 1 (their last residual at `x`) into the MTP layer's caches (a chunk
@@ -1505,6 +1758,14 @@ pub const Engine = struct {
     /// の分割がないチャンク用。promptSp は自分で埋める)。
     fn mtpPrompt(e: *Engine, m: *mtp_mod.Mtp, c: *const forward.Ctx, x: u64, prompt: []const i64, a: usize, rows: u32) !void {
         try m.prompt(c, e.state.kc[m.index].ptr, if (e.state.ic[m.index]) |b| b.ptr else null, e.embed.ptr, e.final_norm.ptr, x, prompt, a, rows);
+    }
+
+    /// An MTP round's cut (mtp.Cut): rank 0's floor (mtp_conf), the probabilities at the request's temperature.
+    /// MTP のラウンドの打ち切り (mtp.Cut): rank 0 の下限 (mtp_conf)、確率は要求の温度で。
+    fn mtpCut(e: *const Engine, samp: ?Sampling) mtp_mod.Cut {
+        const T: f64 = if (samp) |sp| sp.temperature else 0;
+        const inv_t: f32 = if (T > 0) @floatCast(1 / T) else 1;
+        return .{ .floor = e.mtp_conf, .inv_t = inv_t };
     }
 
     /// The MTP layer as the drafted rounds' proposer (null without it: TF_GLM53_DRAFTER=mtp).
@@ -1519,7 +1780,7 @@ pub const Engine = struct {
                 const m = &en.mtp.?;
                 const kc = en.state.kc[m.index].ptr;
                 const ic = if (en.state.ic[m.index]) |b| b.ptr else null;
-                return m.propose(&c, kc, ic, en.embed.ptr, en.lm_head.ptr, en.vshare, tok, P, room, bucket(P + room, en.cfg.index_topk), out);
+                return m.propose(&c, kc, ic, en.embed.ptr, en.lm_head.ptr, en.vshare, tok, P, room, bucket(P + room, en.cfg.index_topk), en.mtpCut(en.samp), out);
             }
             fn keptIds(ctx: *anyopaque, picks: []const i32) anyerror!void {
                 const en: *Engine = @ptrCast(@alignCast(ctx));
@@ -1529,16 +1790,17 @@ pub const Engine = struct {
         return .{ .ctx = e, .propose = F.propose, .kept_ids = F.keptIds };
     }
 
-    /// The DFlash2 drafter as the drafted rounds' proposer (null without one): depth from the caller, confidence 0.4.
+    /// The DFlash2 drafter as the drafted rounds' proposer (null without one): depth from the caller, confidence
+    /// dflash_conf.
     /// DFlash2 の drafter を draft ラウンドの proposer にする (drafter がなければ null): 深さは呼び出し側が決め、
-    /// 信頼度は 0.4。
+    /// 信頼度は dflash_conf。
     pub fn drafterProposer(e: *Engine) ?Proposer {
         if (e.drafter == null) return null;
         const F = struct {
             fn propose(ctx: *anyopaque, tok: u32, P: usize, room: usize, out: []u32) anyerror!usize {
                 _ = P;
                 const en: *Engine = @ptrCast(@alignCast(ctx));
-                return en.drafter.?.propose(tok, room, 0.4, en.samp, out[0..room]);
+                return en.drafter.?.propose(tok, room, en.dflash_conf, en.samp, out[0..room]);
             }
             fn kept(ctx: *anyopaque, n: usize) anyerror!void {
                 const en: *Engine = @ptrCast(@alignCast(ctx));
@@ -1622,6 +1884,19 @@ pub const Engine = struct {
         return e.agree(&w);
     }
 
+    /// A prompt chunk's start: stopAgreed with rank 0's `layers` (MidHook.first) in the same word (bits 8 ..); `yield`
+    /// (rank 0's): stop too. null: stop; else rank 0's layers on every rank.
+    /// prompt チャンクの始め: stopAgreed と同じで、rank 0 の `layers` (MidHook.first) を同じ語に載せる (ビット 8 から)。
+    /// `yield` (rank 0 のもの) も停止にする。null は停止、それ以外は全ランクで rank 0 の層数。
+    fn chunkAgreed(e: *Engine, layers: u8, yield: bool) !?u8 {
+        const lead = @as(i32, @intFromBool(yield or e.stop_req.load(.monotonic))) | @as(i32, layers) << 8;
+        var w = [4]i32{ lead, 0, 0, 0 };
+        const v = try e.agreeLead(&w);
+        if (v & 1 != 0) return null;
+        const layers_lead: u8 = @intCast((v >> 8) & 0xff);
+        return layers_lead;
+    }
+
     /// The prompt in equal chunks of at most prompt_rows (key range: the chunk's end once past index_topk), the head on
     /// the last row; returns the first token, or null when the ranks agreed to stop between chunks.
     /// prompt を最大 prompt_rows 行の等分チャンクで実行し (キー範囲: index_topk を超えたらチャンクの終端)、最終行で
@@ -1660,11 +1935,17 @@ pub const Engine = struct {
         // テスト用: TF_ZIG_PROF_PREFILL=a,b - prompt チャンク a..b (0 始まり、両端を含む) を CUDA プロファイラの範囲で
         // 囲む。両端でデバイスを空にするので、範囲にはそのチャンクの処理だけが入る
         var pprof = [2]usize{ 0, 0 };
-        const pprof_on = if (std.c.getenv("TF_ZIG_PROF_PREFILL")) |v| blk: {
+        const pprof_env = if (std.c.getenv("TF_ZIG_PROF_PREFILL")) |v| blk: {
             var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
             for (&pprof) |*x| x.* = std.fmt.parseInt(usize, it.next() orelse "0", 10) catch 0;
             break :blk true;
         } else false;
+        // TF_ZIG_PROF_PREFILL_MIN=n: only prompts with n rows or more to compute, and never the start-up's shapes
+        // (prewarmPrompts), so a server's first range is a request's
+        // TF_ZIG_PROF_PREFILL_MIN=n: 計算する行が n 行以上の prompt だけ。起動時の形 (prewarmPrompts) は除くので、
+        // サーバーで最初の範囲は要求のものになる
+        const pprof_min: usize = if (std.c.getenv("TF_ZIG_PROF_PREFILL_MIN")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch 0 else 0;
+        const pprof_on = pprof_env and !e.recording_shapes and prompt.len -| e.start >= pprof_min;
         // tests: TF_ZIG_PREFILL_LOG=1 - rank 0 prints each prompt chunk's wall time (its device drained at the chunk's
         // end, so a chunk's time holds that chunk's work alone)
         // テスト用: TF_ZIG_PREFILL_LOG=1 - rank 0 が prompt チャンクごとの経過時間を出す (チャンクの終わりでデバイスを
@@ -1688,17 +1969,28 @@ pub const Engine = struct {
             }
             // rows [start, a) are in the caches (prefill_done)
             // 行 [start, a) はキャッシュにある (prefill_done)
-            if (try e.stopAgreed()) return null;
-            if (sink) |s| if (s.chunk) |f| f(s.ctx, a);
             const end = @min(a + step, prompt.len);
             const rows: u32 = @intCast(end - a);
+            // TF_GLM53_MULTI: the layers before this chunk's first pause for the other conversations (0: none)
+            // TF_GLM53_MULTI: このチャンクでほかの会話のために最初に止まるまでの層数 (0 は止まらない)
+            const want: ?u8 = if (e.mid) |mh| mh.first(mh.ctx, rows) else 0;
+            var left: usize = (try e.chunkAgreed(want orelse 0, want == null)) orelse return null;
+            if (e.mid == null) left = 0;
+            if (sink) |s| if (s.chunk) |f| f(s.ctx, a);
             const t: ?u32 = if (end > e.cfg.index_topk) @intCast(end) else null;
             if (e.recording_shapes) e.noteShape(e.shapeOf(rows, t != null));
-            defer e.prefill_done = end;
+            // false: the chunk given up at a pause (MidHook): its rows are not done, nor its MTP rows, and the expert
+            // picks it counted so far are dropped (its rows are computed again when the prompt resumes)
+            // false: 止まる所でチャンクを手放した (MidHook): その行も MTP の行も終わっていない。それまでに数えた expert の
+            // 選択は捨てる (prompt を再開するときにその行をもう一度計算する)
+            var kept = true;
+            defer if (kept) {
+                e.prefill_done = end;
+            };
             if (counted) try e.promptCountsBegin(a, rows);
             // the chunk's MTP rows are written (by mtpPrompt or the parts' SpExtra) once it ends
             // チャンクの MTP の行は、チャンクが終わった時点で書けている (mtpPrompt か part の SpExtra)
-            defer if (e.mtp) |*m| m.track.chunk(a, end);
+            defer if (kept) if (e.mtp) |*m| m.track.chunk(a, end);
             if (e.n_sp > 0 and rows >= forward.sp_min_rows) {
                 const tap_row: usize = @as(usize, e.n_taps) * e.cfg.hidden * 2;
                 // the MTP layer's caches filled inside the chunk, each rank its own rows (mtp.Mtp.spInput)
@@ -1707,14 +1999,17 @@ pub const Engine = struct {
                     m.spBegin(prompt, a, rows, e.embed.ptr, e.final_norm.ptr);
                     break :blk m.spExtra(e.state.kc[m.index].ptr, if (e.state.ic[m.index]) |b| b.ptr else null);
                 } else null;
-                const last = if (e.mid) |mh| blk: {
-                    // TF_GLM53_MULTI: the chunk in layer steps, the other conversations' round every mh.every layers
-                    // TF_GLM53_MULTI: チャンクを層ごとの段で実行し、mh.every 層ごとにほかの会話のラウンドを挟む
+                const last = if (left > 0) blk: {
+                    // TF_GLM53_MULTI: the chunk in layer steps, a pause for the other conversations when `left` runs out
+                    // TF_GLM53_MULTI: チャンクを層ごとの段で実行し、`left` を使い切ったらほかの会話のために止まる
                     var sc = try forward.SpChunk.begin(e.sp_parts[0..e.n_sp], e.sp_want, e.ready, prompt[a..end], @intCast(a), e.embed.ptr, e.layers, e.state.kc, e.state.ic, t, if (e.bufs.taps) |x| x.ptr else null, tap_row, end == prompt.len, extra);
-                    const every = mh.layersFor(rows);
                     for (0..e.layers.len) |li| {
                         try sc.layer(li);
-                        if ((li + 1) % every == 0 and li + 1 < e.layers.len) try e.midPoint(mh);
+                        if (!try e.midStep(&left, li)) {
+                            kept = false;
+                            if (counted) try e.pc_dev.?.fill32(0, e.stream.handle);
+                            return null;
+                        }
                     }
                     break :blk try sc.finish();
                 } else try forward.promptSp(e.sp_parts[0..e.n_sp], e.sp_want, e.ready, prompt[a..end], @intCast(a), e.embed.ptr, e.layers, e.state.kc, e.state.ic, t, if (e.bufs.taps) |x| x.ptr else null, tap_row, end == prompt.len, extra);
@@ -1734,7 +2029,11 @@ pub const Engine = struct {
             try c.embed(e.embed.ptr, rows);
             for (e.layers, 0..) |*L, i| {
                 try c.layerPrompt(L, rows, e.state.kc[i].ptr, if (e.state.ic[i]) |b| b.ptr else null, e.state.pos.ptr, t);
-                if (e.mid) |mh| if ((i + 1) % mh.layersFor(rows) == 0 and i + 1 < e.layers.len) try e.midPoint(mh);
+                if (!try e.midStep(&left, i)) {
+                    kept = false;
+                    if (counted) try e.pc_dev.?.fill32(0, e.stream.handle);
+                    return null;
+                }
             }
             if (end == prompt.len) try c.headLogits(e.final_norm.ptr, e.lm_head.ptr, rows - 1, 1, e.vshare);
             if (prop) |p| if (p.taps) |f| try f(p.ctx, e.bufs.taps.?.ptr, rows);
@@ -1950,22 +2249,56 @@ pub const Engine = struct {
     // ------------------------------------------------- several conversations at once (TF_GLM53_MULTI) / 複数の会話 ---
 
     /// TF_GLM53_MULTI=n (1 .. multi_max): every rank once after the pool's setup. Needs the pool, DCP 2, graphs, the
-    /// fused decode with the bf16 reduce, and DFlash2 with per-slot saves or no drafter (MTP is not batched yet).
+    /// fused decode with the bf16 reduce, and DFlash2 with per-slot saves, the MTP layer, or no drafter.
     /// TF_GLM53_MULTI=n (1 .. multi_max): pool の準備の後に全ランクが 1 回呼ぶ。pool、DCP 2、graph、bf16 の reduce 付きの
-    /// fuse した decode、スロットごとの写しのある DFlash2 か drafter なしが要る (MTP はまだまとめない)。
+    /// fuse した decode、スロットごとの写しのある DFlash2、MTP 層、または drafter なしが要る。
     /// A prefill's pause for the other conversations (MidHook): both streams drained, then the hook.
     /// prefill がほかの会話のために止まる所 (MidHook): 両方の stream を空にしてから hook を呼ぶ。
-    fn midPoint(e: *Engine, mh: MidHook) !void {
+    fn midPoint(e: *Engine, mh: MidHook) !?u8 {
         try e.stream.synchronize();
         if (e.n_sp > 0) try e.comm.synchronize();
-        try mh.f(mh.ctx);
+        return mh.f(mh.ctx);
+    }
+
+    /// After prompt layer `li` of a chunk: one layer of `left` used, and the pause when it runs out before the last
+    /// layer (`left` then the layers to the next one). `left` 0: no pause in this chunk. false: the prefill gives way
+    /// at this pause (MidHook), on every rank.
+    /// チャンクの prompt の層 `li` の後: `left` を 1 層使い、最後の層より前に使い切ったら止まる (`left` は次に止まるまでの
+    /// 層数になる)。`left` が 0 ならこのチャンクでは止まらない。false: prefill はこの止まる所で譲る (MidHook)。全ランクで。
+    fn midStep(e: *Engine, left: *usize, li: usize) !bool {
+        if (left.* == 0) return true;
+        left.* -= 1;
+        if (left.* == 0 and li + 1 < e.layers.len) left.* = (try e.midPoint(e.mid.?)) orelse return false;
+        return true;
+    }
+
+    /// TF_GLM53_ROCE_PROXY_CORES now (null: no RoCE): this rank's proxies read from /proc (where they last ran), the
+    /// other ranks' from the start's exchange. No GPU, no other rank.
+    /// いまの TF_GLM53_ROCE_PROXY_CORES (null は RoCE なし): このランクの proxy は /proc から (最後に動いた CPU)、ほかの
+    /// ランクのものは起動時の交換から。GPU にもほかのランクにも触れない。
+    pub fn roceView(e: *const Engine, io: std.Io) ?RoceView {
+        if (e.fast == null) return null;
+        var v: RoceView = .{ .mode = e.roce_mode, .ranks = @min(e.world, roce_ranks) };
+        const own = [2]?*const roce.Runtime{ if (e.fast) |*r| r else null, if (e.dfast) |*r| r else null };
+        for (0..v.ranks) |r| for (0..2) |j| {
+            const pin = e.roce_pins[r][j];
+            if (pin == -2) continue;
+            v.present[r][j] = true;
+            if (r == e.rank) {
+                if (own[j]) |rt| v.cpu[r][j] = roce.cpuOf(io, rt.proxyTid());
+                v.live[r][j] = v.cpu[r][j] != null;
+            } else if (pin >= 0) v.cpu[r][j] = @intCast(pin);
+            if (v.cpu[r][j]) |c| if (c < roce.max_cpus) {
+                v.kind[r][j] = e.roce_kinds[c];
+            };
+        };
+        return v;
     }
 
     pub fn multiSetup(e: *Engine, n: usize) !void {
         if (n < 1 or n > multi_max) return error.MultiCount;
         if (e.pool == null) return error.MultiNeedsPool;
         if (e.dgroup == null or !e.fuse or !e.graphs or !e.decode_bf16 or e.fast == null) return error.MultiNeedsDcpFuseGraphsRoce;
-        if (e.mtp != null) return error.MultiWithMtp;
         if (e.drafter != null and e.pool.?.meta.saves.len == 0) return error.MultiNeedsDraftSaves;
         // attentionPar quantizes the index queries before each conversation's RoPE (the single path after it)
         // attentionPar は index の query を会話ごとの RoPE より前に量子化する (単独の経路は後)
@@ -1975,9 +2308,16 @@ pub const Engine = struct {
         // プランはほかの使用中の会話のスロット、元のスロット、新しいスロットを残す (plan.makePlanBusy はどれも追い
         // 出さない): 最大 n + 1 個で、スロットの上限はそれを許さねばならない
         if (e.pool.?.meta.cfg.max_slots < n + 1) return error.MultiNeedsMoreSlots;
-        const rows: usize = if (e.drafter != null) vrows else 1;
+        // a conversation's window: DFlash2's verify rows, the pending token and the MTP layer's k drafts, or 1
+        // 会話のウィンドウ: DFlash2 の verify の行、保留中のトークンと MTP 層の k 個の draft、または 1
+        const rows: usize = if (e.drafter != null) vrows else if (e.mtp) |*mt| 1 + mt.k else 1;
         const R: u32 = @intCast(n * rows);
         if (R > forward.multi_rows) return error.MultiTooWide;
+        const rows3: usize = if (std.c.getenv("TF_GLM53_MULTI_DRAFT_ROWS")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch return error.MultiDraftRows else rows;
+        // 2 .. rows with a drafter; without one (rows 1) only 1
+        // drafter があれば 2 .. rows、なければ (rows 1) 1 だけ
+        if (rows3 > rows or rows3 < @min(rows, 2)) return error.MultiDraftRows;
+        const conf_pad = std.meta.stringToEnum(ConfPad, std.mem.span(std.c.getenv("TF_GLM53_MTP_CONF_PAD") orelse "none")) orelse return error.MtpConfPad;
         var first_moe: ?*const moe.Routed = null;
         for (e.layers) |*L| if (L.experts) |*x| {
             first_moe = x;
@@ -1995,10 +2335,12 @@ pub const Engine = struct {
         b.dmid = try cuda.DeviceBuffer.alloc(e.d, (row / e.world + 15) / 16 * 16);
         if (e.drafter != null) b.taps = try cuda.DeviceBuffer.alloc(e.d, @as(usize, R) * e.n_taps * e.cfg.hidden * 2);
         m.* = .{
-            .n = n, .rows = rows, .convs = undefined, .b = b,
+            .n = n, .rows = rows, .rows3 = rows3, .conf_pad = conf_pad, .convs = undefined, .b = b,
             .xs = try moe.Scratch.init(e.d, first_moe orelse return error.NoMoeLayer, R, @intCast(e.cfg.top_k)),
             .streams = undefined, .events = undefined,
-            .ar2_rows = @intCast(std.fmt.parseInt(u32, std.mem.span(std.c.getenv("TF_GLM53_MULTI_AR2") orelse "17"), 10) catch 17),
+            // a ring of four relays the one-shot only (roce_proxy.c ABI 6): no two-shot share mode there
+            // 4 台のリングは one-shot だけを中継する (ABI 6): 2 段の取り分のモードは使わない
+            .ar2_rows = if (e.group.topology == .ring4) std.math.maxInt(u32) else @intCast(std.fmt.parseInt(u32, std.mem.span(std.c.getenv("TF_GLM53_MULTI_AR2") orelse "17"), 10) catch 17),
         };
         for (m.convs[0..], 0..) |*cv, k| {
             cv.* = .{ .pos = try cuda.DeviceBuffer.alloc(e.d, 16) };
@@ -2007,6 +2349,13 @@ pub const Engine = struct {
                 cv.pmap = try cuda.DeviceBuffer.alloc(e.d, pm.len);
                 try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(cv.pmap.?.ptr, pm.ptr, pm.len, e.stream.handle), "cuMemcpyDtoDAsync");
             };
+            if (k < n and e.mtp != null) cv.mtp = try mtp_mod.Dec.init(e.gpa, e.d, e.cfg.hidden);
+        }
+        if (e.mtp != null) {
+            const how = std.mem.span(std.c.getenv("TF_GLM53_MULTI_MTP") orelse "batch");
+            if (std.mem.eql(u8, how, "batch")) {
+                m.mtp_stage = try mtp_mod.Stage.init(e.d, e.cfg.hidden, R);
+            } else if (!std.mem.eql(u8, how, "serial")) return error.MultiMtpMode;
         }
         for (m.streams[0..n]) |*x| x.* = try cuda.Stream.initPriority(e.d, 0);
         for (m.events[0 .. n + 1]) |*x| x.* = try cuda.Event.init(e.d, false);
@@ -2017,6 +2366,148 @@ pub const Engine = struct {
         try e.stream.synchronize();
         e.multi = m;
         if (e.rank == 0) std.log.info("glm53: batched decode of up to {d} conversations ({d} rows a window each, two-shot reduce from {d} rows)", .{ n, rows, m.ar2_rows });
+    }
+
+    /// One conversation's MTP drafts (as mtpProposer for one request), on its own state (Dec) and PoolMap: the engine's
+    /// map is the last admitted conversation's, so the layer's cache rows go through the conversation's own.
+    /// 1 つの会話の MTP の draft (1 つの要求の mtpProposer と同じ)。その会話自身の状態 (Dec) と PoolMap で: エンジンの
+    /// 表は最後に受け付けた会話のものなので、層のキャッシュの行は会話自身の表を通す。
+    fn multiMtp(e: *Engine, cv: *Conv, room: usize, out: []u32) !usize {
+        const mt = &e.mtp.?;
+        var c = e.fw(true);
+        c.pick_log = 0; // the MTP layer's draft rows are not target decode rows / MTP 層の draft 行は target の decode 行ではない
+        c.ops.pmap = (cv.pmap orelse return error.MultiNeedsPool).ptr;
+        const kc = e.state.kc[mt.index].ptr;
+        const ic = if (e.state.ic[mt.index]) |b| b.ptr else null;
+        return mt.proposeDec(&cv.mtp.?, &c, kc, ic, e.embed.ptr, e.lm_head.ptr, e.vshare, cv.tok, cv.P, room, bucket(cv.P + room, e.cfg.index_topk), e.mtpCut(cv.samp), out);
+    }
+
+    /// TF_GLM53_MULTI_MTP=batch: the MTP drafts of conversations `convs` (rooms `room`, into `drafts` and their counts
+    /// `nd`) in one pass a step over all of them, as multiMtp makes each conversation's: step 0 over every backlog (rows
+    /// at P - m .. P - 1), then a step a draft over the conversations that still draft, one row each (at P + j - 1). The
+    /// layer on each conversation's own cache rows and map (layerMultiPar), the head over every row (the weight read is
+    /// the same as for one), each conversation's last row picked; one sync at the end. Eager (the positions are host
+    /// values: a graph would bake them). TF_GLM53_MTP_CONF (mtp.Cut): one sync a step more, after which a conversation
+    /// whose chain fell under the floor leaves the later steps; the steps end when none drafts on.
+    /// TF_GLM53_MULTI_MTP=batch: 会話 `convs` (room は `room`、draft は `drafts` へ、その数は `nd` へ) の MTP の draft を、
+    /// 段ごとに全会話で 1 回にまとめて作る (multiMtp が会話ごとに作るものと同じ): 段 0 は全バックログ (位置 P - m ..
+    /// P - 1 の行)、続いて draft 1 つごとに、まだ draft する会話から 1 行ずつ (位置 P + j - 1)。層は各会話自身の
+    /// キャッシュの行と表で (layerMultiPar)、head は全行で (重みの読みは 1 行と同じ)、各会話の最後の行を選ぶ。同期は
+    /// 最後に 1 回。eager (位置はホストの値なので graph は焼き込んでしまう)。TF_GLM53_MTP_CONF (mtp.Cut): 段ごとに
+    /// 同期を 1 回足し、連鎖が下限を下回った会話はそれ以降の段から外れる。draft を続ける会話がなくなれば段を終える。
+    fn multiMtpAll(e: *Engine, convs: []const usize, room: []const usize, drafts: *[multi_max][vrows]u32, nd: []usize) !void {
+        const m = e.multi.?;
+        const mt = &e.mtp.?;
+        const st = &m.mtp_stage.?;
+        const D: usize = e.cfg.hidden;
+        const s = e.stream;
+        var c = e.mctx();
+        c.pick_log = 0; // the MTP layer's rows are not target decode rows / MTP 層の行は target の decode 行ではない
+        var cnt: [multi_max]usize = @splat(0);
+        var nmax: usize = 0;
+        // TF_GLM53_MTP_CONF: each conversation's cut, chain probability and drafts kept; cnt[i] drops to the steps it
+        // ran once its chain falls under the floor
+        // TF_GLM53_MTP_CONF: 会話ごとの打ち切り、連鎖の確率、残す draft の数。連鎖が下限を下回れば cnt[i] は実行した
+        // 段の数に下がる
+        const cut_on = e.mtp_conf > 0;
+        var cut: [multi_max]mtp_mod.Cut = @splat(.{});
+        var chain: [multi_max]f64 = @splat(1);
+        var keep: [multi_max]usize = @splat(0);
+        for (convs, 0..) |k, i| {
+            const cv = &m.convs[k];
+            if (!cv.drafted or room[i] == 0) continue;
+            const d = &cv.mtp.?;
+            cnt[i] = @min(room[i], mt.k);
+            cut[i] = e.mtpCut(cv.samp);
+            if (d.fresh) {
+                if (!d.have_carry) return error.MtpNoCarry;
+                try d.hin.copyFrom(0, d.carry.ptr, D * 2, s.handle);
+                d.host_ids[0] = cv.tok;
+                try d.ids.uploadAsync(0, std.mem.sliceAsBytes(d.host_ids[0..1]), s.handle);
+                d.m = 1;
+                d.fresh = false;
+            }
+            if (d.m == 0 or d.m > mtp_mod.max_rows) return error.MtpBacklog;
+            nmax = @max(nmax, cnt[i]);
+        }
+        if (nmax == 0) return;
+        for (0..nmax) |j| {
+            var seqs: [multi_max]forward.WindowSeq = undefined;
+            var last: [multi_max]usize = undefined; // each one's last row / 各会話の最後の行
+            var who: [multi_max]usize = undefined; // index into convs / convs の中の位置
+            var nn: usize = 0;
+            var R: usize = 0;
+            for (convs, 0..) |k, i| {
+                if (cnt[i] <= j) continue;
+                const cv = &m.convs[k];
+                const d = &cv.mtp.?;
+                const rows: usize = if (j == 0) d.m else 1;
+                const p0: usize = if (j == 0) cv.P - d.m else cv.P + j - 1;
+                try st.hin.copyFrom(R * D * 2, d.hin.ptr, rows * D * 2, s.handle);
+                try st.ids.copyFrom(R * 8, d.ids.ptr, rows * 8, s.handle);
+                try d.pos.fill32(@intCast(p0), s.handle);
+                seqs[nn] = .{ .rows = @intCast(rows), .kc = e.state.kc, .ic = e.state.ic, .pos = d.pos.ptr, .t = bucket(cv.P + room[i], e.cfg.index_topk), .pmap = (cv.pmap orelse return error.MultiNeedsPool).ptr };
+                R += rows;
+                last[nn] = R - 1;
+                who[nn] = i;
+                nn += 1;
+            }
+            if (nn == 0) break; // every chain stopped (TF_GLM53_MTP_CONF) / 全部の連鎖が止まった (TF_GLM53_MTP_CONF)
+            const R32: u32 = @intCast(R);
+            try mt.inputStage(st, &c, e.embed.ptr, R32, c.b.x.ptr);
+            try c.layerMultiPar(&mt.layer, mt.index, seqs[0..nn], R32);
+            try c.headLogits(mt.head_norm.ptr, e.lm_head.ptr, 0, R32, e.vshare);
+            try c.glue.rowArgmax(s, c.b.lpart.ptr, c.b.amax.ptr, R32, e.vshare, c.rank * e.vshare);
+            // TF_GLM53_MTP_CONF: each conversation's last row's mass, at its own temperature, before the gather
+            // TF_GLM53_MTP_CONF: 各会話の最後の行の質量を、その会話の温度で、gather の前に
+            if (cut_on) for (who[0..nn], last[0..nn]) |i, l| {
+                try c.glue.rowLse(s, c.b.lpart.ptr + l * e.vshare * 4, c.b.amax.ptr + l * 16, 1, e.vshare, cut[i].inv_t);
+            };
+            if (c.fast) |f| {
+                try f.allGather(s, c.b.amax.ptr, c.b.amax_all.ptr, 16 * R32);
+            } else try c.group.lib.check(c.group.lib.api.ncclAllGather(c.b.amax.ptr, c.b.amax_all.ptr, 4 * R, .f32, c.group.comm, s.handle), "ncclAllGather");
+            try c.glue.pick(s, c.b.amax_all.ptr, c.world, R32, st.pids.ptr, st.ptok.ptr);
+            for (who[0..nn], last[0..nn]) |i, l| {
+                const cv = &m.convs[convs[i]];
+                const d = &cv.mtp.?;
+                try d.dtok.copyFrom(j * 4, st.ptok.ptr + l * 4, 4, s.handle);
+                try d.ids.copyFrom(0, st.pids.ptr + l * 8, 8, s.handle);
+                try d.hin.copyFrom(0, c.b.fnormed.ptr + l * D * 2, D * 2, s.handle);
+                if (j == 0) d.track.propose(cv.P, d.m, room[i]);
+            }
+            // TF_GLM53_MTP_CONF: the step's probabilities from the gathered rows (the same bytes on every rank), each
+            // chain on: the first draft always kept, a later one while the chain stays at the floor or above
+            // TF_GLM53_MTP_CONF: 集めた行 (全ランクで同じバイト) から段の確率を出し、各連鎖を進める: 最初の draft は
+            // 必ず残し、以降は連鎖が下限以上の間だけ残す
+            if (cut_on) {
+                const W: usize = e.world;
+                var all: [8 * forward.multi_rows * 4]f32 = undefined;
+                if (W * R * 4 > all.len) return error.MtpConfTooWide;
+                try c.b.amax_all.downloadAsync(0, std.mem.sliceAsBytes(all[0 .. W * R * 4]), s.handle);
+                try s.synchronize();
+                try e.roceCheck();
+                for (who[0..nn], last[0..nn]) |i, l| {
+                    chain[i] *= mtp_mod.pickProb(all[0 .. W * R * 4], W, R, l, cut[i].inv_t);
+                    if (j == 0 or chain[i] >= cut[i].floor) keep[i] = j + 1;
+                    if (chain[i] < cut[i].floor) cnt[i] = j + 1;
+                }
+            }
+        }
+        var got: [multi_max][vrows]i32 = undefined;
+        // the drafts kept: every step's without the cut, else keep[i] (at most the steps run, cnt[i])
+        // 残す draft: 打ち切りがなければ全段の分、あれば keep[i] (実行した段の数 cnt[i] 以下)
+        var kn: [multi_max]usize = @splat(0);
+        for (0..convs.len) |i| kn[i] = if (cut_on) keep[i] else cnt[i];
+        for (convs, 0..) |k, i| if (kn[i] > 0) try m.convs[k].mtp.?.dtok.downloadAsync(0, std.mem.sliceAsBytes(got[i][0..kn[i]]), s.handle);
+        try s.synchronize();
+        for (convs, 0..) |k, i| if (cnt[i] > 0) {
+            const cv = &m.convs[k];
+            const d = &cv.mtp.?;
+            d.track.chain(cv.P, cnt[i] - 1);
+            for (got[i][0..kn[i]], 0..) |g, x| drafts[i][x] = @intCast(g);
+            nd[i] = kn[i];
+            d.m = 0; // the backlog is in the MTP caches now / バックログは MTP のキャッシュに入った
+        };
     }
 
     fn mctx(e: *Engine) forward.Ctx {
@@ -2049,6 +2540,27 @@ pub const Engine = struct {
 
     /// The pool slots of the live conversations (their plans' X), for the planner to leave alone.
     /// 使用中の会話の pool のスロット (プランの X)。プランナーが触れないようにする。
+    /// The number in GET /v1/pool (convs[].id) of the conversation a request writes (its plan's X): conversation
+    /// `k`'s with TF_GLM53_MULTI, the request alone's with null; null without the pool or before its plan. Engine
+    /// thread only (the plans are its own).
+    /// 要求が書く会話 (計画の X) の GET /v1/pool での番号 (convs[].id): TF_GLM53_MULTI なら会話 `k` の、null なら単独の
+    /// 要求の。pool が無いか計画の前なら null。エンジンのスレッドからだけ (計画はそのスレッドのもの)。
+    pub fn poolIdOf(e: *const Engine, k: ?usize) ?u64 {
+        return pool_serve.Pool.convNumber(e.poolSlotOf(k) orelse return null);
+    }
+
+    /// Fiore-lab: the pool slot itself (its plan's X) a request writes, as poolIdOf finds it: what a re-admission of the
+    /// same reply passes back (Header.own_slot) for the pool to continue. Engine thread only.
+    /// Fiore-lab: 要求が書く pool のスロットそのもの (計画の X)。poolIdOf と同じ探し方。同じ応答の受け入れ直しが pool に
+    /// 続けさせるために返す (Header.own_slot)。エンジンのスレッドからだけ。
+    pub fn poolSlotOf(e: *const Engine, k: ?usize) ?u64 {
+        const p = e.pool orelse return null;
+        return if (k) |i| blk: {
+            const m = e.multi orelse return null;
+            break :blk (m.convs[i].plan orelse return null).X;
+        } else p.cur_x;
+    }
+
     pub fn multiBusy(e: *const Engine, out: []u64) []u64 {
         const m = e.multi orelse return out[0..0];
         var n: usize = 0;
@@ -2078,7 +2590,7 @@ pub const Engine = struct {
         try cv.prompt.appendSlice(e.gpa, prompt);
         cv.out.clearRetainingCapacity();
         cv.stop_eos = stop_eos;
-        cv.drafted = drafted and e.drafter != null;
+        cv.drafted = drafted and (e.drafter != null or e.mtp != null);
         cv.want = @max(1, @min(max_tokens, e.capacity - prompt.len));
         cv.st = .{ .prompt = prompt.len };
         // the previous request's decode state: a prefill stopped before its first token must leave n 0, which is how
@@ -2096,13 +2608,20 @@ pub const Engine = struct {
         // prefill は最初のトークンをこれで抽選する (位置 prompt.len、1 つの要求の prefill と同じ)
         e.samp = samp;
         defer e.samp = null;
+        // DFlash2 only (the MTP layer's prompt rows are written by every prefill, its rounds start from Dec.take)
+        // DFlash2 のときだけ (MTP 層の prompt の行はどの prefill も書く。ラウンドは Dec.take から始まる)
         const prop: ?Proposer = if (cv.drafted) e.drafterProposer() else null;
-        if (cv.drafted) e.drafter.?.use(k);
+        if (cv.drafted) if (e.drafter) |dr| dr.use(k);
         if (prop) |p| if (p.begin) |f| try f(p.ctx, prompt);
         const t0 = std.Io.Clock.awake.now(e.io);
         e.pc_conv = @intCast(@min(k, std.math.maxInt(u16)));
         defer e.pc_conv = 0;
         const first = try e.prefill(prompt, prop, sink);
+        // the MTP layer's rows' range and carry, also when the prefill stopped before its first token (its commit
+        // needs the range of the chunks done; a drafts-off request keeps the prompt's range only)
+        // MTP 層の行の範囲と carry。最初のトークンの前に prefill が止まったときも (確定には終わったチャンクの範囲が
+        // 要る。draft なしの要求は prompt の範囲だけを持つ)
+        if (e.mtp) |*mt| try cv.mtp.?.take(mt, e.stream, e.cfg.hidden);
         // the prefill's writes through the engine's map: a refused one stops every rank, as after a request
         // エンジンの表を通した prefill の書き込み: 拒まれたものがあれば、要求の後と同じく全ランクが止まる
         try e.poolCheck();
@@ -2163,15 +2682,27 @@ pub const Engine = struct {
         const depth_max = vrows - 1;
         var tp = std.Io.Clock.awake.now(e.io);
         const t_start = tp;
+        // TF_GLM53_MULTI_MTP=batch: every conversation's MTP drafts first, in one pass a step
+        // TF_GLM53_MULTI_MTP=batch: 先に全会話の MTP の draft を段ごとに 1 回で
+        const mtp_batch = e.mtp != null and m.mtp_stage != null;
+        // a drafted conversation's window this round (TF_GLM53_MULTI_DRAFT_ROWS from three conversations on)
+        // このラウンドの、draft する会話のウィンドウ (3 会話からは TF_GLM53_MULTI_DRAFT_ROWS)
+        const width: usize = if (nl >= 3) m.rows3 else m.rows;
         for (live[0..nl], 0..) |j, i| {
             const cv = &m.convs[ks[j]];
-            room[i] = @min(depth_max, cv.want - cv.n - 1, e.capacity - cv.P - 1);
+            room[i] = @min(depth_max, width - 1, cv.want - cv.n - 1, e.capacity - cv.P - 1);
             if (cv.drafted and room[i] > 0) {
-                const dr = e.drafter.?;
-                dr.use(ks[j]);
-                nd[i] = try dr.propose(cv.tok, room[i], 0.4, cv.samp, drafts[i][0..room[i]]);
+                if (e.drafter) |dr| {
+                    dr.use(ks[j]);
+                    nd[i] = try dr.propose(cv.tok, room[i], e.dflash_conf, cv.samp, drafts[i][0..room[i]]);
+                } else if (!mtp_batch) nd[i] = try e.multiMtp(cv, room[i], drafts[i][0..room[i]]);
                 if (nd[i] > room[i]) return error.TooManyDrafts;
             }
+        }
+        if (mtp_batch) {
+            var convs: [multi_max]usize = undefined;
+            for (live[0..nl], 0..) |j, i| convs[i] = ks[j];
+            try e.multiMtpAll(convs[0..nl], room[0..nl], &drafts, nd[0..nl]);
         }
         e.lap(&tp, 1);
         const t_prop = tp;
@@ -2197,6 +2728,16 @@ pub const Engine = struct {
         // ids [tok, drafts.., padding]
         // ウィンドウ: 会話ごとの行 (drafter があり容量が許す限り vrows。graph を少なく保つため。draft より後ろの行は
         // 最後の draft を繰り返し、選択は使わず、キャッシュの行は新しい位置より後ろ)、id は [tok, draft.., 詰め物]
+        // With MTP's confidence cut on (mtp_conf, rank 0's): the padding TF_GLM53_MTP_CONF_PAD sets (Multi.conf_pad);
+        // none keeps each drafted conversation at 1 + its drafts, max pads it to the round's widest such
+        // MTP の信頼度の打ち切りが有効なとき (mtp_conf、rank 0 の値): 詰め物は TF_GLM53_MTP_CONF_PAD (Multi.conf_pad)
+        // に従う。none は draft する各会話を 1 + draft 数のまま、max はそのラウンドで最も広いものにそろえる
+        const pad: ConfPad = if (e.mtp != null and e.mtp_conf > 0) m.conf_pad else .full;
+        var widest: usize = 1;
+        for (live[0..nl], 0..) |j, i| {
+            if (m.convs[ks[j]].drafted) widest = @max(widest, 1 + nd[i]);
+        }
+        const pad_w: usize = if (pad == .max) widest else width;
         var ids: [multi_max * vrows]i64 = undefined;
         var rows: [multi_max]u32 = undefined;
         var seqs: [multi_max]forward.WindowSeq = undefined;
@@ -2207,8 +2748,8 @@ pub const Engine = struct {
             const cv = &m.convs[k];
             // padded only beside others (one conversation alone keeps 1 + drafts rows, as generateDrafted)
             // 詰め物はほかの会話がいるときだけ (1 会話だけなら generateDrafted と同じく 1 + draft の行)
-            const full = nl > 1 and cv.drafted and cv.P + vrows <= e.capacity;
-            const r: u32 = if (full) vrows else @intCast(1 + nd[i]);
+            const full = nl > 1 and cv.drafted and pad != .none and cv.P + pad_w <= e.capacity;
+            const r: u32 = if (full) @intCast(pad_w) else @intCast(1 + nd[i]);
             ids[R] = cv.tok;
             for (1..r) |x| ids[R + x] = if (x <= nd[i]) drafts[i][x - 1] else if (nd[i] > 0) drafts[i][nd[i] - 1] else cv.tok;
             rows[i] = r;
@@ -2273,9 +2814,14 @@ pub const Engine = struct {
             const sink = sinks[j];
             if (sink) |s| if (s.round) |f| f(s.ctx, nd[i], acc);
             if (cv.drafted) {
-                const dr = e.drafter.?;
-                dr.use(k);
-                try dr.addTaps(m.b.taps.?.ptr + o * row_bytes, acc + 1);
+                if (e.drafter) |dr| {
+                    dr.use(k);
+                    try dr.addTaps(m.b.taps.?.ptr + o * row_bytes, acc + 1);
+                } else if (cv.mtp) |*d| {
+                    // the kept rows (their normed hiddens in the window, their picks) become the next round's backlog
+                    // 残った行 (ウィンドウの中の norm 後の hidden と選択) が次のラウンドのバックログになる
+                    try mtp_mod.Mtp.keptDec(d, e.stream, m.b.fnormed.ptr + o * e.cfg.hidden * 2, e.cfg.hidden, pk[0 .. acc + 1]);
+                }
             }
             for (pk[0 .. acc + 1]) |pv| {
                 cv.tok = @intCast(pv);
@@ -2512,6 +3058,47 @@ fn loadPlanned(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, ckpt: 
         readers[bi] = &opened[bi].?;
     };
     return moe.loadFrom(gpa, d, .{ .readers = readers[0..p.banks.len], .pick = pick }, cfg, layer);
+}
+
+/// `loadLayerAt` through the load pipe (TF_GLM53_LOAD_READERS / _PACKERS): the layer's step waited for (its bytes read
+/// ahead), the routed experts' trellis joined by the packers, then the maps closed before the step's pages are dropped.
+/// Every weight the same as loadLayerAt's, bit for bit.
+/// load pipe (TF_GLM53_LOAD_READERS / _PACKERS) を通す `loadLayerAt`: 層のステップを待ち (そのバイトは先読み済み)、
+/// routed expert の trellis は packer が連結し、map を閉じてからステップのページを落とす。重みはすべて loadLayerAt と
+/// ビットまで同じ。
+fn loadLayerPiped(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, reader: *weights.Reader, plan: ?*const expert_plan.Plan, cfg: Config, i: usize, heads: u32, rank: u32, world: u32, stored_world: usize, L: *model.Layer, lp: *load_pipe.Pipe) !void {
+    lp.wait(lp.lay.layer(i));
+    L.* = try model.loadLayer(gpa, d, reader, cfg, i, heads);
+    if (cfg.isMoe(i)) L.experts = if (plan) |p| try loadPlannedPiped(gpa, io, d, reader, p, cfg, i, rank, world, stored_world, lp) else try loadRoutedPiped(gpa, d, reader, cfg, i, lp);
+    lp.finish(reader, lp.lay.layer(i));
+    try memCheck(io, i);
+}
+
+/// `loadPlanned` through the load pipe: the bank layer files (this layer's alone) dropped whole once unmapped.
+/// load pipe を通す `loadPlanned`: バンクの層ファイル (この層だけのもの) は unmap してから丸ごと落とす。
+fn loadPlannedPiped(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, ckpt: *weights.Reader, p: *const expert_plan.Plan, cfg: Config, layer: usize, rank: usize, world: usize, stored_world: usize, lp: *load_pipe.Pipe) !moe.Routed {
+    const pick = p.row(layer) orelse return loadRoutedPiped(gpa, d, ckpt, cfg, layer, lp);
+    var opened: [expert_plan.max_banks]?weights.Reader = @splat(null);
+    defer for (&opened) |*r| if (r.*) |*x| {
+        x.releaseDrop();
+        x.close();
+    };
+    var readers: [expert_plan.max_banks]*weights.Reader = @splat(ckpt);
+    for (p.banks, 0..) |b, bi| if (p.uses(layer, bi)) {
+        var name: [64]u8 = undefined;
+        const fname = try std.fmt.bufPrint(&name, "experts-layer-{d:0>3}.safetensors", .{layer});
+        opened[bi] = try weights.Reader.openFile(gpa, io, b.dir, fname, rank, world, stored_world);
+        readers[bi] = &opened[bi].?;
+    };
+    const src: moe.Source = .{ .readers = readers[0..p.banks.len], .pick = pick };
+    return if (lp.pk) |pk| moe.loadFromPacked(gpa, d, src, cfg, layer, pk) else moe.loadFrom(gpa, d, src, cfg, layer);
+}
+
+/// A MoE layer's routed experts from the checkpoint (no plan, or a layer outside it), through the packers if any.
+/// MoE 層の routed expert をチェックポイントから読む (計画なし、または計画の外の層)。packer があればそれを通す。
+fn loadRoutedPiped(gpa: std.mem.Allocator, d: *const cuda.Driver, r: *weights.Reader, cfg: Config, layer: usize, lp: *load_pipe.Pipe) !moe.Routed {
+    const one = [_]*weights.Reader{r};
+    return if (lp.pk) |pk| moe.loadFromPacked(gpa, d, .{ .readers = &one }, cfg, layer, pk) else moe.load(gpa, d, r, cfg, layer);
 }
 
 /// GLM-5.3's non-expert weights over all ranks (attention, shared experts, dense layers, embedding and head, MTP layer):

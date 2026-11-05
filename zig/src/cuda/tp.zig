@@ -7,7 +7,12 @@ const Threaded = std.Io.Threaded;
 const nccl = @import("nccl.zig");
 const abi = @import("abi.zig");
 
-pub const Error = error{ BadMaster, BadRank, SocketFailed, BindFailed, ListenFailed, ConnectTimeout, AcceptTimeout, ShortTransfer, BadPeer } || nccl.Error;
+pub const Error = error{ BadMaster, BadRank, SocketFailed, BindFailed, ListenFailed, ConnectTimeout, AcceptTimeout, ShortTransfer, BadPeer, Ring4NeedsRelay, Ring4RelaySpace, Ring4Unsupported } || nccl.Error;
+
+/// How the ranks' links are wired. ring4: four nodes cabled as a ring, ranks in ring order (rank r's neighbours are
+/// r ^ 1 and r ^ 3, its opposite r ^ 2, which no link reaches: glm53/R3RT-102.md).
+/// ランクの結線。ring4: リングに結線した 4 台、ランクはリングの順 (隣は r ^ 1 と r ^ 3、向かい r ^ 2 には線がない)。
+pub const Topology = enum { full, ring4 };
 
 /// Polls of 200 ms before a peer that never shows up fails the rendezvous (two minutes).
 const wait_polls = 600;
@@ -28,6 +33,9 @@ pub const Group = struct {
     /// The rendezvous connections, kept open while the group lives (rank 0: one a peer on the master port; others:
     /// theirs to it), so the ranks show as established peers of the master port; -1: none.
     links: [max_links]posix.socket_t = @splat(-1),
+    /// Set by the host right after init (a split group is always full: its ranks are a cabled pair or one rank).
+    /// init の直後にホストが設定する (split した group は常に full: 線でつながった組か 1 ランク)。
+    topology: Topology = .full,
 
     const max_links = 64;
 
@@ -66,13 +74,11 @@ pub const Group = struct {
     /// comm.all_to_all: recv[j] <- rank j's send[self.rank], both [world, n] of `dt` contiguous, one NCCL group on
     /// `stream` (graph-capturable). Rows in rank order: a caller summing recv's rows 0 .. world - 1 gets the same bits
     /// on every rank (the exact reduce-scatter).
+    /// A ring4 group refuses it (the opposite rank would hang its connection): use allToAllRelay.
+    /// ring4 の group では断る (向かいのランクへの接続は止まる): allToAllRelay を使う。
     pub fn allToAll(g: *const Group, send: u64, recv: u64, n: usize, dt: nccl.DataType, stream: abi.Stream) Error!void {
-        const es: usize = switch (dt) {
-            .i8, .u8 => 1,
-            .f16, .bf16 => 2,
-            .i32, .u32, .f32 => 4,
-            .i64, .u64, .f64 => 8,
-        };
+        if (g.topology == .ring4) return error.Ring4NeedsRelay;
+        const es = elemSize(dt);
         const lib = g.lib;
         try lib.check(lib.api.ncclGroupStart(), "ncclGroupStart");
         for (0..g.world) |j| {
@@ -85,6 +91,7 @@ pub const Group = struct {
     /// Two all-to-all exchanges as one NCCL group (one launch where two calls of allToAll are two): a then b with
     /// every peer, in the same order on every rank.
     pub fn allToAll2(g: *const Group, send_a: u64, recv_a: u64, n_a: usize, dt_a: nccl.DataType, send_b: u64, recv_b: u64, n_b: usize, dt_b: nccl.DataType, stream: abi.Stream) Error!void {
+        if (g.topology == .ring4) return error.Ring4Unsupported; // the DCP groups (DCP <= 2) are full / DCP の group (DCP <= 2) は full
         const ea = elemSize(dt_a);
         const eb = elemSize(dt_b);
         const lib = g.lib;
@@ -97,6 +104,98 @@ pub const Group = struct {
         }
         try lib.check(lib.api.ncclGroupEnd(), "ncclGroupEnd");
     }
+
+    /// allToAll that works on any topology. Under ring4 the opposite rank's block goes half through each neighbour (the
+    /// first floor(n / 2) elements through the sender's r ^ 1, the rest through its r ^ 3) in two NCCL groups on
+    /// `stream` (graph-capturable): `recv` ends up byte for byte as a direct exchange leaves it. `relay` (device, at
+    /// least n elements of `dt`) holds the halves in transit; it must not overlap send or recv, and both groups must not
+    /// be wrapped in an outer NCCL group (the second reads what the first received). Elsewhere: allToAll.
+    /// どの結線でも動く allToAll。ring4 では向かいのランクのブロックを半分ずつ両隣を通して送る (先頭の floor(n / 2) 要素は
+    /// 送り手の r ^ 1、残りは r ^ 3 を通る)。`stream` 上の NCCL group 2 つ (graph に取れる)。`recv` は直接の交換と
+    /// バイト単位で同じになる。`relay` (デバイス、`dt` の n 要素以上) は中継中の半分を置く。send / recv と重ねないこと、
+    /// 2 つの group を外側の NCCL group で包まないこと (2 つ目は 1 つ目が受けたものを読む)。それ以外は allToAll。
+    pub fn allToAllRelay(g: *const Group, send: u64, recv: u64, n: usize, dt: nccl.DataType, relay: u64, relay_bytes: usize, stream: abi.Stream) Error!void {
+        if (g.topology != .ring4) {
+            const es = elemSize(dt);
+            const lib = g.lib;
+            try lib.check(lib.api.ncclGroupStart(), "ncclGroupStart");
+            var post: Post = .{ .g = g, .dt = dt, .stream = stream };
+            for (0..g.world) |j| {
+                post.send(send + j * n * es, n, @intCast(j));
+                post.recv(recv + j * n * es, n, @intCast(j));
+            }
+            return post.end();
+        }
+        if (g.world != 4) return error.Ring4Unsupported;
+        const es = elemSize(dt);
+        if (relay_bytes < n * es) return error.Ring4RelaySpace;
+        const p = g.rank;
+        const l = p ^ 1;
+        const r = p ^ 3;
+        const o = p ^ 2;
+        const h = n / 2;
+        const t = n - h;
+        const a = relay; // l's first half for r (h elements) / l の r 宛ての前半 (h 要素)
+        const b = relay + h * es; // r's second half for l (t elements) / r の l 宛ての後半 (t 要素)
+        const lib = g.lib;
+        // 1: this rank's blocks to both neighbours, then the opposite's halves through them; per peer the direct block
+        // first, the relayed half second, on both ends (NCCL matches a pair's messages in issue order)
+        // 1: 自分のブロックを両隣へ、続けて向かい宛ての半分をそれぞれへ。相手ごとに直接のブロックが先、中継の半分が後を
+        // 両端でそろえる (NCCL は 1 組のメッセージを発行の順に対応させる)
+        try lib.check(lib.api.ncclGroupStart(), "ncclGroupStart");
+        var one: Post = .{ .g = g, .dt = dt, .stream = stream };
+        one.send(send + p * n * es, n, p);
+        one.recv(recv + p * n * es, n, p);
+        one.send(send + l * n * es, n, l);
+        one.send(send + o * n * es, h, l);
+        one.send(send + r * n * es, n, r);
+        one.send(send + (o * n + h) * es, t, r);
+        one.recv(recv + l * n * es, n, l);
+        one.recv(a, h, l);
+        one.recv(recv + r * n * es, n, r);
+        one.recv(b, t, r);
+        try one.end();
+        // 2: forward the neighbours' halves to each other; the opposite's block arrives, its first half from r, the
+        // second from l
+        // 2: 両隣の半分を互いへ回す。向かいのブロックが届く: 前半は r から、後半は l から
+        try lib.check(lib.api.ncclGroupStart(), "ncclGroupStart");
+        var two: Post = .{ .g = g, .dt = dt, .stream = stream };
+        two.send(a, h, r);
+        two.recv(recv + o * n * es, h, r);
+        two.send(b, t, l);
+        two.recv(recv + (o * n + h) * es, t, l);
+        return two.end();
+    }
+
+    /// The sends and receives of one NCCL group: zero counts skipped (on both ends alike), the first failure kept, the
+    /// group always ended.
+    /// 1 つの NCCL group の send / recv: 0 要素は省く (両端で同じく)、最初の失敗を残し、group は必ず閉じる。
+    const Post = struct {
+        g: *const Group,
+        dt: nccl.DataType,
+        stream: abi.Stream,
+        err: ?Error = null,
+
+        fn send(s: *Post, buf: u64, count: usize, peer: u32) void {
+            if (count == 0 or s.err != null) return;
+            s.g.lib.check(s.g.lib.api.ncclSend(buf, count, s.dt, @intCast(peer), s.g.comm, s.stream), "ncclSend") catch |e| {
+                s.err = e;
+            };
+        }
+
+        fn recv(s: *Post, buf: u64, count: usize, peer: u32) void {
+            if (count == 0 or s.err != null) return;
+            s.g.lib.check(s.g.lib.api.ncclRecv(buf, count, s.dt, @intCast(peer), s.g.comm, s.stream), "ncclRecv") catch |e| {
+                s.err = e;
+            };
+        }
+
+        fn end(s: *Post) Error!void {
+            const ended = s.g.lib.check(s.g.lib.api.ncclGroupEnd(), "ncclGroupEnd");
+            if (s.err) |e| return e;
+            return ended;
+        }
+    };
 
     fn elemSize(dt: nccl.DataType) usize {
         return switch (dt) {
