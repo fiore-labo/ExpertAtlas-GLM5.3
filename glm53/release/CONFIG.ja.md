@@ -2,7 +2,9 @@
 
 # glm53.conf の設定項目
 
-`docker run ... IMAGE up` では、ここの項目をすべて `-e 項目=値` で指定できます (`QUICKSTART.ja.md`)。
+`docker run ... IMAGE up` では、エンジン設定の項目を `-e 項目=値` で指定できます (`QUICKSTART.ja.md`)。次の項目は `not an option` で止まるので、`~/expertatlas/glm53.conf` に書きます: `GID_INDEX`、`RUNTIME`、`NCCL_LIB`、`EXPERT_LIVE`、`LOG_LISTEN`、`CONTEXT`、`STORE`、`THINKING_FOLD_KEEP`、`NEED_GB`、`LAUNCHER_HOST`、`ATLAS_DIR`、`LAUNCH_SNAPSHOTS`。`TOPOLOGY`、`SOCKET_IFNAME`、`IB_HCA` はノード確認が決めます。
+
+下の既定は `tf-glm53` の既定です。`docker run ... IMAGE up` は台数によらず `glm53.t4.conf.example` から `glm53.conf` を書くので、`CONTEXT_LENGTH` 737280、`KV_SIZE` 837280、`KV` fp4、`ROWS` 16384、`NEED_GB` 133 で始まり、起動の KV サイズは `max` です。
 
 `glm53.conf` には、レーンの設定（ノード、ネットワーク、重み、drafter、サーバー、メモリ、コントロールパネル）を書きます。シェルのファイルで、1 台目のノードの `tf-glm53` と同じディレクトリに置き、手で書いて編集します。`glm53.t4.conf.example`（4 台）か `glm53.conf.example`（8 台）を `glm53.conf` にコピーし、ノード、ネットワークのデバイス、パスを書き入れてください。それ以外の項目は、例に実測した値が入っています。
 

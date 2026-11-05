@@ -68,7 +68,7 @@ for a in NODE1 NODE2 NODE3 NODE4; do    # 全ノードのアドレス。1 台目
 done
 ```
 
-`NODE1` などには、ランチャーが使うアドレスを書きます。スイッチでは各ノードの ConnectX-7 の `enp1s0f…` の半分のアドレス (上の例の `172.16.88.N`) です。1 台目はこの /24 の ssh のポートを順に試して、他のノードを見つけます。リングでは各ノードの LAN のアドレスです。
+`NODE1` などには、ランチャーが使うアドレスを書きます。スイッチでは各ノードの ConnectX-7 の `enp1s0f…` の半分のアドレス (上の例の `172.16.88.N`) です。1 台目はこの /24 の ssh のポートを順に試して、他のノードを見つけます。リングでは各ノードの LAN のアドレスです。LAN は既定ルートのインターフェースです。管理用のネットワークがそれと別なら、ノードの設定を手で書きます (`RING.ja.md`「設定」)。
 
 ## 2. ウェイトをダウンロードする
 
@@ -173,7 +173,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
 | `MULTI`、`MULTI_WAIT` | `0`、`600` | 同時に推論する会話の数 (0〜4) と、要求がそれを待つ秒数 |
 | `RESERVE_GB` | `4` | 各ノードがシステムのために残すメモリ |
 
-エンジン設定の他の項目も、同じように指定できます。たとえば `MAX_TOKENS`、`THINKING_SHARE`、`THINKING_FOLD_PROMPT`、`NAME`、`HOST` です。各項目の意味と既定は `CONFIG.ja.md` にあります。
+エンジン設定の他の項目も、同じように指定できます。たとえば `MAX_TOKENS`、`THINKING_SHARE`、`THINKING_FOLD_PROMPT`、`NAME`、`HOST` です。各項目の意味と、オプションにできない項目は `CONFIG.ja.md` にあります。そこの既定は `tf-glm53` のものなので、この行ではここの表の値が優先です。
 
 インストール:
 
@@ -186,7 +186,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
 
 知っておくこと:
 
-- 指定した値は `~/expertatlas/glm53.conf` に保存され、別の値を指定するまで残ります。`KV_SIZE` と `BITS` はその起動だけに効きます。
+- 指定した値は `~/expertatlas/glm53.conf` に保存され、別の値を指定するまで残ります。`KV_SIZE` と `BITS` はその起動だけに効きます。幅は残りません。`BITS` も `ALLOC` もなければ、ダッシュボードで選んだ幅に関係なく、すべての expert を 3 ビットで起動します。
 - `TOPOLOGY`、`SOCKET_IFNAME`、`IB_HCA` はオプションではありません。ノード確認が配線から決めます。
 - オプションは動いているエンジンを変えません。先に止めてから実行します。無視したオプションがあれば、そう表示します。
 - API を 1 台目だけに絞るには `-e HOST=127.0.0.1` を足します。ダッシュボードと操作 API の `LAUNCHER_HOST` はオプションではないので、`~/expertatlas/glm53.conf` に `LAUNCHER_HOST=127.0.0.1` と書き、ランチャーを止めて (6 章)、もう一度この行を実行します。
@@ -212,7 +212,7 @@ cd ~/expertatlas
 ./tf-glm53 launcher stop     # ランチャーも止めたい時
 ```
 
-もう一度起動するには、同じ `docker run` の行を実行します。ノード、ウェイトの場所、設定は覚えています。
+もう一度起動するには、同じ `docker run` の行を実行します。ノード、ウェイトの場所、設定は覚えていますが、ダッシュボードで選んだ幅は覚えていません。この行はすべての expert を `BITS` (既定は 3) で起動します。前回の計画で起動するには、代わりに `./tf-glm53 start` を実行するか、保存した割り当てを `-e ALLOC=NAME` で指定します。
 
 ## 7. よくある STOP
 
@@ -225,7 +225,8 @@ cd ~/expertatlas
 | `no other node answers over ConnectX-7` | ケーブルとアドレスを確かめます (1 章) |
 | `its host key is not known here`、`it refuses this node's ssh key` | そのアドレスについて 1 章の ssh の手順を行います |
 | `N free worker nodes found` | `-e NODES="ADDR ADDR ADDR"` で選びます |
-| `the ring is none` | 全ノードに `lldpd` が要ります (1 章)。ケーブルと ssh も確かめます |
+| `no ring found`、`the ring is open` | 全ノードに `lldpd` が要ります (1 章)。ケーブルと ssh も確かめます |
+| `its LAN address is not known here` | 1 台目からそのノードの LAN のアドレスへ ping してから、もう一度実行します。それでも止まるなら、ノードの設定を手で書きます (`RING.ja.md`「設定」) |
 | `port N answers another lane's launcher` | そのランチャーを止めるか、`-e PORT=N` を足します |
 | `does not fit with context length N` | `CONTEXT_LENGTH` を小さく、`BITS` を狭くするか、ノードのメモリを空けます |
 | `not an option` | 綴りを確かめます。近い名前をメッセージが示します |

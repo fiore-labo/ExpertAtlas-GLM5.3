@@ -117,6 +117,10 @@ NCCL_LIB=$HOME/nccl-fenced/libnccl.so.2.30.7                          # the fenc
 NCCL_SHA256=<its sha256>
 ```
 
+When `docker run ... IMAGE up` cannot find the ring, write the four lines `TOPOLOGY`, `NODES`, `SOCKET_IFNAME` and `IB_HCA` in
+`~/expertatlas/glm53.nodes.conf` (its first run makes the directory) and run it again. The image holds the fenced NCCL, so
+`NCCL_LIB` and `NCCL_SHA256` are not needed.
+
 `./tf-glm53 check` confirms the ring: the nodes in ring order, two subnets a link, no subnet shared with the opposite
 node, every device with an IPv4 RoCE v2 address. It refuses settings that would reach the opposite node directly.
 

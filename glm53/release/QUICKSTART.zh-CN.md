@@ -68,7 +68,7 @@ for a in NODE1 NODE2 NODE3 NODE4; do    # 每个节点的地址，包括第一�
 done
 ```
 
-`NODE1` 等是启动器使用的地址。使用交换机时，是每个节点 ConnectX-7 的 `enp1s0f…` 半边的地址（上例中的 `172.16.88.N`）：第一个节点通过尝试连接该 /24 上的 ssh 端口来找到其他节点。使用环时，是每个节点的局域网地址。
+`NODE1` 等是启动器使用的地址。使用交换机时，是每个节点 ConnectX-7 的 `enp1s0f…` 半边的地址（上例中的 `172.16.88.N`）：第一个节点通过尝试连接该 /24 上的 ssh 端口来找到其他节点。使用环时，是每个节点的局域网地址，局域网是节点默认路由所在的接口。如果管理网络是另一个接口，请手动写入节点设置（`RING.zh-CN.md` 的“设置”）。
 
 ## 2. 下载权重
 
@@ -173,7 +173,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
 | `MULTI`、`MULTI_WAIT` | `0`、`600` | 同时解码的对话数（0 至 4），以及请求等待它们的秒数 |
 | `RESERVE_GB` | `4` | 每个节点留给系统的内存 |
 
-引擎设置的其他项目也以同样方式指定，例如 `MAX_TOKENS`、`THINKING_SHARE`、`THINKING_FOLD_PROMPT`、`NAME`、`HOST`。每项的含义和默认值见 `CONFIG.zh-CN.md`。
+引擎设置的其他项目也以同样方式指定，例如 `MAX_TOKENS`、`THINKING_SHARE`、`THINKING_FOLD_PROMPT`、`NAME`、`HOST`。每项的含义以及哪些项目不是选项，见 `CONFIG.zh-CN.md`。那里的默认值是 `tf-glm53` 的，对这一行以这里的表格为准。
 
 安装：
 
@@ -186,7 +186,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
 
 需要知道：
 
-- 指定的值保存在 `~/expertatlas/glm53.conf` 中，直到你指定其他值。`KV_SIZE` 和 `BITS` 只对那次启动有效。
+- 指定的值保存在 `~/expertatlas/glm53.conf` 中，直到你指定其他值。`KV_SIZE` 和 `BITS` 只对那次启动有效。位宽不会保留：没有 `BITS` 或 `ALLOC` 时，无论仪表板选择了什么，这一行都以 3 bit 启动所有专家。
 - `TOPOLOGY`、`SOCKET_IFNAME` 和 `IB_HCA` 不是选项：节点检查根据连线决定它们。
 - 选项不会改变正在运行的引擎。请先停止，再运行这一行。如果忽略了选项，输出中会说明。
 - 要让 API 只限第一个节点访问，请加上 `-e HOST=127.0.0.1`。仪表板和控制 API 的 `LAUNCHER_HOST` 不是选项：在 `~/expertatlas/glm53.conf` 中写入 `LAUNCHER_HOST=127.0.0.1`，停止启动器（第 6 节），再运行这一行。
@@ -212,7 +212,7 @@ cd ~/expertatlas
 ./tf-glm53 launcher stop     # 也想停止启动器时
 ```
 
-再次启动时，运行同一行 `docker run`。节点、权重的位置和你的设置都会保留。
+再次启动时，运行同一行 `docker run`。节点、权重的位置和你的设置都会保留，但仪表板中选择的位宽不会保留：这一行以 `BITS`（默认 3）启动所有专家。要按上一次启动的计划启动，请改为运行 `./tf-glm53 start`，或用 `-e ALLOC=NAME` 指定已保存的分配。
 
 ## 7. 常见的 STOP
 
@@ -225,7 +225,8 @@ cd ~/expertatlas
 | `no other node answers over ConnectX-7` | 检查线缆和地址（第 1 节） |
 | `its host key is not known here`、`it refuses this node's ssh key` | 对该地址执行第 1 节的 ssh 步骤 |
 | `N free worker nodes found` | 用 `-e NODES="ADDR ADDR ADDR"` 选择 |
-| `the ring is none` | 每个节点都需要 `lldpd`（第 1 节）。同时检查线缆和 ssh |
+| `no ring found`、`the ring is open` | 每个节点都需要 `lldpd`（第 1 节）。同时检查线缆和 ssh |
+| `its LAN address is not known here` | 从第一个节点 ping 该节点的局域网地址，再运行这一行。如果仍然停止，请手动写入节点设置（`RING.zh-CN.md` 的“设置”） |
 | `port N answers another lane's launcher` | 停止那个启动器，或加上 `-e PORT=N` |
 | `does not fit with context length N` | 减小 `CONTEXT_LENGTH`、减小 `BITS`，或释放节点内存 |
 | `not an option` | 检查拼写。消息会提示最接近的名称 |

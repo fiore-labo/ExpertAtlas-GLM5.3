@@ -2,7 +2,11 @@ English | [日本語](CONFIG.ja.md) | [简体中文](CONFIG.zh-CN.md)
 
 # glm53.conf: the settings
 
-With `docker run ... IMAGE up`, every key here can be given as `-e KEY=value` (`QUICKSTART.md`).
+With `docker run ... IMAGE up`, the keys of the engine settings can be given as `-e KEY=value` (`QUICKSTART.md`). These stop the line
+with `not an option`, so write them in `~/expertatlas/glm53.conf`: `GID_INDEX`, `RUNTIME`, `NCCL_LIB`, `EXPERT_LIVE`, `LOG_LISTEN`, `CONTEXT`, `STORE`, `THINKING_FOLD_KEEP`, `NEED_GB`, `LAUNCHER_HOST`, `ATLAS_DIR`, `LAUNCH_SNAPSHOTS`. The node check decides `TOPOLOGY`, `SOCKET_IFNAME` and `IB_HCA`.
+
+The defaults below are `tf-glm53`'s. `docker run ... IMAGE up` writes `glm53.conf` from `glm53.t4.conf.example` on any node count, so it begins
+with `CONTEXT_LENGTH` 737280, `KV_SIZE` 837280, `KV` fp4, `ROWS` 16384 and `NEED_GB` 133, and the start's KV size is `max`.
 
 `glm53.conf` holds a lane's settings: the nodes, the network, the weights, the drafter, the server, the memory and
 the control panel. It is a plain shell file that you write and edit by hand, next to `tf-glm53` on the first node.
