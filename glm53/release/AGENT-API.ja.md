@@ -21,7 +21,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 - `READY` で始まる行が出れば起動しています。続く行にダッシュボードと API の住所があります。
 - `STOP` なら止まった理由です。`FIX` に直し方、`THEN` にやり直す 1 行があります。直してから `THEN` をそのまま実行します。ランチャーは動いたままなので、この文書の API も使えます。
 - 起動設定はすべて `-e 名前=値` で指定できます: `WEIGHTS`、`BANK_2`〜`BANK_5`、`DRAFTER`、`BITS`、`ALLOC`、`NODES`、`PORT`、`LAUNCHER_PORT`、`EA_DIR`、`IMAGE` と、4 章のエンジン設定です (`TOPOLOGY`、`SOCKET_IFNAME`、`IB_HCA` はノード確認が決めるので指定できません)。知らない名前は `STOP` になります。一覧は `QUICKSTART.ja.md` にあります。
-- ホストに要るもの: Docker と NVIDIA container toolkit、`python3`、全ノード間と自分自身へのパスワードなしの ssh。
+- ホストに要るもの: NVIDIA ドライバ 580 以降、Docker と NVIDIA container toolkit、`python3`、ConnectX-7 のネットワークのアドレス、全ノード間と自分自身へのパスワードなしの ssh と登録済みの host key (`QUICKSTART.ja.md` の 1 章)。
 - リリースのイメージには AArch64 の fence を入れた NCCL が入っていて、スイッチでもリングでも読みます (`RING.ja.md`)。
 - 既に動いていれば何も起動せず、推論を 1 回して `READY` を出します。
 

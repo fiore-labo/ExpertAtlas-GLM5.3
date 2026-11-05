@@ -83,17 +83,17 @@ GLM-5.3은 토큰마다 레이어당 256개의 routed expert 가운데 8개를 �
 
 | 항목 | 저장소 | 크기 | 용도 |
 |---|---|---|---|
-| 8대용 체크포인트: 모든 가중치(routed expert는 4비트) | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | 8대 실행, 4대·8대의 컨트롤 패널(4비트 뱅크도 겸함) |
-| 4대용 체크포인트: 사용 빈도가 낮은 절반의 routed expert를 3비트로 | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | 컨트롤 패널 없이 4대 실행 |
-| 전문가 뱅크 2비트 | [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit) | 187.3 GB | 컨트롤 패널 |
-| 전문가 뱅크 3비트 | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | 컨트롤 패널(4대에서 컨텍스트 길이를 최대로 잡을 때 필요) |
-| 전문가 뱅크 4비트 | [fiore-lab/GLM-5.3-EXL3-Experts-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) | 368.5 GB | 컨트롤 패널(8대용 체크포인트가 없는 노드에서) |
-| 전문가 뱅크 5비트 | [fiore-lab/GLM-5.3-EXL3-Experts-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit) | 459.1 GB | 컨트롤 패널 |
+| 8대용 체크포인트: 모든 가중치(routed expert는 4비트) | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | **8대에서 필수**. 4대에서도 4대용 체크포인트 대신 쓸 수 있으며 4비트 뱅크도 겸합니다 |
+| 4대용 체크포인트: 사용 빈도가 낮은 절반의 routed expert를 3비트로 | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | **4대에서 필수**(8대용 체크포인트를 쓸 때는 불필요) |
+| 전문가 뱅크 2비트 | [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit) | 187.3 GB | 선택: 2비트 expert를 쓸 때 |
+| 전문가 뱅크 3비트 | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | **모든 시작에 필수** |
+| 전문가 뱅크 4비트 | [fiore-lab/GLM-5.3-EXL3-Experts-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) | 368.5 GB | 선택: 4비트 expert를 쓸 때(8대용 체크포인트가 있으면 불필요) |
+| 전문가 뱅크 5비트 | [fiore-lab/GLM-5.3-EXL3-Experts-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit) | 459.1 GB | 선택: 5비트 expert를 쓸 때 |
 
 뱅크는 19,200개의 routed expert를 하나의 폭으로 모은 것입니다. 엔진은 expert마다 계획에서 정한 폭의 뱅크에서
 불러옵니다. **모든 시작에는 노드 수에 맞는 체크포인트와 3비트 뱅크가 필요하며, 다른 뱅크는 사용하려는 폭만 내려받으면 됩니다**(패널은 모든 노드에 갖춰진 폭만 고르게 합니다).
 4대라면 4대용 체크포인트와 3비트 뱅크로, 합계 622.5 GB입니다. 모든 노드에 같은 파일을 같은 경로에 둡니다. 한 대에서
-내려받아 다른 노드로 복사합니다. 예:
+내려받아 다른 노드로 복사합니다(`python3 -m venv`에는 `python3-venv` 패키지가 필요합니다). 예:
 
 ```sh
 python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
@@ -114,8 +114,8 @@ Fiore-lab의 것과 구조가 같고 같은 방식으로 로드됩니다.
 
 ## 요구 사항
 
-- 하나의 RoCE v2 네트워크로 연결된 DGX Spark(GB10) 4대 또는 8대, 또는 링으로 연결한 4대. 첫 번째 노드에서 모든 노드와 자기 자신에 패스프레이즈 없는 키로 ssh로 접속할 수 있어야 합니다. 스위치에 연결한 4대라면 노드당 100 Gb/s 포트 하나로 충분합니다.
-- 이미지를 쓰는 경우: 각 노드에 Docker와 NVIDIA Container Toolkit(DGX OS에는 둘 다 있습니다), `python3`. 시작 전에 각 노드에 약 115 GiB의 여유 메모리.
+- 하나의 RoCE v2 네트워크로 연결된 DGX Spark(GB10) 4대 또는 8대, 또는 링으로 연결한 4대. 첫 번째 노드에서 모든 노드와 자기 자신에 패스프레이즈 없는 키로 ssh로 접속할 수 있어야 하고, 호스트 키도 미리 등록해 둡니다. ssh와 ConnectX-7 네트워크 절차는 [QUICKSTART](glm53/release/QUICKSTART.md)(영어) 1장에 있습니다. 스위치에 연결한 4대라면 노드당 100 Gb/s 포트 하나로 충분합니다.
+- 이미지를 쓰는 경우: 각 노드에 NVIDIA 드라이버 580 이상(이미지는 호스트의 드라이버를 씁니다), Docker와 NVIDIA Container Toolkit(DGX OS에는 둘 다 있습니다), `python3`. 시작 전에 각 노드에 약 115 GiB의 여유 메모리.
 - 대신 아카이브를 쓰는 경우: DGX OS(Ubuntu 24.04), NVIDIA 드라이버 580 이상, cuBLAS 13. 모든 노드에 NCCL 2.30.7. NVIDIA의 `nvidia-nccl-cu13` wheel을 pip으로 풀어 놓은 것입니다(`packaging/RUNTIME.md`).
 - 아카이브에서는 AArch64 fence가 들어간 NCCL을 스위치에서는 권장하고 링에서는 필수로 합니다. NVIDIA의 wheel에는 없습니다([RING](glm53/release/RING.md), 영어). 이미지에는 들어 있습니다.
 - 노드 수에 맞는 Fiore-lab의 EXL3 체크포인트(Hugging Face). 모든 노드의 같은 경로에 둡니다. 8대는 [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks)(390 GB), 4대는 [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks)(344.6 GB)입니다. 4대용 체크포인트는 레이어 3부터 77까지의 routed expert 가운데 사용 빈도가 낮은 절반을 3비트, 나머지를 4비트로 담고 있으며, 그 밖에는 8대용 체크포인트와 같습니다.

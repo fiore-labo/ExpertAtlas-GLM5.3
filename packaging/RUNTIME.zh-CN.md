@@ -25,7 +25,7 @@
 - DGX OS（Ubuntu 24.04），NVIDIA 驱动 580 或更高版本（由其提供 `libcuda.so.1`）。
 - 加载器路径上有 cuBLAS 13（`libcublas.so.13`、`libcublasLt.so.13`）：DGX OS 会随 CUDA 13 一起安装它（`libcublas-13-0`）。
 - 每个节点相同路径下的 NCCL 2.30.7（见下文）。
-- `libibverbs.so.1`，以及连接各系统的同一个 RoCE v2 网络（四个节点时，每个节点一个 100 Gb/s 端口即可），或连成环的四个节点（`RING.zh-CN.md`）；每个节点（包括第一台本身）都能从第一台通过其在 `NODES` 中的地址以 ssh 免密码访问。
+- `libibverbs.so.1`，以及连接各系统的同一个 RoCE v2 网络（四个节点时，每个节点一个 100 Gb/s 端口即可），或连成环的四个节点（`RING.zh-CN.md`）；每个节点（包括第一台本身）都能从第一台通过其在 `NODES` 中的地址以 ssh 免密码访问，并已登记其 host key（`QUICKSTART.zh-CN.md` 第 1 节）。
 - 磁盘空间，在每个节点上放在相同路径下（见下文）：检查点，八个节点为 390 GB（363 GiB），四个节点为 344.6 GB（321 GiB）；以及每次启动都需要的 3 bit 专家 bank，277.9 GB。
 - 八个节点：启动前每个节点需有 112 GiB 可用内存（使用 DFlash2 时为 115），以 `free -g` 的显示为准：当 `CONTEXT_LENGTH` 为 819,200、`KV_SIZE` 为 1,638,400 时，各 rank 约使用 108 GiB（使用 DFlash2 时为 111）。`KV_SIZE` 每减少 100,000 个 token，所需内存减少 2.7 GiB。可用内存不足的节点会被 `tf-glm53 check` 拒绝。使用 4 bit KV 缓存（`KV=fp4`）时，八个节点可将 `CONTEXT_LENGTH` 设为 1,048,576、`KV_SIZE` 设为 2,097,152，各 rank 约使用 94 GiB（用 1,018,993 个 token 的提示词实测）；`tf-glm53 check` 的估算按 8 bit 缓存计算，因此这时请设置 `NEED_GB=100`。
 - 四个节点：内存按只运行本服务器来分配（见 `T4.zh-CN.md`）；使用 DFlash2 时测得的最低可用内存为每个节点约 3.2 GiB（512K 时）。

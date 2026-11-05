@@ -84,17 +84,17 @@ GLM-5.3 はトークンごとに、1 層 256 個の routed expert から 8 個�
 
 | 何 | リポジトリ | 大きさ | 使う場面 |
 |---|---|---|---|
-| 8 台用チェックポイント：すべての重み（routed expert は 4 bit） | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | 8 台での起動。4 台・8 台のコントロールパネル（4 bit のバンクも兼ねる） |
-| 4 台用チェックポイント：使われ方の少ない半分の routed expert を 3 bit に | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | コントロールパネルを使わない 4 台での起動 |
-| エキスパートのバンク 2 bit | [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit) | 187.3 GB | コントロールパネル |
-| エキスパートのバンク 3 bit | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | コントロールパネル（4 台で context length を最大まで取るときに必要） |
-| エキスパートのバンク 4 bit | [fiore-lab/GLM-5.3-EXL3-Experts-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) | 368.5 GB | コントロールパネル（8 台用チェックポイントがないノードで） |
-| エキスパートのバンク 5 bit | [fiore-lab/GLM-5.3-EXL3-Experts-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit) | 459.1 GB | コントロールパネル |
+| 8 台用チェックポイント：すべての重み（routed expert は 4 bit） | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | **8 台で必須**。4 台でも 4 台用チェックポイントの代わりに使え、4 bit のバンクも兼ねます |
+| 4 台用チェックポイント：使われ方の少ない半分の routed expert を 3 bit に | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | **4 台で必須**（8 台用チェックポイントを使うときは不要） |
+| エキスパートのバンク 2 bit | [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit) | 187.3 GB | 任意: 2 bit のエキスパートを使うとき |
+| エキスパートのバンク 3 bit | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | **どの起動にも必須** |
+| エキスパートのバンク 4 bit | [fiore-lab/GLM-5.3-EXL3-Experts-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) | 368.5 GB | 任意: 4 bit のエキスパートを使うとき（8 台用チェックポイントがあれば不要） |
+| エキスパートのバンク 5 bit | [fiore-lab/GLM-5.3-EXL3-Experts-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit) | 459.1 GB | 任意: 5 bit のエキスパートを使うとき |
 
 バンクは、19,200 個の routed expert を 1 つの幅でそろえたものです。エンジンは、エキスパートごとに、計画で決めた幅の
 バンクから読み込みます。**どの起動にも、ノード数に合ったチェックポイントと 3 bit のバンクが要ります。ほかのバンクは、使いたい幅の分だけダウンロードすれば足ります**（パネルが選ばせるのは、全ノードにそろって
 いる幅です）。4 台なら、4 台用チェックポイントと 3 bit のバンクで、合わせて 622.5 GB です。
-どのノードにも、同じファイルを同じパスに置きます。1 台でダウンロードして、ほかのノードに写します。例:
+どのノードにも、同じファイルを同じパスに置きます。1 台でダウンロードして、ほかのノードに写します（`python3 -m venv` には `python3-venv` パッケージが要ります）。例:
 
 ```sh
 python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
@@ -115,8 +115,8 @@ Fiore-lab のものと形が同じで、同じように読み込まれます。
 
 ## 必要なもの
 
-- 1 つの RoCE v2 ネットワークでつながった DGX Spark（GB10）4 台または 8 台、またはリングでつないだ 4 台。1 台目から全ノードと自分自身へ、パスフレーズのない鍵で ssh できること。スイッチの 4 台なら、各ノードに 100 Gb/s のポートが 1 つあれば足ります。
-- イメージを使う場合: 各ノードに Docker と NVIDIA Container Toolkit（DGX OS には両方あります）と `python3`。起動の前に各ノードで約 115 GiB の空きメモリ。
+- 1 つの RoCE v2 ネットワークでつながった DGX Spark（GB10）4 台または 8 台、またはリングでつないだ 4 台。1 台目から全ノードと自分自身へ、パスフレーズのない鍵で ssh でき、host key も登録してあること。ssh と ConnectX-7 のネットワークの手順は [QUICKSTART](glm53/release/QUICKSTART.ja.md) の 1 章にあります。スイッチの 4 台なら、各ノードに 100 Gb/s のポートが 1 つあれば足ります。
+- イメージを使う場合: 各ノードに NVIDIA ドライバ 580 以降（イメージはホストのドライバを使います）、Docker と NVIDIA Container Toolkit（DGX OS には両方あります）と `python3`。起動の前に各ノードで約 115 GiB の空きメモリ。
 - アーカイブを使う場合: DGX OS（Ubuntu 24.04）、NVIDIA ドライバ 580 以降、cuBLAS 13。全ノードに NCCL 2.30.7（NVIDIA の `nvidia-nccl-cu13` wheel を pip で展開したもの。`packaging/RUNTIME.ja.md`）。
 - アーカイブでは、AArch64 の fence を入れた NCCL を、スイッチでは推奨、リングでは必須とします。NVIDIA の wheel にはありません（[RING](glm53/release/RING.ja.md)）。イメージには入っています。
 - ノード数に合った Fiore-lab の EXL3 チェックポイント（Hugging Face）。全ノードの同じパスに置きます。8 台では [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks)（390 GB）、4 台では [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks)（344.6 GB）です。4 台用のチェックポイントは、層 3〜77 の routed expert のうち使用頻度の低い半分を 3 ビット、残りを 4 ビットで持ち、それ以外は 8 台用のチェックポイントと同じです。

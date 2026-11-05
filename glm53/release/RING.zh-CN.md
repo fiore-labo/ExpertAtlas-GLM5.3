@@ -17,7 +17,7 @@
 ## 连线和地址
 
 - 沿着环，把每个节点的端口 0 连到下一个节点的端口 1。如果改为端口 0 连端口 0、端口 1 连端口 1，NCCL 的 subnet-aware routing 在某些链路上找不到设备（监听方只通告自己设备的地址），连接会失败。
-- 为每条链路的每个 PCIe 半边分配一个 /24（一个 ConnectX-7 端口分为两个半边，`rocep1s0f*` 和 `roceP2p1s0f*`），并设置 `arp_ignore=1`、`arp_announce=2`、`rp_filter=2`。这里使用的示例（环的顺序为 node-0、1、3、2）：
+- 为每条链路的每个 PCIe 半边分配一个 /24（一个 ConnectX-7 端口分为两个半边，`rocep1s0f*` 和 `roceP2p1s0f*`），MTU 设为 9000。DGX OS 已经设置了 `arp_ignore=1`、`arp_announce=2` 和 `rp_filter=2`，无需手动设置。这里使用的示例（环的顺序为 node-0、1、3、2）：
 
 | 链路 | 半边 0 | 半边 1 |
 |---|---|---|
@@ -26,8 +26,36 @@
 | node-0 – node-2 | 172.16.92.0/24 | 172.16.93.0/24 |
 | node-1 – node-3 | 172.16.94.0/24 | 172.16.95.0/24 |
 
+node-0 的地址，其端口 0 连接 node-1，端口 1 连接 node-2；`enp1s0f*` 是半边 0，`enP2p1s0f*` 是半边 1，每个节点使用自己的最后一个数字：
+
+```sh
+sudo tee /etc/netplan/01-cx7.yaml >/dev/null <<'EOF'
+network:
+  version: 2
+  renderer: NetworkManager
+  ethernets:
+    enp1s0f0np0:
+      mtu: 9000
+      addresses: [172.16.88.10/24]
+    enP2p1s0f0np0:
+      mtu: 9000
+      addresses: [172.16.89.10/24]
+    enp1s0f1np1:
+      mtu: 9000
+      addresses: [172.16.92.10/24]
+    enP2p1s0f1np1:
+      mtu: 9000
+      addresses: [172.16.93.10/24]
+EOF
+sudo chmod 600 /etc/netplan/01-cx7.yaml
+sudo netplan apply
+ip -br addr    # 四个半边都是 UP，并且有地址
+rdma link      # 四个半边都是 ACTIVE
+```
+
 - 连线后用 `ib_write_bw` 检查每条链路的两个方向：这里单条流每个半边达到 98 Gb/s；四条链路的两个方向同时运行时，每个半边为 48 至 49 Gb/s，每个节点约发送 194 Gb/s、接收 194 Gb/s。在节点运行时重新插拔的端口一直停留在 5 至 13 Gb/s，直到节点重启。
-- rendezvous 和 ssh 走管理网络（`SOCKET_IFNAME`），因此对面的节点之间不需要链路。
+- rendezvous 和 ssh 走管理网络（`SOCKET_IFNAME`），因此对面的节点之间不需要链路。ssh 的步骤见 `QUICKSTART.zh-CN.md` 第 1 节；在环上使用管理网络的地址。
+- `docker run ... IMAGE up` 和控制面板的节点检查通过 LLDP 沿线缆追踪，因此每个节点都需要 `lldpd`。DGX OS 的更新会安装它。`lldpctl` 显示节点的邻居，缺少时用 `sudo apt install lldpd` 安装。
 
 ## fenced NCCL
 

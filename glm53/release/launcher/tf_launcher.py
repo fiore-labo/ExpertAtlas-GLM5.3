@@ -4003,7 +4003,10 @@ class Servers:
         order.append(head)
         seen[head["addr"]] = 0
         if head["access"] != "ok" or not head["ports"] or not any(p["peer"] for p in head["ports"]):
-            problem(head, "open", "no GB10 neighbour on port 0 or port 1")
+            if head["access"] != "ok":
+                problem(head, head["access"])
+            else:
+                problem(head, "open", "no GB10 neighbour on port 0 or port 1")
             return {"ring": "none", "nodes": [head_addr], "names": [head["name"]], "links": [], "conf_match": False,
                     "problems": problems}
 

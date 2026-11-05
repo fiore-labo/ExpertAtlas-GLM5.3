@@ -43,7 +43,7 @@ containers").
 - NCCL 2.30.7 at the same path on every node (below).
 - `libibverbs.so.1` and one RoCE v2 network between the systems (for four nodes, one 100 Gb/s port a node is enough), or
   four nodes cabled as a ring (`RING.md`); every node, the first included, reachable from the first over ssh without a
-  password at its address in `NODES`.
+  password at its address in `NODES`, its host key already known (`QUICKSTART.md`, section 1).
 - Disk, at the same path on every node (below): the checkpoint, 390 GB (363 GiB) for eight nodes, 344.6 GB (321 GiB)
   for four; and the 3-bit expert bank, 277.9 GB, which every start needs.
 - Eight nodes: 112 GiB of memory available on every node before the start (115 with DFlash2), as `free -g` shows it:

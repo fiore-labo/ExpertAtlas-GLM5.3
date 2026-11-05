@@ -11,20 +11,64 @@
 - **`up` のコンテナ**は準備をするだけで、エンジンが動くと終わります。エンジンとランチャーは動き続けます。
 - **ウェイト**はホストに置きます。イメージには入っていません。
 
-ダッシュボードにも API にもキーはなく、どちらも LAN に開いています。ノードは閉じたネットワークに置いてください。
+ダッシュボードにも API にもキーはなく、どちらも 1 台目のノードの全アドレスで待ち受けます。ノードは閉じたネットワークに置いてください (1 台目だけに絞る方法は 4 章にあります)。
 
 ## 1. ノードに必要なもの
 
 | 項目 | 内容 |
 |---|---|
 | ノード | 1 つの RoCE v2 スイッチにつないだ DGX Spark 4 台または 8 台、またはスイッチなしのリングで 4 台 (`RING.ja.md`)。2 台と 3 台はテスト中です |
-| 各ノードのソフトウェア | Docker と NVIDIA Container Toolkit (DGX OS には両方あります)、`python3` |
-| ssh | 1 台目から全ノードへ、自分自身へも。パスフレーズのない鍵で |
+| 各ノードのソフトウェア | NVIDIA ドライバ 580 以降 (イメージはホストのドライバを使います。`nvidia-smi` で確かめられます)、Docker と NVIDIA Container Toolkit (DGX OS には両方あります)、`python3` |
+| ConnectX-7 のネットワーク | つないだポートの半分ごとにアドレス、MTU 9000 (下記) |
+| ssh | 1 台目から全ノードへ、自分自身へも。パスフレーズのない鍵で、host key を登録しておきます (下記) |
 | Docker の権限 | そのユーザーが全ノードで `docker` を実行できること (`docker` グループ) |
 | メモリ | 起動前に各ノードで約 115 GiB の空き。GPU で他のものが動いていないこと |
-| ディスク | 必須のダウンロード 2 つに、各ノードで 622.5 GB 以上 |
+| ディスク | 必須のダウンロード 2 つに、各ノードで、4 台なら 622.5 GB 以上、8 台なら 667.8 GB 以上 |
 
 リリースのイメージには AArch64 の fence を入れた NCCL が入っていて、スイッチでもリングでもそれを読みます (`RING.ja.md`「fence 入りの NCCL」)。
+
+### ConnectX-7 のネットワーク
+
+ConnectX-7 の 1 ポートは PCIe の半分 2 つで、半分ごとにネットワークデバイスがあり、アドレスも別々です。ポート 0 は `enp1s0f0np0` と `enP2p1s0f0np0`、ポート 1 は `enp1s0f1np1` と `enP2p1s0f1np1` です。半分ごとに別々の /24 と MTU 9000 を設定します。
+
+スイッチでは、全ノードで、つないだポートの半分 2 つにアドレスを付けます。/24 は全ノードで同じ 2 つにし、最後の数字をノードごとに変えます。ポート 1 の場合の、1 台分の例です (アドレスは例です):
+
+```sh
+sudo tee /etc/netplan/01-cx7.yaml >/dev/null <<'EOF'
+network:
+  version: 2
+  renderer: NetworkManager
+  ethernets:
+    enp1s0f1np1:
+      mtu: 9000
+      addresses: [172.16.88.1/24]
+    enP2p1s0f1np1:
+      mtu: 9000
+      addresses: [172.16.89.1/24]
+EOF
+sudo chmod 600 /etc/netplan/01-cx7.yaml
+sudo netplan apply
+ip -br addr    # 半分 2 つが UP で、アドレスが付いている
+rdma link      # 半分 2 つが ACTIVE
+```
+
+リングでは半分 4 つすべてにアドレスを付け、全ノードに `lldpd` も要ります。`RING.ja.md`「配線と番地」にあります。
+
+これに要るカーネルの設定 (`arp_ignore=1`、`arp_announce=2`、`rp_filter=2`) は DGX OS に入っているので、手で設定する必要はありません。
+
+### ssh
+
+ランチャーはパスフレーズのない鍵で接続し、知らない host key を自分では足しません。そのため、1 台目は全ノードの host key を、自分のものも含めて先に知っている必要があります。1 台目で:
+
+```sh
+[ -f ~/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+for a in NODE1 NODE2 NODE3 NODE4; do    # 全ノードのアドレス。1 台目自身も
+  ssh-copy-id -o StrictHostKeyChecking=accept-new "$a"    # パスワードを聞かれます
+  ssh -o BatchMode=yes "$a" true && echo "$a OK"
+done
+```
+
+`NODE1` などには、ランチャーが使うアドレスを書きます。スイッチでは各ノードの ConnectX-7 の `enp1s0f…` の半分のアドレス (上の例の `172.16.88.N`) です。1 台目はこの /24 の ssh のポートを順に試して、他のノードを見つけます。リングでは各ノードの LAN のアドレスです。
 
 ## 2. ウェイトをダウンロードする
 
@@ -33,14 +77,14 @@
 | 種類 | Hugging Face のリポジトリ | 大きさ | 既定のディレクトリ | オプション |
 |---|---|---|---|---|
 | チェックポイント、4 台 (**必須**) | `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks` | 344.6 GB | `~/models/GLM-5.3-EXL3-4x-DGX-Sparks` | `WEIGHTS` |
-| チェックポイント、8 台 (**必須**) | `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks` | | `~/models/GLM-5.3-EXL3-8x-DGX-Sparks` | `WEIGHTS` |
+| チェックポイント、8 台 (**必須**) | `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks` | 389.9 GB | `~/models/GLM-5.3-EXL3-8x-DGX-Sparks` | `WEIGHTS` |
 | 3 ビットのバンク (**必須**) | `fiore-lab/GLM-5.3-EXL3-Experts-3bit` | 277.9 GB | `~/models/GLM-5.3-EXL3-Experts-3bit` | `BANK_3` |
 | 2 ビットのバンク (任意) | `fiore-lab/GLM-5.3-EXL3-Experts-2bit` | 187.3 GB | `~/models/GLM-5.3-EXL3-Experts-2bit` | `BANK_2` |
 | 4 ビットのバンク (任意) | `fiore-lab/GLM-5.3-EXL3-Experts-4bit` | 368.5 GB | `~/models/GLM-5.3-EXL3-Experts-4bit` | `BANK_4` |
 | 5 ビットのバンク (任意) | `fiore-lab/GLM-5.3-EXL3-Experts-5bit` | 459.1 GB | `~/models/GLM-5.3-EXL3-Experts-5bit` | `BANK_5` |
 | DFlash2 (任意、別ライセンス) | `incoai/GLM-5.3-DFlash2` (`RUNTIME.ja.md` の DFlash2 の節) | | なし | `DRAFTER` |
 
-1 回ダウンロードして、他のノードにコピーします。4 台の場合:
+1 回ダウンロードして、他のノードにコピーします。`python3 -m venv` が失敗するときは、`python3-venv` パッケージを入れます。4 台の場合:
 
 ```sh
 python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
@@ -91,7 +135,7 @@ FIX:  ...
 THEN: docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 ```
 
-`FIX` のとおりにしてから、`THEN` の行を実行します。もう一度実行しても問題はありません。動いているエンジンを起動し直すことはありません。
+`FIX` のとおりにしてから、`THEN` の行を実行します。もう一度実行しても問題はありません。動いているエンジンを起動し直すことはありません。`FIX` の行の `hf` は Hugging Face CLI で、2 章の `~/hf-cli/bin/hf` のことです。
 
 ## 4. オプション
 
@@ -145,6 +189,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
 - 指定した値は `~/expertatlas/glm53.conf` に保存され、別の値を指定するまで残ります。`KV_SIZE` と `BITS` はその起動だけに効きます。
 - `TOPOLOGY`、`SOCKET_IFNAME`、`IB_HCA` はオプションではありません。ノード確認が配線から決めます。
 - オプションは動いているエンジンを変えません。先に止めてから実行します。無視したオプションがあれば、そう表示します。
+- API を 1 台目だけに絞るには `-e HOST=127.0.0.1` を足します。ダッシュボードと操作 API の `LAUNCHER_HOST` はオプションではないので、`~/expertatlas/glm53.conf` に `LAUNCHER_HOST=127.0.0.1` と書き、ランチャーを止めて (6 章)、もう一度この行を実行します。
 
 ## 5. 使う
 
@@ -154,6 +199,8 @@ API は OpenAI のチャット形式です。`READY` に出た住所をクライ
 curl -s http://NODE:8000/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"glm-5.3","messages":[{"role":"user","content":"hello"}]}'
 ```
+
+応答の思考は `reasoning_content`、答えは `content` に入ります (ストリームでは `delta.reasoning_content` と `delta.content`)。
 
 ダッシュボード `http://NODE:8010/panel` では、エンジンの状態を見て、起動と停止ができます。AI エージェントは同じことを操作 API でできます。手順は `AGENT-API.ja.md`、システム全体の説明は `AI-GUIDE.ja.md` にあります。
 
@@ -175,9 +222,12 @@ cd ~/expertatlas
 | `this container cannot ssh to the host` | パスフレーズのない鍵を作り、自分の `authorized_keys` に足します。コマンドはメッセージにあります |
 | `IMAGE is not on NODE and docker pull failed` | メッセージの `docker save \| ssh NODE docker load` の行でコピーします |
 | `3 bit (always needed)`、`checkpoint (always needed)` | ダウンロードするか (2 章)、`BANK_3` や `WEIGHTS` でディレクトリを指定します |
+| `no other node answers over ConnectX-7` | ケーブルとアドレスを確かめます (1 章) |
+| `its host key is not known here`、`it refuses this node's ssh key` | そのアドレスについて 1 章の ssh の手順を行います |
 | `N free worker nodes found` | `-e NODES="ADDR ADDR ADDR"` で選びます |
+| `the ring is none` | 全ノードに `lldpd` が要ります (1 章)。ケーブルと ssh も確かめます |
 | `port N answers another lane's launcher` | そのランチャーを止めるか、`-e PORT=N` を足します |
 | `does not fit with context length N` | `CONTEXT_LENGTH` を小さく、`BITS` を狭くするか、ノードのメモリを空けます |
 | `not an option` | 綴りを確かめます。近い名前をメッセージが示します |
 
-詳しくは `BEFORE-START.ja.md` (起動前に決めること)、`RUNTIME.ja.md` (全コマンドと障害)、`T4.ja.md` (4 台と実測)、`RING.ja.md` (リング)、`CONFIG.ja.md` (全設定) にあります。
+詳しくは `BEFORE-START.ja.md` (起動前に決めること)、`RUNTIME.ja.md` (全コマンドと障害)、`T4.ja.md` (4 台と実測)、`RING.ja.md` (リング)、`CONFIG.ja.md` (全設定) にあります。ソースのリポジトリでは、`RUNTIME.ja.md` は `packaging/RUNTIME.ja.md` に、ほかのページは `glm53/release/` にあります。

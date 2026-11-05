@@ -21,7 +21,7 @@ It writes the release to `~/expertatlas`, starts the launcher on the host, and g
 - A line that begins with `READY` means the engine has started. The lines after it give the addresses of the dashboard and the API.
 - `STOP` gives the reason it stopped. `FIX` says how to fix it, and `THEN` gives the 1 line to run again. Fix it, then run the `THEN` line as it is. The launcher stays up, so the API on this page works too.
 - Every start setting can be given as `-e NAME=VALUE`: `WEIGHTS`, `BANK_2` to `BANK_5`, `DRAFTER`, `BITS`, `ALLOC`, `NODES`, `PORT`, `LAUNCHER_PORT`, `EA_DIR`, `IMAGE` and the engine settings of section 4 (`TOPOLOGY`, `SOCKET_IFNAME` and `IB_HCA` cannot be given, since the node check decides them). A name it does not know ends in `STOP`. The list is in `QUICKSTART.md`.
-- What the host needs: Docker and the NVIDIA container toolkit, `python3`, and ssh without a password between all the nodes and to itself.
+- What the host needs: the NVIDIA driver 580 or later, Docker and the NVIDIA container toolkit, `python3`, addresses on the ConnectX-7 network, and ssh without a password between all the nodes and to itself, with their host keys known (`QUICKSTART.md`, section 1).
 - The release's image holds NCCL with the AArch64 fence, for a switch and a ring (`RING.md`).
 - If the engine already runs, it starts nothing, sends 1 inference request and prints `READY`.
 

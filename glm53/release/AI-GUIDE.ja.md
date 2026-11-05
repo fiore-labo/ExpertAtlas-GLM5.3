@@ -72,7 +72,7 @@
 
 ### 1 行で動かす（AI から操作する場合のおすすめ）
 
-1 台目のノードで、動かすユーザーとして実行します（全ノードの間でパスワードなしの ssh が通り、イメージがノードにあるか pull できること）。
+1 台目のノードで、動かすユーザーとして実行します（全ノードの間でパスワードなしの ssh が通り、host key を登録してあり (`QUICKSTART.ja.md` の 1 章)、イメージがノードにあるか pull できること）。
 
 ```sh
 docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
@@ -86,7 +86,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 
 ### 準備（共通）
 
-1. 全ノード: DGX OS（Ubuntu 24.04）、NVIDIA ドライバ 580 以降、cuBLAS 13（`libcublas-13-0`）、`libibverbs`。ノードは 1 つの RoCE v2 ネットワークにつなぎ、1 台目から全ノードにパスワードなしの ssh が通ること。
+1. 全ノード: DGX OS（Ubuntu 24.04）、NVIDIA ドライバ 580 以降、cuBLAS 13（`libcublas-13-0`）、`libibverbs`。ノードは 1 つの RoCE v2 ネットワークにつなぎ、1 台目から全ノードにパスワードなしの ssh が通り、host key を登録してあること (`QUICKSTART.ja.md` の 1 章)。
 2. 全ノードに NCCL 2.30.7: `pip3 install --no-deps --target ~/nccl-2.30.7 nvidia-nccl-cu13==2.30.7`（pip はライブラリを展開するだけで、Python は何も実行しません）。スイッチではこれで動きますが、AArch64 の fence を入れたビルドを推奨します。リングではそのビルドが必須です（`RING.ja.md`）。
 3. チェックポイントを全ノードの同じパスに: `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`（390 GB、8 台）または `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`（344.6 GB、4 台）。Hugging Face の CLI で 1 回ダウンロードし、`rsync` で他のノードにコピーし、`./tf-glm53 verify` で確認します。チェックポイントは公式の BF16 チェックポイントから作ることもできます（2 節、`glm53/weights/`）。
 4. 1 台目のノードでアーカイブを展開し、`sha256sum -c SHA256SUMS`、合う方の設定例を `glm53.conf` にコピーして、`NODES`、`SOCKET_IFNAME`、`IB_HCA`、`NCCL_LIB`、`WEIGHTS` を設定します。

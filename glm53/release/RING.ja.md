@@ -27,8 +27,8 @@ TensorFold 1.0.2 から Fiore-lab が作った非公式の派生版で、TensorF
   NCCL の subnet-aware routing が一部の線でデバイスを見つけられず (待ち受け側は自分のデバイスの番地だけを知らせる)、
   接続に失敗します。
 - 線ごと・PCIe の半分ごとに /24 を 1 つ割り当て (ConnectX-7 の 1 ポートは `rocep1s0f*` と `roceP2p1s0f*` の
-  半分 2 つ)、`arp_ignore=1`、`arp_announce=2`、`rp_filter=2` を設定します。ここで使った例 (リングの順は node-0、
-  1、3、2):
+  半分 2 つ)、MTU は 9000 にします。`arp_ignore=1`、`arp_announce=2`、`rp_filter=2` は DGX OS に入っているので、手で設定する必要はありません。
+  ここで使った例 (リングの順は node-0、1、3、2):
 
 | 線 | 半分 0 | 半分 1 |
 |---|---|---|
@@ -37,10 +37,38 @@ TensorFold 1.0.2 から Fiore-lab が作った非公式の派生版で、TensorF
 | node-0 – node-2 | 172.16.92.0/24 | 172.16.93.0/24 |
 | node-1 – node-3 | 172.16.94.0/24 | 172.16.95.0/24 |
 
+node-0 のアドレスです。ポート 0 は node-1 に、ポート 1 は node-2 につないであります。`enp1s0f*` が半分 0、`enP2p1s0f*` が半分 1 で、最後の数字はノードごとに変えます:
+
+```sh
+sudo tee /etc/netplan/01-cx7.yaml >/dev/null <<'EOF'
+network:
+  version: 2
+  renderer: NetworkManager
+  ethernets:
+    enp1s0f0np0:
+      mtu: 9000
+      addresses: [172.16.88.10/24]
+    enP2p1s0f0np0:
+      mtu: 9000
+      addresses: [172.16.89.10/24]
+    enp1s0f1np1:
+      mtu: 9000
+      addresses: [172.16.92.10/24]
+    enP2p1s0f1np1:
+      mtu: 9000
+      addresses: [172.16.93.10/24]
+EOF
+sudo chmod 600 /etc/netplan/01-cx7.yaml
+sudo netplan apply
+ip -br addr    # 半分 4 つが UP で、アドレスが付いている
+rdma link      # 半分 4 つが ACTIVE
+```
+
 - 配線のあとは、全部の線を両方の向きで `ib_write_bw` で確かめます。ここでは 1 本の流れで半分あたり 98 Gb/s、
   4 本の線の両方の向きを同時に流して半分あたり 48〜49 Gb/s、各ノードが約 194 Gb/s 送りながら 194 Gb/s 受けました。
   動いている間に抜き差ししたポートは 5〜13 Gb/s のままで、ノードを再起動すると戻りました。
-- 待ち合わせと ssh は管理ネットワーク (`SOCKET_IFNAME`) を通るので、向かいのノードどうしに線は要りません。
+- 待ち合わせと ssh は管理ネットワーク (`SOCKET_IFNAME`) を通るので、向かいのノードどうしに線は要りません。ssh の手順は `QUICKSTART.ja.md` の 1 章にあります。リングでは管理ネットワークのアドレスを使います。
+- `docker run ... IMAGE up` とコントロールパネルのノード確認は、LLDP で線をたどるので、全ノードに `lldpd` が要ります。DGX OS の更新で入ります。`lldpctl` でノードの隣が見え、無いときは `sudo apt install lldpd` で入れます。
 
 ## fence 入りの NCCL
 
