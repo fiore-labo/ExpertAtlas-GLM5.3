@@ -64,7 +64,7 @@ ticks first, then press. For `docker run ... IMAGE up`, give your own to the sta
   (N = 2, 3, 4, 5), each in its own directory on every node, by default `~/models/GLM-5.3-EXL3-Experts-<N>bit`, with
   its manifest. A width whose bank is missing on any node shows No data with the node and what it lacks. It cannot be
   planned: its row in the table shows No data and takes no share.
-- **Memory** ([ NODE ]): each node's memory for the plan (expert, Other weights, KV, Work, Margin) and the verdict:
+- **Memory** ([ NODE ]): each node's memory for the plan (expert, Other weights, KV, Work, free) and the verdict:
   Can start, Can start (little room) or Not enough memory. KV FP4 / FP8 shows the KV size each format would allocate (tokens, and GiB a node); press
   one to choose it. By default the KV takes all the room the plan leaves: Context length for one conversation, the rest for
   earlier conversations.
