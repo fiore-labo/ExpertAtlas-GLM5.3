@@ -91,7 +91,9 @@ NCCL_SHA256=<its sha256>
 
 `./tf-glm53 check` 会确认环：节点按环的顺序排列，每条链路两个子网，不与对面节点共享子网，每个设备都有 IPv4 RoCE v2 地址。它拒绝会直接连到对面节点的设置。
 
-用 `TOPOLOGY=auto` 代替 `ring4` 时，每次 `check` 和启动都会判定连线（`./tf-glm53 topology` 或 `--json` 显示判定结果）：连成环的四个节点取 `ring4`，NODES 排成环的顺序（rank 0 不变），`IB_HCA` 使用四个 RDMA 设备，`SOCKET_IFNAME` 使用 rank 0 地址所在的接口，因此这两项可以不写。相同设置接在交换机上时取 `full`。两者都不是的连线（线缆拔出、一个半边断开、一个节点的两根线缆接反、一对对面节点在同一个 /24 上）会被拒绝，并指出要修正的地方，不会自动退回到别的方式。
+用 `TOPOLOGY=auto` 代替 `ring4` 时，每次 `check` 和 `./tf-glm53 up` 都会判定连线（`./tf-glm53 topology` 或 `--json` 显示判定结果）：连成环的四个节点取 `ring4`，NODES 排成环的顺序（rank 0 不变），`IB_HCA` 使用四个 RDMA 设备，`SOCKET_IFNAME` 使用 rank 0 地址所在的接口，因此这两项可以不写。相同设置接在交换机上时取 `full`。两者都不是的连线（线缆拔出、一个半边断开、一个节点的两根线缆接反、一对对面节点在同一个 /24 上）会被拒绝，并指出要修正的地方，不会自动退回到别的方式。
+
+**已知缺陷：** 使用 `TOPOLOGY=auto`、不写 `IB_HCA` 和 `SOCKET_IFNAME` 且尚无判定结果时，如果首次启动使用 `./tf-glm53 start` 或 `engine-up`，会以 `NG: auto RoCE-v2-GID(gid=)` 停止：这两个命令不做判定，`check` 判定但不保存，只有 `./tf-glm53 up` 保存判定结果。请先运行 `./tf-glm53 up`。写了这两项就不会出现这个 `NG`，但没有判定结果时会按 `full` 启动，这在环上无法使用。`docker run ... IMAGE up` 以及 `TOPOLOGY=full`、`ring4` 不受影响。
 
 ## 速度
 
@@ -127,4 +129,3 @@ NCCL_SHA256=<its sha256>
 
 - 故障：在其余部分运行时停止一个节点、一根线缆或一个中继。
 - 负载下的长时间运行（数小时）。
-- 使用 `TOPOLOGY=auto` 的启动（其判定和 `check` 在环和交换机上都能通过）。

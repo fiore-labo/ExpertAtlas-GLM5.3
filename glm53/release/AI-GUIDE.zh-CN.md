@@ -103,7 +103,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 | 设置 | 含义 | 八节点示例 / 四节点示例 |
 |---|---|---|
 | `NODES` | 节点在 RoCE 网络上的地址，rank 0 在最前（环：在管理网络上） | 8 个 / 4 个地址 |
-| `TOPOLOGY` | `full`（交换机）、`ring4` 或 `auto`（每次检查和启动时根据连线判定） | `full` |
+| `TOPOLOGY` | `full`（交换机）、`ring4` 或 `auto`（每次 `check` 和 `./tf-glm53 up` 时根据连线判定；已知缺陷见 `CONFIG.zh-CN.md`） | `full` |
 | `SOCKET_IFNAME`、`IB_HCA`、`GID_INDEX` | 每个节点上该网络的接口和 RDMA 设备；GID 索引（空：自动选择） | 相同 |
 | `NCCL_LIB` | NCCL 2.30.7 的 `libnccl.so.2`，每个节点上路径相同 | 相同 |
 | `WEIGHTS` | 检查点的目录，每个节点上路径相同 | 8x / 4x 检查点 |

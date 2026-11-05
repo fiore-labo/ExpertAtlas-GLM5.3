@@ -33,7 +33,7 @@
 | `NODES` | （必需） | 按 rank 顺序、以 RDMA 网络地址列出的节点，写成 shell 数组：`NODES=(192.0.2.11 192.0.2.12 192.0.2.13 192.0.2.14)`。四个或八个（两个和三个正在测试中）。在第一个节点上运行 `tf-glm53`。每个节点都能通过无密码 ssh 登录其他节点。控制面板的节点检查把节点登记到 `glm53.nodes.conf` 而不是这里，它优先于本项和后面三项。 |
 | `SOCKET_IFNAME` | （必需） | 每个节点上该网络的网络接口（`ip -br addr`），例如 `enp1s0f1np1`。 |
 | `IB_HCA` | （必需） | 该接口的 RDMA 设备（`ibv_devices`），例如 `rocep1s0f1`。 |
-| `TOPOLOGY` | `full` | 节点的连接方式。`full`：交换机，或一根线直连。`ring4`：不经交换机连成环的 4 个节点，NODES 按环的顺序（RING.md）。`auto`：每次 `check` 和启动时，根据各节点的 RDMA 设备和 LLDP 邻居判定（`tf-glm53 topology` 显示判定结果）：环取 `ring4`，并把 NODES 排成环的顺序（rank 0 不变）；交换机或一根线取 `full`。此时 `IB_HCA` 和 `SOCKET_IFNAME` 使用判定的结果，可以不写（`IB_HCA` 只用于选择交换机上的哪一半）。两者都不是的连接方式会被拒绝，并指出要修正的地方，不会自动退回到别的方式。 |
+| `TOPOLOGY` | `full` | 节点的连接方式。`full`：交换机，或一根线直连。`ring4`：不经交换机连成环的 4 个节点，NODES 按环的顺序（RING.md）。`auto`：每次 `check` 和 `./tf-glm53 up` 时，根据各节点的 RDMA 设备和 LLDP 邻居判定（`tf-glm53 topology` 显示判定结果）：环取 `ring4`，并把 NODES 排成环的顺序（rank 0 不变）；交换机或一根线取 `full`。此时 `IB_HCA` 和 `SOCKET_IFNAME` 使用判定的结果，可以不写（`IB_HCA` 只用于选择交换机上的哪一半）。两者都不是的连接方式会被拒绝，并指出要修正的地方，不会自动退回到别的方式。**已知缺陷：** 使用 `TOPOLOGY=auto`、不写 `IB_HCA` 和 `SOCKET_IFNAME` 且尚无判定结果时，如果首次启动使用 `./tf-glm53 start` 或 `engine-up`，会以 `NG: auto RoCE-v2-GID(gid=)` 停止：这两个命令不做判定，`check` 判定但不保存，只有 `./tf-glm53 up` 保存判定结果。请先运行 `./tf-glm53 up`。写了这两项就不会出现这个 `NG`，但没有判定结果时会按 `full` 启动，这在环上无法使用。`docker run ... IMAGE up` 以及 `TOPOLOGY=full`、`ring4` 不受影响。 |
 | `GID_INDEX` | 空 | RoCE v2 的 GID 索引。为空时在每个节点上自动查找（带 IPv4 地址的最后一个 RoCE v2 条目）。 |
 | `MASTER_PORT` | `29551` | 第一个节点用于 NCCL rendezvous 的端口。 |
 

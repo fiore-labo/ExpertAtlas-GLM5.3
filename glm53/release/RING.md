@@ -124,11 +124,13 @@ When `docker run ... IMAGE up` cannot find the ring, write the four lines `TOPOL
 `./tf-glm53 check` confirms the ring: the nodes in ring order, two subnets a link, no subnet shared with the opposite
 node, every device with an IPv4 RoCE v2 address. It refuses settings that would reach the opposite node directly.
 
-`TOPOLOGY=auto` in place of `ring4` judges the cabling at each `check` and start (`./tf-glm53 topology`, or `--json`,
+`TOPOLOGY=auto` in place of `ring4` judges the cabling at each `check` and `./tf-glm53 up` (`./tf-glm53 topology`, or `--json`,
 shows the judgment): four nodes cabled as a ring take `ring4`, NODES put in ring order (rank 0 kept), the four RDMA
 devices in `IB_HCA` and the interface of rank 0's address in `SOCKET_IFNAME`, so those two may be left out. The same
 settings on a switch take `full`. A cabling that is neither (a cable out, a lane down, a node's two cables swapped,
 an opposite pair on one /24) is refused with what to fix; nothing falls back.
+
+**Known bug:** with `TOPOLOGY=auto`, `IB_HCA` and `SOCKET_IFNAME` left out and nothing judged yet, a first start with `./tf-glm53 start` or `engine-up` stops with `NG: auto RoCE-v2-GID(gid=)`: those commands do not judge, `check` judges without saving, and only `./tf-glm53 up` saves the judgment. Run `./tf-glm53 up` first. With those two written there is no such `NG`, but with nothing judged the start takes `full`, which does not work on a ring. `docker run ... IMAGE up` and `TOPOLOGY=full` or `ring4` are not affected.
 
 ## Speed
 
@@ -174,4 +176,3 @@ runs used reduce-scatter.
 
 - Failures: a node, a cable or a relay stopped while the others run.
 - Long runs (hours) under load.
-- A start with `TOPOLOGY=auto` (its judgment and `check` pass on the ring and on a switch).

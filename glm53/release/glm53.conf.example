@@ -15,7 +15,7 @@ IB_HCA=rocep1s0f1
 # carries the rendezvous: SOCKET_IFNAME), the four RDMA devices in IB_HCA, and NCCL 2.30.7 with the AArch64 send fence
 # (NVIDIA/nccl#2393) in NCCL_LIB (its sha256 in NCCL_SHA256; RUNTIME=host) or in the image (RUNTIME=docker, RING.md). check confirms the order and the crossing
 # (a link is one node's port 0 and the next node's port 1, two subnets, none to the opposite node).
-# TOPOLOGY=auto judges the cabling at each check and start instead (`tf-glm53 topology` shows it): a ring takes ring4
+# TOPOLOGY=auto judges the cabling at each check and tf-glm53 up instead (`tf-glm53 topology` shows it; a known bug in CONFIG.md): a ring takes ring4
 # with NODES in ring order, IB_HCA and SOCKET_IFNAME found; a switch takes full. Anything else is refused (CONFIG.md).
 #TOPOLOGY=ring4
 #NODES=(192.0.2.10 192.0.2.11 192.0.2.13 192.0.2.12)
