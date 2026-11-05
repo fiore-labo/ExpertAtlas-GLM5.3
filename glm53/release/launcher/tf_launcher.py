@@ -1331,22 +1331,31 @@ class Launcher:
     def start_settings(self):
         return {"rows": self.rows, "sp_parts": self.sp_parts, "draft_saves": self.draft_saves}
 
-    def settings_extra(self, drafter):
-        """What this conf's ROWS and DRAFT_SAVES hold on a node beyond DEFAULTS. A lower value is not taken off: it only
+    def settings_extra(self, drafter, now):
+        """What ROWS and DRAFT_SAVES (`now`) hold on a node beyond DEFAULTS. A lower value is not taken off: it only
         leaves memory over, and the next start measures it."""
-        more = max(0, self.rows - DEFAULT_ROWS.get(self.world, 8192)) * ROW_BYTES
+        more = max(0, now["rows"] - DEFAULT_ROWS.get(self.world, 8192)) * ROW_BYTES
         if drafter == "dflash2":
-            more += max(0, self.draft_saves - DEFAULT_DRAFT_SAVES) * DRAFT_SAVE_BYTES
+            more += max(0, now["draft_saves"] - DEFAULT_DRAFT_SAVES) * DRAFT_SAVE_BYTES
         return more
 
-    def work_slope(self, last):
+    @staticmethod
+    def settings_of(body):
+        """A plan body's rows, sp_parts and draft_saves: up judges its options before it saves them."""
+        try:
+            j = json.loads(body or b"{}")
+            return {k: int(j[k]) for k in START_SETTINGS if isinstance(j, dict) and k in j}
+        except (ValueError, TypeError):
+            raise Fail("rows, sp_parts and draft_saves: integers")
+
+    def work_slope(self, last, now=None):
         """The work a position more (bytes; the steepest node's) between the fewest and the most positions of the
         measured starts with this drafter (the record's history), when they are at least 65,536 apart, and the positions
         the record's own start had: (0, p0) until two starts say so (10-28, DFlash2 on the ring: 15.5 GiB at
         426K positions, 16.99 at 557K, 17.3 at 606K)."""
         kv = (last or {}).get("kv") or {}
         p0 = int(kv.get("context") or 0) + int(kv.get("store") or 0)
-        now = self.start_settings()
+        now = now or self.start_settings()
         hist = [h for h in (last or {}).get("history") or [] if h.get("positions") and all(h.get(k) == v for k, v in now.items())]
         if len(hist) < 2:
             return 0, p0
@@ -1453,13 +1462,13 @@ class Launcher:
                 "why": {str(n): w for n in range(1, MULTI_MAX + 1) if (w := self.multi_lane_why(n))}, "why_drafter": why_drafter,
                 "running": int(ran.get("n", 0)), "wait": int(ran.get("wait", self.multi_wait_conf))}
 
-    def plan(self, bits, nodes=None, kv=None, drafter=None, context=None, store=None, reserve_gib=None, multi=None, multi_wait=None):
+    def plan(self, bits, nodes=None, kv=None, drafter=None, context=None, store=None, reserve_gib=None, multi=None, multi_wait=None, settings=None):
         """The plan of a start with `bits`, the KV format `kv` and the drafter `drafter` (CONF's when None): each node's
         memory with the KV caches the format's context and store take, the verdict, and both formats' positions (the
         launch screen picks one). `context`: the context asked (CONF's when None), cut when it does not fit; `store`: the
         store asked (CONF's when None, "max": the rest); `reserve_gib`: what a node keeps for the OS (CONF's when None);
         `multi`, `multi_wait`: the conversations decoded together and their wait (CONF's when None), whose memory
-        (multi_bytes) a node holds before the KV."""
+        (multi_bytes) a node holds before the KV; `settings`: rows, sp_parts, draft_saves in place of CONF's."""
         fmt = kv or self.kv_format
         drafter = drafter or self.drafter_conf
         mn = self.multi_conf if multi is None else multi
@@ -1467,19 +1476,20 @@ class Launcher:
         m_idle, m_load, m_est = self.multi_bytes(mn, drafter)
         m_why = self.multi_why(mn, drafter)
         default = defaults(self.world, drafter)
-        default = dict(default, work=default["work"] + self.settings_extra(drafter))
+        now = dict(self.start_settings(), **(settings or {}))
+        default = dict(default, work=default["work"] + self.settings_extra(drafter, now))
         reserve = int(reserve_gib * GiB) if reserve_gib is not None else self.reserve
         nodes = nodes or self.node_info or self.probe_all()
         last = self.last_start(drafter)
         # a start measured with another ROWS, SP_PARTS or DRAFT_SAVES (or before they were recorded) held other buffers:
         # the estimate, not its sizes
-        if last is not None and any(last.get(k) != v for k, v in self.start_settings().items()):
+        if last is not None and any(last.get(k) != v for k, v in now.items()):
             last = None
         # the store taking the rest on an estimate keeps ESTIMATE_SLACK more (the sizes not yet measured)
         slack = (ESTIMATE_SLACK if last is None or last.get("world") != self.world else MEASURED_SLACK) if store == "max" else 0
         estimate = last is None or last.get("world") != self.world
         # the work grows with the positions (measured at two contexts at least): taken in by the positions a format holds
-        slope, p0 = self.work_slope(last) if not estimate else (0, 0)
+        slope, p0 = self.work_slope(last, now) if not estimate else (0, 0)
         ex = experts_bytes(bits, self.world)
         with self.lock:
             busy = self.engine_up or self.st["state"] in ("starting", "running", "stopping")
@@ -4393,8 +4403,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(*Lr.begin_check(self.body()))
             if method == "POST" and path == "/v1/launch/plan":
                 Lr.conf_refresh()
-                bits, _, o = Lr.bits_of(self.body())
-                return self.send_json(200, Lr.plan(bits, **o))
+                body = self.body()
+                bits, _, o = Lr.bits_of(body)
+                return self.send_json(200, Lr.plan(bits, settings=Lr.settings_of(body), **o))
             if method == "POST" and path == "/v1/launch/start":
                 err, raw, take = Lr.start_take(self.body())
                 if err:

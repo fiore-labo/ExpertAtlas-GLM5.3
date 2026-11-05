@@ -4,7 +4,7 @@
 
 使用 `docker run ... IMAGE up` 时，引擎设置中的项目可以用 `-e 项目=值` 指定（`QUICKSTART.zh-CN.md`）。以下项目会以 `not an option` 停止，请写入 `~/expertatlas/glm53.conf`：`GID_INDEX`、`RUNTIME`、`NCCL_LIB`、`EXPERT_LIVE`、`LOG_LISTEN`、`CONTEXT`、`STORE`、`THINKING_FOLD_KEEP`、`NEED_GB`、`LAUNCHER_HOST`、`ATLAS_DIR`、`LAUNCH_SNAPSHOTS`。`TOPOLOGY`、`SOCKET_IFNAME` 和 `IB_HCA` 由节点检查决定。
 
-下面的默认值是 `tf-glm53` 的默认值。无论节点数多少，`docker run ... IMAGE up` 都根据 `glm53.t4.conf.example` 写入 `glm53.conf`，所以初始值为 `CONTEXT_LENGTH` 737280、`KV_SIZE` 837280、`KV` fp4、`ROWS` 16384、`NEED_GB` 133，启动时的 KV 大小为 `max`。
+下面的默认值是 `tf-glm53` 的默认值。无论节点数多少，`docker run ... IMAGE up` 都根据 `glm53.t4.conf.example` 写入 `glm53.conf`，所以初始值为 `CONTEXT_LENGTH` 737280、`KV_SIZE` 837280、`KV` fp4、`NEED_GB` 133，启动时的 KV 大小为 `max`。
 
 `glm53.conf` 保存一条通道（lane）的设置：节点、网络、权重、草稿模型、服务器、内存和控制面板。它是一个普通的 shell 文件，由你手工编写和编辑，放在第一个节点上 `tf-glm53` 所在的目录中。请从 `glm53.t4.conf.example`（四节点）或 `glm53.conf.example`（八节点）开始：复制为 `glm53.conf`，填写节点、网络设备和路径；其余项目在示例中已是实测值。
 
@@ -81,8 +81,8 @@
 | `MULTI_DECODE_SHARE` | `30` | 设置了 `MULTI` 时：在正在 decode 的对话旁有 prompt 等待或正在计算期间，GPU 时间中分给 decode 的百分比。`0` 让 prompt 优先（prefill 中途不插入 decode 轮次，排队的请求连续接收）；`100` 让 decode 优先（只要有对话在 decode，prompt 就等待，已在运行的 prefill 也暂停到这些对话结束；短 prompt 仍可通过，见 `MULTI_SHORT_PROMPT`）；中间的值由引擎测量两者的时间并保持该比例。只有一种工作时，它使用整个 GPU。这是启动时的值：运行中可用 `POST /v1/schedule {"decode_share": N}`（需 API 密钥，或来自首节点的客户端）修改，正在运行的 prefill 也会在几层之内生效；`GET /v1/schedule` 与 `/health`（`multi.decode_share`、`multi.measured`）可查看。因比例而等待不受 `MULTI_WAIT` 限制（`MULTI_WAIT` 是等待空间的时间）。 |
 | `MULTI_SHORT_PROMPT` | `8192` | 设置了 `MULTI` 时：需要计算的 token（会话缓存可复用部分之后的部分，因此长对话的下一轮只计新增部分）不超过此值的 prompt 视为短 prompt：它排在等待中的较长 prompt 之前，不受 `MULTI_DECODE_SHARE` 阻挡，其 prefill 不插入 decode 轮次一直运行到结束（无论比例如何，此期间 GPU 归该 prompt；正在 decode 的对话在此期间等待；四节点上 8,192 个 token 约 7 秒）。除非 `MULTI_SHORT_PREEMPT=1`，它会等待已在运行的 prefill 结束。`0` 表示没有短 prompt（队列保持原顺序）。这是启动时的值：运行中可用 `POST /v1/schedule {"short_prompt": N}` 修改，从下一次接收起生效；`GET /v1/schedule` 与 `/health`（`multi.short_prompt`）可查看。 |
 | `MULTI_SHORT_PREEMPT` | `0` | 设置了 `MULTI` 与 `MULTI_SHORT_PROMPT` 时：`1` 让已在运行的较长 prefill 也让给等待中的短 prompt，在下一个为 decode 暂停之处（若没有其他对话在 decode，则在下一个分块）。已完成的分块留在缓存中，流保持打开，之后从那里继续；在暂停处放弃的分块需重新计算（最多一个分块：四节点、比例 30 时长 prompt 约慢 14 秒），每次继续后要先完成一个分块才会再次让出。`0`（默认）：短 prompt 等待正在运行的 prefill 结束。运行中可用 `POST /v1/schedule {"short_preempt": true}` 修改；`GET /v1/schedule` 与 `/health`（`multi.short_preempt`）可查看。 |
-| `ROWS` | `8192` | 提示分块的行数（四节点示例中为 `16384`）。 |
-| `SP_PARTS` | `4` | 一个提示分块被拆分成的序列并行部分数。 |
+| `ROWS` | `8192` | 提示分块的行数：256 至 65,536，步长 256。增大它会占用更多内存（每 1,024 行每个节点约 0.41 GiB，在四个节点上测得）。启动计划会从 KV 中扣除这部分，因此 KV 会变小。 |
+| `SP_PARTS` | `4` | 一个提示分块被拆分成的序列并行部分数：2 至 4。 |
 | `ROCE_PROXY_CORES` | `a725` | RoCE 代理线程（每个 rank 两个：节点间的和 DCP 对的）轮询所在的核。它们在 decode 期间一直自旋。`a725` 固定在 GB10 的 Cortex-A725 核 0 和 10（每个簇一个）；`os` 交给调度器（常落在 X925 上）。四节点上 A725 比调度器的选择使 SoC 低 5-16 °C，decode 速度相同。没有该类核的 CPU 上交给调度器。引擎日志会写出每个代理在哪里轮询；`/health` 的 `roce` 显示每个 rank 的（rank 0 的为当前值）。 |
 | `MAX_TOKENS_SHARE` | `70` | 请求未指定 max_tokens 时回复的 max_tokens，以 `CONTEXT_LENGTH` 的百分比（1 至 100）指定。客户端的 `max_tokens` 优先。 |
 | `MAX_TOKENS` | （空） | 以 token 数指定同一项。有值时优先于 `MAX_TOKENS_SHARE`；在仪表板中保存 `MAX_TOKENS_SHARE` 时会清空。既无中途整理也无预算将尽时的整理时，请求超过上下文剩余量会被拒绝（400）。开启中途整理时，引擎会让间隔适应剩余空间；请求自行指定 `thinking_fold_window` 且放不下时会被拒绝（400）。 |

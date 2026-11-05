@@ -28,7 +28,7 @@
 - `libibverbs.so.1`，以及连接各系统的同一个 RoCE v2 网络（四个节点时，每个节点一个 100 Gb/s 端口即可），或连成环的四个节点（`RING.zh-CN.md`）；每个节点（包括第一台本身）都能从第一台通过其在 `NODES` 中的地址以 ssh 免密码访问，并已登记其 host key（`QUICKSTART.zh-CN.md` 第 1 节）。
 - 磁盘空间，在每个节点上放在相同路径下（见下文）：检查点，八个节点为 390 GB（363 GiB），四个节点为 344.6 GB（321 GiB）；以及每次启动都需要的 3 bit 专家 bank，277.9 GB。
 - 八个节点：启动前每个节点需有 112 GiB 可用内存（使用 DFlash2 时为 115），以 `free -g` 的显示为准：当 `CONTEXT_LENGTH` 为 819,200、`KV_SIZE` 为 1,638,400 时，各 rank 约使用 108 GiB（使用 DFlash2 时为 111）。`KV_SIZE` 每减少 100,000 个 token，所需内存减少 2.7 GiB。可用内存不足的节点会被 `tf-glm53 check` 拒绝。使用 4 bit KV 缓存（`KV=fp4`）时，八个节点可将 `CONTEXT_LENGTH` 设为 1,048,576、`KV_SIZE` 设为 2,097,152，各 rank 约使用 94 GiB（用 1,018,993 个 token 的提示词实测）；`tf-glm53 check` 的估算按 8 bit 缓存计算，因此这时请设置 `NEED_GB=100`。
-- 四个节点：内存按只运行本服务器来分配（见 `T4.zh-CN.md`）；使用 DFlash2 时测得的最低可用内存为每个节点约 3.2 GiB（512K 时）。
+- 四个节点：内存按只运行本服务器来分配（见 `T4.zh-CN.md`）；使用 DFlash2 时测得的最低可用内存为每个节点约 3.2 GiB（512K 时，`ROWS` 为 16,384；现在默认为 8,192）。
 - 每个节点上的 `python3`，供日志保管进程使用，归档和镜像都需要（DGX OS 自带）。
 - 其他位宽：所用专家 bank 的磁盘空间（见下文“控制面板”）。
 - 在容器中运行时（见“在容器中运行”）：每个节点需要 Docker 和 NVIDIA Container Toolkit，而不是 cuBLAS、libibverbs 和 NCCL。
@@ -90,7 +90,7 @@ cp glm53.conf.example glm53.conf    # nodes, network names, NCCL, weights, draft
 | `CONTEXT_LENGTH` | 819200 | 737280 |
 | `KV_SIZE` | 1638400 | 837280 |
 | `DCP` | 2 | 2 |
-| `ROWS` / `SP_PARTS` | 8192 / 4（默认） | 16384 / 4 |
+| `ROWS` / `SP_PARTS` | 8192 / 4（默认） | 8192 / 4（默认） |
 
 `KV` 是 KV 缓存的格式：FP8 或 4 bit。`DCP` 是解码上下文并行，`ROWS` 和 `SP_PARTS` 分别是提示词分块的行数和每块拆分成的序列并行段数。`CONTEXT_LENGTH` 和 `KV_SIZE` 见下文“请求之间保留的对话”。以上是两个示例中的取值；四节点取值的说明见 `T4.zh-CN.md`。
 
@@ -296,7 +296,7 @@ ENDPOINT=http://FIRST-NODE:8000 ./claude-glm53      # 后面可以接 Claude Cod
 
 ## 速度
 
-**测量使用发布版本 r2-102，每个节点的 GPU 时钟上限均设为 2.1 GHz（2,100 MHz）。** 引擎此后已有变化，这些数字尚未针对本发布重新测量。它们载入的是各检查点自身的位宽，而不是默认启动时所有专家都用的 3 bit。使用尚未缓存的编程提示词，一次一个请求（reasoning effort 为 low，回复最多 4,000 个 token）。八个节点：`glm53.conf.example` 的设置（FP8 KV 缓存，`CONTEXT_LENGTH` 为 819,200）和 `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`（路由专家 4 bits，其他线性层 5 bits）。四个节点：`glm53.t4.conf.example` 的设置（4 bit KV 缓存，`CONTEXT_LENGTH` 为 737,280）和 `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`。MTP 为两次运行的中位数；DFlash2 在八个节点上为一次运行，在四个节点上为两次运行的中位数。每轮模型前进的 token 数：MTP 为 3.4 至 3.5，DFlash2 为 4.6 至 4.8。速度因环境而异（检查点、提示词、时钟等），这些数字仅供参考。
+**测量使用发布版本 r2-102，每个节点的 GPU 时钟上限均设为 2.1 GHz（2,100 MHz）。** 引擎此后已有变化，这些数字尚未针对本发布重新测量。它们载入的是各检查点自身的位宽，而不是默认启动时所有专家都用的 3 bit。使用尚未缓存的编程提示词，一次一个请求（reasoning effort 为 low，回复最多 4,000 个 token）。八个节点：`glm53.conf.example` 的设置（FP8 KV 缓存，`CONTEXT_LENGTH` 为 819,200）和 `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`（路由专家 4 bits，其他线性层 5 bits）。四个节点：`glm53.t4.conf.example` 的设置（4 bit KV 缓存，`CONTEXT_LENGTH` 为 737,280；`ROWS` 当时为 16,384，现在为 8,192）和 `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`。MTP 为两次运行的中位数；DFlash2 在八个节点上为一次运行，在四个节点上为两次运行的中位数。每轮模型前进的 token 数：MTP 为 3.4 至 3.5，DFlash2 为 4.6 至 4.8。速度因环境而异（检查点、提示词、时钟等），这些数字仅供参考。
 
 | 节点数 | 提示词 | MTP（k=3）：首 token 时间 / 解码 | DFlash2：首 token 时间 / 解码 |
 |---|---|---|---|

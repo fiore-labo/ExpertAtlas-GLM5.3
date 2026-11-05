@@ -52,7 +52,7 @@ containers").
   cache (`KV=fp4`) eight nodes take `CONTEXT_LENGTH` 1,048,576 and `KV_SIZE` 2,097,152: the ranks used about 94 GiB
   (measured, with a prompt of 1,018,993 tokens); check's estimate is for the 8-bit cache, so set `NEED_GB=100` there.
 - Four nodes: memory sized for this server alone (`T4.md`); with DFlash2 the lowest free memory measured was about
-  3.2 GiB a node, at 512K.
+  3.2 GiB a node, at 512K (at `ROWS` 16,384; the default is now 8,192).
 - `python3` on every node, for the log keeper (DGX OS has it), with the archive and with the image alike.
 - Other widths: disk for the expert banks you use ("The control panel", below).
 - In containers ("Running in containers"): Docker and the NVIDIA container toolkit on every node instead of cuBLAS,
@@ -136,7 +136,7 @@ these lines; the network names, NCCL, the drafter and the server are set the sam
 | `CONTEXT_LENGTH` | 819200 | 737280 |
 | `KV_SIZE` | 1638400 | 837280 |
 | `DCP` | 2 | 2 |
-| `ROWS` / `SP_PARTS` | 8192 / 4 (the defaults) | 16384 / 4 |
+| `ROWS` / `SP_PARTS` | 8192 / 4 (the defaults) | 8192 / 4 (the defaults) |
 
 `KV` is the format of the KV cache: FP8, or 4 bits. `DCP` is the decode context parallelism, and `ROWS` and `SP_PARTS`
 are the rows of a prompt chunk and the sequence-parallel parts a chunk is split into. `CONTEXT_LENGTH` and
@@ -565,7 +565,7 @@ since, and these numbers have not been measured again for this release. They loa
 default start's 3 bits for every expert. A coding prompt not yet cached, one request at a time (reasoning effort low,
 up to 4,000 reply tokens). Eight nodes: the settings of `glm53.conf.example` (FP8 KV cache, `CONTEXT_LENGTH` 819,200) and `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`
 (routed experts 4 bits, other linear layers 5 bits). Four nodes: the settings of `glm53.t4.conf.example` (4-bit KV
-cache, `CONTEXT_LENGTH` 737,280) and `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`. MTP: the median of two runs; DFlash2: one
+cache, `CONTEXT_LENGTH` 737,280; `ROWS` was 16,384 then and is 8,192 now) and `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`. MTP: the median of two runs; DFlash2: one
 run on eight nodes, the median of two on four. The model advanced 3.4 to 3.5 tokens a round with MTP and 4.6 to 4.8
 with DFlash2. Speeds differ with the environment (the checkpoint, the prompt, the clocks): take these numbers as a guide.
 
