@@ -21,9 +21,9 @@ NCCL_LIB=~/nccl-2.30.7/nvidia/nccl/lib/libnccl.so.2
 #RUNTIME=docker
 #IMAGE=glm53-tensorfold:r3.3-102
 
-# The four-node checkpoint, fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks on Hugging Face (the 3 / 4-bit expert mix, T4.md),
-# the same path on every node.
-WEIGHTS=~/models/GLM-5.3-EXL3-4x-DGX-Sparks
+# What a start reads besides the banks, fiore-lab/GLM-5.3-EXL3-Base on Hugging Face, the same path on every node. A
+# full checkpoint (fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks or -8x-) serves as well: its routed experts are not read.
+WEIGHTS=~/models/GLM-5.3-EXL3-Base
 
 # The checkpoint's own MTP layer, or DFlash2 (DRAFTER_KIND=dflash2; not included: CC BY-NC-ND 4.0 for research and
 # evaluation, with commercial licensing from Inco AI; RUNTIME.md, "Using DFlash2").
@@ -55,10 +55,10 @@ DCP=2
 ROWS=8192
 SP_PARTS=4
 KV=fp4
-# The memory a node must have available before the start: tf-glm53 check asks NEED_GB minus 2.7 GiB for each
-# 100,000 positions KV_SIZE is below 1,638,400 (the eight-node measure), plus 3 with DFlash2; 133 makes
-# it 112 GiB here (115 with DFlash2), what four nodes use.
-NEED_GB=133
+# The memory a node must have available before the start: tf-glm53 check asks NEED_GB minus 1.73 GiB for each
+# 100,000 positions KV_SIZE is below 1,638,400 (fp4), plus 3 with DFlash2; 115 is what four nodes use at that KV
+# with every expert at 3 bits, 4 GiB to spare (measured: 110 GiB in use at 1,671,168 positions). A start uses its plan's figure.
+NEED_GB=115
 
 MASTER_PORT=29551
 READY_TIMEOUT=900

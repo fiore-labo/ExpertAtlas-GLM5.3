@@ -740,10 +740,6 @@ body{padding-bottom:44px}
 .es-ro{font-size:13.5px;color:var(--ink);overflow-wrap:anywhere;text-align:right}
 .es-r.off .es-n>span:first-child,.es-r.off .es-c{opacity:.5}
 .es-adv{justify-self:start}
-.sch-keep{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;padding-top:10px;margin-top:4px;border-top:1px dashed rgba(var(--acc-rgb),.14)}
-.sch-keep[hidden]{display:none}
-.sch-keep .chip:disabled{opacity:.45;cursor:default}
-.sch-keep .ln-msg{font-size:12px}
 @media (max-width:640px){.es-sl{width:100%}.es-r{grid-template-columns:minmax(0,1fr)}.es-c{justify-content:flex-start;max-width:none}.es-ro{text-align:left}}
 /* the startup flow (guide.js): a screen over the panel that tells the steps from the launcher's start to the engine's
    (0 the launcher, 1 the node check, 2 launch settings, 3 start, the live panel), numbered as the step bar; opened from
@@ -878,14 +874,14 @@ launcher: started (pid 2817): <u>http://FIRST-NODE:8010/panel</u>
       <li class="gd-st">
         <div class="gd-hd"><b class="gd-n" style="--i:2">2</b><div><h3>Launch settings</h3><span class="gd-at" data-bar="rg-f-plan"></span></div></div>
         <div class="gd-fig"><div class="gd-mem">
-          <span class="gd-v">Fits</span>
+          <span class="gd-v">Can start</span>
           <span class="gd-bar"><i class="e" style="width:52%"></i><i class="o" style="width:9%"></i><i class="k" style="width:17%"></i><i class="w" style="width:12%"></i><i class="f"></i></span>
           <span class="gd-bar"><i class="e" style="width:50%"></i><i class="o" style="width:9%"></i><i class="k" style="width:17%"></i><i class="w" style="width:12%"></i><i class="f"></i></span>
           <span class="gd-leg"><span><i style="background:var(--acc)"></i>expert</span><span><i style="background:var(--w-other)"></i>Other weights</span><span><i style="background:var(--w-store)"></i>KV</span><span><i style="background:var(--w-fixed)"></i>Work</span><span><i style="background:repeating-linear-gradient(135deg,rgba(220,230,245,.3) 0 2px,transparent 2px 4px)"></i>Margin</span></span>
         </div></div>
         <ul class="gd-pts">
           <li>[ BIT ALLOC ] sets each expert's bits.</li>
-          <li>[ NODE ] shows each node's memory and the verdict, and takes the KV, the drafter and the concurrent inferences. "Does not fit" cannot start.</li>
+          <li>[ NODE ] shows each node's memory and the verdict, and takes the KV, the drafter and the concurrent inferences. "Not enough memory" cannot start.</li>
           <li>[ WEIGHTS ] sets where the weights are.</li>
         </ul>
       </li>
@@ -1007,8 +1003,6 @@ launcher: started (pid 2817): <u>http://FIRST-NODE:8010/panel</u>
             <div class="sch-hint" id="sch-pe-hint" hidden></div>
             <div class="sch-foot"><span></span><span class="sch-ap" id="sch-sp-ap"></span></div>
           </div>
-          <!-- the values in use as glm53.conf's start values, no restart (settings.js) -->
-          <div class="sch-keep" id="sch-keep-g" hidden><button type="button" class="chip" id="sch-keep">Use these at the next start too</button><span class="ln-msg" id="sch-keep-m"></span></div>
         </div>
         <div class="ln-steps" id="ln-steps" hidden></div>
         <div class="swprog" id="ln-prog" hidden><i></i></div>
@@ -1022,9 +1016,8 @@ launcher: started (pid 2817): <u>http://FIRST-NODE:8010/panel</u>
         <div class="fhead"><h3>[ REASONING CONTROL ]</h3><span class="tag" id="th-tag">—</span></div>
         <div class="ln-sch th-sch">
           <div class="akpi"><span class="k"><label for="th-share">Thinking limit</label><button type="button" class="qi" data-th="th-h-share" aria-expanded="false" aria-controls="th-h-share" aria-label="About the thinking limit" title="About the thinking limit">i</button></span><span class="dots"></span><span class="sch-rd"><span class="u0" id="th-pre"></span><b class="v" id="th-v">—</b><span class="u0" id="th-u">%</span><span class="u0" id="th-post"></span></span></div>
-          <div class="sch-sl"><input type="range" class="sch-range" id="th-share" min="5" max="100" step="5" value="100" aria-describedby="th-split"><div class="sch-ticks" aria-hidden="true"><i style="left:0%"></i><i style="left:21.05%"></i><i style="left:47.37%"></i><i style="left:73.68%"></i><i style="left:100%"></i><b id="th-st-dot" hidden></b></div><div class="sch-ends"><span>5%</span><span class="sch-st" id="th-st" hidden></span><span>No limit</span></div></div>
+          <div class="sch-sl"><input type="range" class="sch-range" id="th-share" min="5" max="100" step="5" value="100"><div class="sch-ticks" aria-hidden="true"><i style="left:0%"></i><i style="left:21.05%"></i><i style="left:47.37%"></i><i style="left:73.68%"></i><i style="left:100%"></i><b id="th-st-dot" hidden></b></div><div class="sch-ends"><span>5%</span><span class="sch-st" id="th-st" hidden></span><span>No limit</span></div></div>
           <div class="sch-hint" id="th-h-share" hidden></div>
-          <div class="sch-foot"><span id="th-split"></span></div>
           <div class="akpi"><span class="k">Organize midway<button type="button" class="qi" data-th="th-h-fold" aria-expanded="false" aria-controls="th-h-fold" aria-label="About organizing midway" title="About organizing midway">i</button></span><span class="dots"></span><div class="seg" id="th-fold" role="group" aria-label="Organize midway"><button type="button" data-v="checkpoint" aria-pressed="false">Yes</button><button type="button" data-v="off" aria-pressed="false">No</button></div></div>
           <div class="sch-hint" id="th-h-fold" hidden></div>
           <div class="akpi th-fs"><span class="k"><label for="th-fshare">Organize every</label><button type="button" class="qi" data-th="th-h-fshare" aria-expanded="false" aria-controls="th-h-fshare" aria-label="About how often it organizes" title="About how often it organizes">i</button></span><span class="dots"></span><span class="sch-rd"><span class="u0" id="th-fpre"></span><b class="v" id="th-fv">—</b><span class="u0" id="th-fu">%</span><span class="u0" id="th-fpost"></span></span></div>
@@ -1095,11 +1088,11 @@ launcher: started (pid 2817): <u>http://FIRST-NODE:8010/panel</u>
   <section class="es" id="es" aria-label="Engine settings" hidden>
     <div class="card es-hd">
       <div class="es-t"><h2>[ ENGINE SETTINGS ]</h2><span class="tag" id="es-where">—</span><span class="tag" id="es-st">—</span></div>
-      <div class="es-acts"><span class="es-pend" id="es-pend" aria-live="polite">—</span><button type="button" class="chip" id="es-revert" disabled>Revert</button><button type="button" class="chip ln-go" id="es-save" disabled>Save</button><button type="button" class="chip es-rs" id="es-restart" hidden disabled>Save and restart</button></div>
+      <div class="es-acts"><span class="es-pend" id="es-pend" aria-live="polite">—</span><button type="button" class="chip" id="es-revert" hidden>Revert</button><button type="button" class="chip es-rs" id="es-restart" hidden disabled>Restart to apply</button></div>
     </div>
-    <div class="es-cf" id="es-cf" role="alertdialog" aria-labelledby="es-cf-t" hidden><p id="es-cf-t">Saves the settings and restarts the engine: the requests running stop, and the conversations in the KV pool are lost. Starting again takes a few minutes. Next comes the stop's question: whether to save this run's usage.</p><div class="chips"><button type="button" class="chip es-rs" id="es-cf-go">Restart</button><button type="button" class="chip" id="es-cf-no">Cancel</button></div></div>
+    <div class="es-cf" id="es-cf" role="alertdialog" aria-labelledby="es-cf-t" hidden><p id="es-cf-t">Restarts the engine: the requests running stop, and the conversations in the KV pool are lost. Starting again takes a few minutes. Next comes the stop's question: whether to save this run's usage.</p><div class="chips"><button type="button" class="chip es-rs" id="es-cf-go">Restart</button><button type="button" class="chip" id="es-cf-no">Cancel</button></div></div>
     <p class="ln-msg" id="es-msg" role="status"></p>
-    <div class="es-intro"><p>These are the settings that need a restart. Save writes them to glm53.conf and the next start uses them; Save and restart uses them now.</p><p>The settings that change while running (the GPU split, the expert optimisation) are on the inference screen.</p></div>
+    <div class="es-intro"><p>A change is saved as it is made. It takes effect at the next start, or at once where the row says Applied at once; Restart to apply uses it now.</p><p>The settings that change while running (the GPU split, the expert optimisation) are on the inference screen.</p></div>
     <div class="es-groups" id="es-groups"></div>
     <button type="button" class="chip es-adv" id="es-adv" aria-expanded="false">Advanced (development)</button>
   </section>
@@ -1299,7 +1292,7 @@ launcher: started (pid 2817): <u>http://FIRST-NODE:8010/panel</u>
   ]
 }
 </script>
-<script id="i18n" type="application/json">{"1 line":"1 本","1 token at a time":"1 token ずつ","10 s ·":"10 秒 ·","2 rows":"2 段","3 rows":"3 段","4 rows":"4 段","7-segment":"7 セグ","8 lines":"8 本","Abort":"中止","Accuracy":"精度","Afterglow":"残光","Agent":"エージェント","Agent A":"エージェント A","Agent B":"エージェント B","Aizome (Japanese colours)":"藍染 (和色)","All":"全部","Allocated (rank 0)":"確保 (rank 0)","Along the rings":"同心円に沿う","Already running":"起動済み","Amber terminal":"琥珀の端末","Any colour":"好きな色","Apply":"実行","Auto":"自動","Average bits":"平均ビット数","Balanced":"均衡","Beads":"数珠","Blue":"青","Brief":"短い","By bit":"bit ごとに変える","By inference":"推論ごと","By number":"番号順","By time":"時間ごと","By use":"使用順","Cancel":"取消","Catppuccin · mauve and grey":"Catppuccin · 藤と灰","Centre":"中心","Centre cells":"中心のマス","Centre row {0}, column {1}":"中心 {0} 段目 {1} 列","Centre row {0}, join columns {1}":"中心 {0} 段目 {1} 列を結合","Check":"確認","Circle":"サークル","Coding":"コーディング","Coding (en)":"コーディング 英","Coding (ja)":"コーディング 日","Colour":"色","Colours":"配色","Confirm":"確定","Constellation":"星座","Conversation caches":"会話のキャッシュ","Could not load the data or the drawing area.":"データまたは描画領域を読み込めなかった。","Could not read the usage counts from the engine (it counts them with TF_GLM53_EXPERT_LIVE=1).":"エンジンから使用回数を読めなかった (数えるのは TF_GLM53_EXPERT_LIVE=1 のとき)。","Count":"利用記録","Crimson and ink (Japanese colours)":"紅と墨 (和色)","Crystal":"結晶","Cyan":"水色","Data":"データ","Data visualisation":"データ可視化","Decode read":"decode の読み込み","Design first":"デザイン優先","Design systems":"デザインシステム","Digits":"数字","Display":"表示設定","Diverging":"発散","Does not fit":"入らない","Domains":"分野","Done":"完了","Dot LED":"ドット LED","Dracula · purple and pink":"Dracula · 紫と桃","Dropped":"消える","Editor themes":"エディタのテーマ","Effects":"演出","Elapsed":"経過","English":"英語","Estimate":"見積もり","Estimating":"見積もり中","Expert map":"expert の地図","Expert size":"expertサイズ","Experts":"exp数","Experts changed":"変わった expert","Experts to change":"変わる expert","Failed":"失敗","Failed · ":"失敗 · ","Fits":"収まる","Flip-dot":"フリップドット","Free":"空き","From":"開始","Gaps":"区切り","Green":"緑","Green terminal":"緑の端末","Green · one hue":"グリーン · 一色","Greys + an accent":"無彩色 + 差し色","Gruvbox · warm":"Gruvbox · 暖色","Hide":"非表示","How long the light stays: longer keeps the experts picked again and again brighter":"光が残る長さ。長くすると、くり返し選ばれた expert ほど明るく残る","Hue wheel":"色相環","Inference stopped":"推論停止中","Inference stops":"推論の停止","Inflow":"流入","Japanese":"日本語","Join":"結合","KV room":"KV に回せる量","KV size":"KVサイズ","KV store":"KV 保存","Lamp":"点灯","Language":"言語","Layers":"層","Layers kept":"動かさない層","Light colour":"光の色","Light up":"光らせる","Line shape":"線","Lines":"本数","Linux ops (en)":"Linux 運用 英","Linux ops (ja)":"Linux 運用 日","Live":"ライブ","Load":"読み込み","Loading the domains…":"分野を読み込み中…","Loading the usage counts…":"使用回数を読み込み中…","MOCK ↺ Before start":"MOCK ↺ 起動前","Map of the 19,200 routed experts: layer 3 inside, layer 77 outside.":"19,200 個の routed expert の地図。内側が層 3、外側が層 77。","Margin":"余裕","Material · indigo":"Material · 藍","Material · teal":"Material · 青緑","Mean bits":"平均bit","Measured":"実測","Measured: usage (8 nodes · 12 domains) · estimated: 2/5 bit · decode · memory":"実測: 使用回数 (8 台 · 12 分野) · 推定: 2/5 bit · decode · メモリ","Memory":"メモリ","Memory bar":"メモリの棒","Needed":"必要","Nixie":"ニキシー管","No data":"データなし","No data · ":"データなし · ","No light":"光らせない","No usage":"利用記録なし","None":"なし","Nord · frost and night":"Nord · 霜と夜","Ocean (Tailwind)":"海 (Tailwind)","One colour":"1 色","Optimise experts":"エキスパート最適化","Orange":"オレンジ","Order":"並べ方","Other GPU processes · ":"ほかの GPU プロセス · ","Other weights":"ほかの重み","Pause":"再生を止める","Picked experts":"選ばれた expert","Plan":"計画","Play":"再生する","Purple":"紫","Random":"ランダム","Range":"範囲","Rank in its layer":"層の中の順位","Real speed":"実速度","Recorded":"実データ","Red":"赤","Ring interval (s)":"光の輪の間隔 (秒)","Rings":"光の輪","Rings are off":"光の輪は停止中","Ripples":"波紋","Rosé Pine · dawn":"Rosé Pine · 夜明け","Rows":"段","Running":"稼働中","Save":"保存","Save and stop":"保存して停止","Saved":"保存","Saved only · no change while running":"保存のみ · 動作中は変えない","Scan":"走査","Security (en)":"セキュリティ 英","Security (ja)":"セキュリティ 日","Sending":"送信","Set now":"いまの設定","Share":"割合","Share of picks":"選択の割合","Short":"不足","Show":"表示","Simulation":"シミュレーション","Size (MiB)":"サイズ (MiB)","Sky":"星空","Sorted by":"元の利用記録","Sorted by decode":"元の利用記録 decode","Sorted by prefill":"元の利用記録 prefill","Sparkle":"きらめき","Speed":"速さ","Spiral":"渦","Split-flap":"パタパタ","Standard":"標準","Start":"起動","Starting":"起動中","Still":"回転しない","Stop":"停止","Stop without saving":"保存せず停止","Stopped":"停止中","Stopping":"停止処理中","Straight":"対角線","Suggested":"提案","Test run":"試運転","Text":"文字","Text and centre":"文字と中心","The last run":"前回の稼働","The text's start goes round once a minute":"書き始めを 60 秒で 1 周させる","This browser could not unpack the usage counts (DecompressionStream is needed).":"このブラウザでは使用回数を展開できなかった (DecompressionStream が要る)。","This run":"この稼働","This run decode":"この稼働 decode","This run prefill":"この稼働 prefill","Tight":"ぎりぎり","Time":"時間","Tones · blue":"濃淡 · 青","Turn":"回転する","Usage":"使用頻度","Use":"利用率","View":"見せ方","Waiting for the request to end":"推論の終わりを待つ","Warm-up":"準備","Weights":"重み","Where use order starts (o'clock)":"使用順の開始 (時)","White":"白","Work":"作業域","Yellow":"黄","about ":"約 ","auto: a random colour and order every 30 s":"auto: 30 秒ごとに色と並べ方をランダムに","bit share of picks %":"bit 採択率 %","bit × usage":"bit × 使用頻度","bpw over the last 3 minutes":"bpw の推移 (直近 3 分)","est.":"推定","for a start after a stop":"停止後の起動用","layers":"層","left":"残り","mock only":"モックだけ","now":"今","o'clock":"時","runs":"回","s":"秒ごと","saved":"保存済み","{0} s ago":"{0} 秒前","−1 min":"−1 分","−2 min":"−2 分","−3 min":"−3 分","General":"全般","Bit colours":"bit の色","Pair":"組み合わせる色","Complement":"補色","Rim text":"外周の文字","Back to the preset":"プリセットに戻す","Blink":"点滅","Drafter":"ドラフター","Nodes":"ノード","Max":"最大","cut":"切り詰め","Offset":"オフセット","Centre offset X (px)":"中心のオフセット X (px)","Centre offset Y (px)":"中心のオフセット Y (px)","Keep for the OS":"OS に残す","Unpicked brightness":"未選択の明るさ","Picked brightness":"選択の明るさ","The step (of 24) an expert not picked rests at; 6 by default":"選ばれていない expert の明るさ (24 段の何段目か。既定は 6)","The step (of 24) a picked expert lights up to; 19 by default":"選ばれた expert が光る最大の明るさ (24 段の何段目か。既定は 19)","Open":"開く","Rename":"名前の変更","Delete":"削除","Name":"名前","Note":"メモ","New name":"新しい名前","deleted":"削除済み","New · unsaved":"新規 · 未保存","Optimised · unsaved":"最適化 · 未保存","No change while running":"動作中は変えません","Shares":"割合","Optimised":"最適化","Re-sort":"並べ替え","Saved while running":"稼働中に保存","Copy":"複製","The rest: the narrowest width with data":"残り (データのある一番狭い幅)","Reading…":"読み込み中…","This launcher keeps no list of saved allocations":"このランチャーは保存した割り当ての一覧を出しません","No saved allocations yet":"保存した割り当てはまだありません","Could not read the list":"一覧を読めませんでした","Could not read {0}":"{0} を読めませんでした","Cannot start on this lane":"このレーンでは起動できません","Name: letters, digits and _ . - (64 at most, not starting with . or -)":"名前: 英数字と _ . - (64 文字まで。. と - は先頭に使えません)","That name is taken":"その名前はもうあります","Saving…":"保存中…","Saved allocations and the last run":"保存した割り当てと前回の稼働","Save under a name":"名前を付けて保存","Save for a start":"起動用に保存","Allocation name":"割り当ての名前","Saved as {0} · ":"{0} で保存済み · ","The bits loaded are not read yet":"載っている bit をまだ読めていません","Usage record":"利用記録","Give the allocation a name":"割り当ての名前を入れてください","That name is taken: press again to overwrite it":"その名前はもうあります。もう一度押すと上書きします","{0} runs":"{0} 回","How Max is found":"最大の出し方","This drafter":"このドラフター","Max is the longest request the memory left after the start holds. The experts, the other weights and the KV are computed; the work area (CUDA, buffers, graphs, and DFlash2's model and state) is not.":"最大は、起動後に残るメモリで受けられる最長の要求です。expert・ほかの重み・KV は計算で出せますが、作業域 (CUDA、計算の途中の置き場、グラフ、DFlash2 のモデルと状態) は出せません。","After each start the launcher measures each node's memory and keeps the work area it found, a drafter at a time. Later starts with that drafter on as many nodes are planned from it.":"起動のたびにランチャーが各ノードのメモリを測り、作業域の実際の大きさをドラフターごとに残します。同じドラフター・同じ台数の次の起動から、その値で見積もります。","Until a start with the drafter has been measured, the plan takes built-in sizes and keeps 2 GiB more, so Max is shorter (est.).":"そのドラフターでまだ起動していないあいだは、組み込みの値に 2 GiB の余裕を足して見積もるので、最大は短めになります (推定)。","The measurement is taken just after the start, with nothing running. Requests make the work area grow a little, so at Max a node can dip a little under what it keeps for the OS.":"測るのは起動直後の、何も動いていないときです。推論中は作業域が少し増えるので、最大で動かすとノードの空きが「OS に残す」量を少し割ることがあります。","Now: {0}, estimated (not started on this lane yet)":"いま: {0} は推定 (このレーンでまだ起動していない)","Now: {0}, measured":"いま: {0} は実測","Server":"サーバー","Node count":"台数","Another node count: plans are estimated until a start on it has been measured":"台数を変えると、その台数で一度起動して測るまで、起動前の見積もりは推定です","Saved.":"保存しました","Next start: {0}":"次の起動: {0}","Check and save":"確認して保存","Being checked":"確認中","Fix the rows marked ✕, then press again":"✕ の行を直して、もう一度押してください","The check no longer matches these paths: press again":"確認した内容と保存する内容が変わりました。もう一度押してください","A check is running: press again when it ends":"確認が動いています。終わってからもう一度押してください","The check did not finish: press again":"確認が終わりませんでした。もう一度押してください","Only while the engine is stopped":"エンジンが止まっている間だけ変えられます","Nothing changed":"変更なし","Check this list, then save":"確認してから保存します","Registered workers":"登録済みの worker","Use {0} / {1}":"使う {0} / {1}","A worker's address (ConnectX-7)":"worker のアドレス (ConnectX-7)","Add":"追加","Tick {0} workers":"worker を {0} 台チェックしてください","That address cannot be added: empty, malformed, the head, or registered already":"このアドレスは追加できません (空欄・形の誤り・head・登録済み)","The lane uses it now: untick it and save, then it can be deleted":"今のレーンで使っています。チェックを外して保存すると削除できます","Back to defaults":"既定に戻す","Every viewer of this lane gets the defaults":"このレーンを見る全員の表示が既定に戻ります","Memory per node":"ノードごとのメモリ","for the swap":"入れ替えに要る","Least available":"最も少ない空き","Not enough memory":"メモリ不足","{0} has {1} GiB available and changing the experts needs {2} GiB on every node. A start with more in Keep for the OS leaves room for it (the KV takes all the room the plan leaves, whatever the context length).":"{0} の空きは {1} GiB で、エキスパートの入れ替えにはどのノードにも {2} GiB 要ります。「OS に残す」を増やして起動すると空きができます（KV は context length に関係なく、計画が残す空きを全部使います）。","Rendezvous":"待ち合わせ","Image":"イメージ","Expert banks":"expert の bank","Kernel · driver · FW":"カーネル · ドライバ · FW","Package":"パッケージ","Key refused":"鍵で入れない","Host key unknown":"ホスト鍵が未登録","No answer":"応答なし","LAN address unknown":"LAN のアドレス不明","No link":"リンクなし","link {0}G":"リンク {0}G","Not a GB10":"GB10 でない","In use":"使用中","GPU in use · {0}":"GPU 使用中 · {0}","Each node":"ノードごと","GPU in use ({0})":"GPU 使用中（{0}）","{0} GiB free":"空き {0} GiB","CX7: {0}'s LLDP":"CX7: {0} の LLDP","GB10: LAN address (NODES · ARP) · the head's key · nvidia-smi · MemAvailable · LLDP":"GB10: LAN のアドレス（NODES · ARP）· head の鍵 · nvidia-smi · MemAvailable · LLDP","Ring: {0}":"リング: {0}","RING: closed · {0}":"リング: 閉じた · {0}","RING: open":"リング: 閉じていない","RING: none":"リング: なし","Scanning the network":"ネットワーク走査中","Not traced":"たどる前","No ring":"リングなし","Ring open":"リングが閉じていない","A node not read":"読めない台あり","A node in use":"使用中の台あり","Not crossed":"交差していない線あり","A lane down":"片側だけの線あり","Ring · as glm53.conf":"リング · glm53.conf と同じ","Differs from glm53.conf":"glm53.conf と違う","Not registered":"未登録","{0} {1}: no link":"{0} {1}: リンクなし","{0} ⇄ {1}: not crossed (port 0 to the next node's port 1)":"{0} ⇄ {1}: 交差していない（port 0 を隣の port 1 へ）","{0}: {1} down":"{0}: {1} が落ちている","{0}: GPU in use · {1}":"{0}: GPU 使用中 · {1}","{0}: not a GB10":"{0}: GB10 でない","not crossed":"交差していない","Read again":"もう一度読む","{0}'s LAN address":"{0} の LAN のアドレス","open":"閉じていない","Checking":"確かめています","Not checked":"確認がまだ","All present":"そろった","Error {0}":"error {0}","glm53.conf · written by Register":"glm53.conf · 登録で書く","Measuring…":"測っています…","Measure bandwidth":"帯域を測る","closed":"閉じた","Check: {0}":"確認: {0}","CHECK: tf-glm53 deploy + check · {0}":"確認: tf-glm53 deploy + check · {0}","  all present":"  そろった","  error":"  error","Bandwidth: {0}":"帯域: {0}","BANDWIDTH: ib_write_bw · a lane and a direction at a time":"帯域: ib_write_bw · 1 レーン 1 方向ずつ","failed":"失敗","  {0} runs · {1} to {2} Gb/s":"  {0} 本 · {1}〜{2} Gb/s","Pull: {0}":"イメージ: {0}","Register: {0}":"登録: {0}","Registered · NODES {0}":"登録しました · NODES {0}","An IPv4 address on the LAN":"LAN の IPv4 アドレス","PROBE {0} · ssh · nvidia-smi · LLDP":"読む {0} · ssh · nvidia-smi · LLDP","{0} is {1}, not {2}":"{0} は {1}（{2} ではない）","{0} nodes · registered":"{0} 台 · 登録済み","Last node check · {0}":"最後のノード確認 · {0}","Started":"起動済み","Starting {0} %":"起動中 {0} %","Down":"断","Link":"線","Even lane":"偶数レーン","Odd lane":"奇数レーン","Servers and ring":"サーバーとリング","Launch settings":"起動設定","Live panel":"稼働","Startup flow":"起動の流れ","Close":"閉じる","Terminal · the head node":"ターミナル · 先頭ノード","On the head node, ./tf-glm53 up starts the launcher, which prints the panel's address.":"先頭ノードで ./tf-glm53 up。ランチャーが起動して、パネルのアドレスを出します。","Open that address in a browser.":"そのアドレスをブラウザで開きます。","The first time, it opens on the server check; once the nodes are registered, on the launch settings.":"初めてはサーバー確認から、ノードを登録したあとは起動設定から開きます。","Server check":"サーバー確認","\"Detect\" reads what the head node's CX7 cables reach: a ring, or a switch.":"「検出」で、先頭ノードの CX7 の先がリングかスイッチかを見ます。","A ring goes on by itself through the check, the registration and the bandwidth, then \"Environment check complete\" and the launch settings.":"リングは確認・登録・帯域まで続けて進み、「環境確認完了」のあと起動設定へ移ります。","A switch lists the servers that answer ssh on the CX7 /24: choose the ones to use, then \"Check\" and \"Register\".":"スイッチは CX7 の /24 で ssh に答えるサーバーを並べます。使うものを選び、「確認」から「登録」へ。","[ BIT ALLOC ] sets each expert's bits.":"[ BIT ALLOC ] で expert ごとの bit を決めます。","[ NODE ] shows each node's memory and the verdict, and takes the KV, the drafter and the concurrent inferences. \"Does not fit\" cannot start.":"[ NODE ] に各ノードのメモリと判定。KV・ドラフター・同時推論もここで選びます。「入らない」では起動できません。","[ WEIGHTS ] sets where the weights are.":"重みの場所は [ WEIGHTS ] で決めます。","within 8 s":"8 秒以内","Press \"Start\", then \"Confirm\" within 8 seconds.":"「起動」を押し、8 秒以内に「確定」を押します。","While the weights load, the circle lights layer by layer.":"重みを読み込むあいだ、読んだ層からサークルが点きます。","When it is ready, the panel turns to the live screen. \"Stop\" in [ NODE ] stops it.":"終わると稼働の画面に変わります。止めるときは [ NODE ] の「停止」。","In the ring":"接続ノード","Unavailable":"使用不可","The head's LLDP":"head の LLDP","Key · GPU · LLDP":"鍵 · GPU · LLDP","Until it closes":"閉じるまで","Pull the image":"イメージをそろえる","Register":"登録","Steps":"手順","The ring the head's CX7 cables make":"head の CX7 の線がつくるリング","No key":"鍵なし","No address":"アドレス不明","CHECK: tf-glm53 check · {0}":"確認: tf-glm53 check · {0}","  the package not copied":"  パッケージが未配布","The engine gives no usage counts (it counts them when started with TF_GLM53_EXPERT_LIVE=1, as a start from this panel is): no picks and no optimisation.":"エンジンから使用回数が来ません (数えるのは TF_GLM53_EXPERT_LIVE=1 で起動したとき。このパネルからの起動はそうなります)。選択の表示と最適化はありません。","Detect":"検出","Detect again":"再検出","Detecting…":"検出中…","Registered":"登録済み","glm53.conf has no workers":"glm53.conf に worker なし","Brightness · Gb/s":"明るさ · Gb/s","Non-expert":"expert 以外","embeddings etc. BF16":"埋め込み等 BF16","expert {0} bit · other {1} bit":"expert {0} bit · ほか {1} bit","RING-{0} · {1} links · {2} lanes":"RING-{0} · {1} 本 · {2} レーン","Shared":"共有","Conversations":"会話","Evicted":"押し出し","continued":"続き","shared start":"共有","new":"新規","Requests":"リクエスト","Read from the cache":"キャッシュヒット","in use":"推論中","next trimmed":"削除候補","{0} min ago":"{0} 分前","{0} h ago":"{0} 時間前","not in the engine yet (mock)":"エンジンにまだない口（モック）","The KV pool's blocks: the shared start, the conversations kept, free":"KV pool のブロック: 共有の頭、保存中の会話、空き","in block order":"ブロックの並び","grouped by kind":"種類ごと","Cache in use":"使っているキャッシュ","Newly added":"新しく足された分","On the circle":"サークルに表示","running":"推論中","auto":"自動","chosen":"選択","Chosen":"選択中","not running":"待機中","Other inferences":"ほかの推論","Chosen conversation":"選択中の会話","Choose a row to switch":"行を選ぶと切り替わります","Shown on the circle and the map; choose again for automatic":"サークルと地図に表示する会話を選びます（もう一度で自動）","Bandwidth":"帯域","Environment check complete":"環境確認完了","Concurrent":"同時推論","{0} each":"1 本あたり {0}","{0} GiB a node":"ノードあたり {0} GiB","in flight":"推論中","{0} s left":"残り {0} 秒","BANDWIDTH: ib_write_bw · each lane both ways, several at once":"帯域: ib_write_bw · レーンごとに両向き、いくつか同時に","decode total":"decode 合計","GPU split":"GPU の配分","Priority prompt":"優先 prompt","Lower the priority prompt's limit":"優先 prompt の上限を下げる","Raise the priority prompt's limit":"優先 prompt の上限を上げる","Overtake a running prefill too":"実行中の prefill も追い越す","0: off · counted: the new tokens past the cache":"0 で無効 · 数えるのはキャッシュより後ろの新しい tokens","the engine does not answer":"エンジンが応答しません","the engine takes it only with an API key or from the head node":"API キーか先頭ノードからでないとエンジンが受け付けません","this engine has no schedule":"このエンジンには配分がありません","Applying…":"反映中…","Applied":"反映しました","Prompts first: while a prefill runs the decode stops, and the prompts waiting are taken one after another.":"prompt を先に計算します。prefill の間は decode を止め、待っている prompt も続けて受け入れます。","Decode first: while a conversation is generating, new prompts wait (a running prefill stops too).":"decode を先にします。生成中の会話がある間、新しい prompt は待ちます（実行中の prefill も止まります）。"," Priority prompts (up to {0} tokens) go through.":"優先 prompt（{0} tokens 以下）は通します。"," Priority prompts wait too.":"優先 prompt も待ちます。","While prompts and decoding overlap, {0}% of the GPU's time goes to the decode. When only one of them has work, it uses all of it.":"prompt と decode が重なる間、GPU の時間の {0}% を decode に回します。片方だけのときは、その仕事が全部を使います。","prompts waiting <b>{0}<\/b> · longest {1} s":"prompt 待ち <b>{0}<\/b> · 最長 {1} 秒","No priority prompts: the prompts waiting go in the order they came, by the split.":"優先 prompt はありません。待っている prompt は来た順に、配分に従って入ります。","A prompt with up to {0} new tokens to compute goes in first whatever the split and is computed without a pause (meanwhile the GPU is all the prompt's and the decode stops).":"新しく計算するのが {0} tokens 以下の prompt は、配分にかかわらず先に入り、止まらずに計算します（その間 GPU は prompt に 100% で、decode は止まります）。","On: a long prefill running gives way to a priority prompt too and goes on from what it finished (the chunk it was in is computed again, so the long one is up to a chunk later).":"オン: 実行中の長い prefill も優先 prompt に譲り、終わった分から続けます（途中のチャンクは計算し直すので、長い方が最大 1 チャンク遅れます）。","Off (default): a priority prompt waits until the running prefill ends.":"オフ（既定）: 優先 prompt は、実行中の prefill が終わるまで待ちます。","At start {0}":"起動時 {0}","Could not change it ({0}). It stays at {1}.":"変更できませんでした（{0}）。いまの値 {1} のままです。","Give 0 to {0} tokens. It stays at {1}.":"0〜{0} tokens で入れてください。いまの値 {1} のままです。","Could not change it ({0}). It stays {1}.":"変更できませんでした（{0}）。{1}のままです。","on":"オン","off":"オフ","mixed":"混在","DCP pair":"DCP 組","Between nodes":"ノード間"," (where they ran last)":"（いま動いている CPU）"," (kept there from the start)":"（起動時に固定）","kept on A725":"A725固定","kept on X925":"X925固定","left to the OS":"OS 任せ","the head shows the cores they run on now; the OS moves the other nodes', so —":"head は今動いているコア、ほかのノードは OS が動かすので「—」","About the GPU split":"GPU の配分について","About priority prompts":"優先 prompt について","About overtaking a running prefill":"追い越しについて","Node check":"ノード確認","Check the nodes":"ノード確認","Check the nodes again":"もう一度ノード確認","Checking the nodes…":"ノード確認中…","Check the nodes first":"先にノード確認","CX7: the head's ports · ssh (tcp/22) on each /24":"CX7: head のポート · /24 ごとに ssh (tcp/22)","The head's ports":"head のポート","Each /24":"/24 ごと","Key · GPU":"鍵 · GPU","Ring or switch":"リングかスイッチか","{0} answer":"{0} 台が応答","down":"落ちている","LINK: one GB10 at the end of each cable · a ring":"LINK: 線の先はそれぞれ GB10 · リング","LINK: one cable · {0} · {1}":"LINK: 1 本の線 · {0} · {1}","No other node":"ほかの台なし","No other node answers over ConnectX-7":"ConnectX-7 の先で答える台がない","No other host answered ssh on this /24":"この /24 で ssh に答えた台はない","in this lane":"このレーン","On the switch":"スイッチの先","SWITCH · {0} nodes":"SWITCH · {0} 台","of {0} nodes":"{0} 台のうち","GB10 · free":"GB10 · 空き","Ring · registered":"リング · 登録済み","Differs from the registered nodes":"登録と違う","written by Register":"登録で書く","Check this list, then register":"この一覧を確認してから登録","Checkpoint":"チェックポイント","with its MTP layer":"MTP 層つき","Empty: not used":"空なら使わない","{0}-bit experts":"{0} bit のエキスパート","A path: ~/… or /…, without spaces":"場所は ~/… か /… で (空白なし)","Saved · banks.json not sent to {0}":"保存 · banks.json を {0} に送れなかった","Every node":"全ノード","not here":"ここに無い","on no node: that width is not offered":"どのノードにも無い: この bit は使わない","no manifest {0}":"manifest が無い {0}","this bank is {0} bit":"このバンクは {0} bit","{0} safetensors":"safetensors {0} 個","a different bank here":"ここは別のバンク","as banks.json":"banks.json のとおり","in the directory":"ディレクトリの中","expert-banks":"expert-banks","no such directory":"ディレクトリが無い","{0} of {1} layer files missing":"層のファイル {1} 個のうち {0} 個が無い","a different bank here ({0}; the head has {1})":"ここは別のバンク ({0}、head は {1})","Browse":"参照","Choose {0}'s directory":"{0} のディレクトリを選ぶ","Choose a directory":"ディレクトリを選ぶ","Choose a directory · {0}":"ディレクトリを選ぶ · {0}","Up one level":"ひとつ上へ","Choose this directory":"このディレクトリを選ぶ","Directory":"ディレクトリ","Bank":"バンク","Model":"モデル","Manifests":"目録","Choose":"選ぶ","More directories than shown: type the path":"ほかにもあります: 場所を入力してください","No directory here":"ここにはディレクトリがない","RDMA proxy threads: {0}":"RDMA 通信スレッド：{0}","not used":"使わない",", ":"、","A prompt with at most this many new tokens to compute past the cache goes in first whatever the split, computed without a pause (the decode stops meanwhile). The value at start; the value in use is changed on the inference screen. 0: none.":"キャッシュより後ろの新しく計算する分がこのトークン数以下の prompt を、エンジンは GPU の配分にかかわらず先に入れ、止めずに計算します（その間 decode は止まります）。起動したときの値で、動作中の値は推論画面で変えます。0 = 優先しない。","A reply's limit":"1 回の応答の上限","A request waits this long for room beside the conversations in flight, then gets 503 (busy) so the client can retry. 0: no limit.":"要求は走っている会話の横に空きができるまでこの秒数待ち、越えたら 503（混雑）を返します（クライアントがやり直せるように）。0 = 待ち続ける。","API address":"API のアドレス","API port":"API のポート","About {0}":"{0} の説明","Advanced (development)":"上級（開発用）","Advanced (development): prompt chunk, SP, RoCE cores, token fixes, extra environment …":"上級（開発用）を開く: prompt の区切り、SP、RoCE の CPU、切り方の直し、追加の環境変数 …","Any layer, any width":"どの層でもどの幅でも","At most {0} characters.":"{0} 文字までにしてください。","Cabling":"接続の形","Change in [ WEIGHTS ]":"[ WEIGHTS ] で変える","Changed":"変更","Close advanced (development)":"上級（開発用）を閉じる","Concurrent inference":"同時推論","Concurrent inference of 2 or more needs DCP 2":"同時推論 2 以上は DCP 2 が要ります","Concurrent inference with DFlash2 needs 1 or more.":"同時推論と DFlash2 では 1 以上が要ります。","Conversations keeping drafter state":"drafter の状態を残す会話","Could not write glm53.conf ({0}).":"glm53.conf に書けませんでした（{0}）。","DFlash2 model":"DFlash2 のモデル","Default: {0}":"既定: {0}","Drop the old part":"古い部分を捨てる","Drop the page cache before a start":"起動前にページキャッシュを落とす","Every node's page cache dropped before a start. Needs sudo -n (no password) on every node.":"起動の前に各ノードのページキャッシュを落とします。各ノードで sudo -n（パスワードなし）が要ります。","Example: with a thinking limit of 400,000 tokens, 100 organizes only a thinking that reached the limit and 5 one of 20,000 tokens or more.":"例: 思考の上限が 400,000 トークンのとき、100 なら上限まで考えた思考だけを、5 なら 20,000 トークン以上の思考を整理します。","Example: 5,000 has the engine write into the thinking, every 5,000 thinking tokens, how many it used and about how many are left, in the model's own words.":"例: 5,000 なら、思考が 5,000 トークン増えるごとに、エンジンが思考の中へ「約○トークン使い、残り約○」とモデル自身の言葉で書き込みます。","Example: with yes and the thinking limit at 90%, the engine has the thinking organized once it fills 90% of what the prompt leaves of the context length.":"例: 「する」で思考の上限が 90% なら、思考が、prompt が context length に残す分の 90% を埋めたときにエンジンが整理させます。","Extra environment":"追加の環境変数","Fix range (the end)":"直す範囲（末尾）","For: a thinking that grows long.":"対象: 長くなったモデルの思考。","For: one reply of the model (its thinking and its answer together).":"対象: モデルの 1 回の応答（思考と答えの合計）。","For: one request (its prompt and its reply together).":"対象: 1 回の要求（prompt と応答の合計）。","For: one organized text the model writes.":"対象: モデルが書く整理 1 回の長さ。","For: the KV cache (what the model keeps of the conversation).":"対象: KV キャッシュ（モデルが会話について覚えておくもの）。","For: the model (a line written to it).":"対象: モデル（モデルに向けた文）。","For: the model's thinking (the part before the answer, which the user sees too).":"対象: モデルの思考（答える前に考える部分。利用者にも見える）。","For: the thinking at the point the model ends it.":"対象: モデルが考え終えた時点の思考。","GPU share":"GPU 配分","Give 0 or {0}.":"0 か {0} にしてください。","Give a multiple of {0}, {1}.":"{0} の倍数で {1} にしてください。","Give a whole number.":"整数にしてください。","Give {0}.":"{0} にしてください。","HOST:PORT where rank 0 also answers /metrics, /health and /v1/experts/usage, read-only, for a monitor on another host. Empty: none.":"HOST:PORT。rank 0 がそこでも /metrics・/health・/v1/experts/usage を読み取り専用で返します（別のホストの監視用）。空 = なし。","How the engine drafts the next tokens for speculative decoding: MTP = the model's own MTP layer; DFlash2 = a separate small model (the drafter); None = no drafts, one token at a time. The launch screen may choose another for one start.":"エンジンが投機デコードで次のトークンの下書きを作る方法。MTP = モデル自身の MTP 層で下書きする。DFlash2 = 別の小さなモデル（drafter）で下書きする。なし = 下書きせず 1 トークンずつ計算する。起動画面で起動ごとに選び直せます。","How the nodes are cabled. The node check writes it to the node file, which wins over glm53.conf.":"ノードのつなぎ方。ノード確認がノード設定ファイルに書き、そちらが glm53.conf より優先されます。","Inference":"推論","KV format":"KV の形式","Launch":"起動","Launcher restart":"ランチャーの再起動","Log kept":"ログを残す量","MTP drafts":"MTP の下書き数","Make it differ from the API's port.":"API のポートと別にしてください。","Makes the values in use glm53.conf's start values (no restart)":"いまの値を glm53.conf の起動時の値にします（再起動はしません）","Memory kept for the OS":"OS に残すメモリ","Model name":"モデル名","Monitor address":"監視の口","NAME=value tokens, separated by spaces, passed to every rank. Not the concurrent inference's or the ring's variables, nor the token fixes (their own rows).":"全部のランクに渡す NAME=値（空白区切り）。同時推論とリングの変数、切り方の直し（専用の行）は書けません。","Network interface":"通信のインターフェース","No":"しない","No DFlash2 model is set (the launch screen's [ WEIGHTS ])":"DFlash2 のモデルがありません（起動画面の [ WEIGHTS ]）","No changes":"変更なし","Nodes and parallelism":"ノードと並列","Not in the form this setting takes.":"この設定の形になっていません。","Not on 3 nodes yet":"3 台ではまだ使えません","Not one of the choices.":"選べる値ではありません。","Not touched as a rule":"普段は触りません","Notice of what is left":"残りのお知らせ","On: a long prefill running gives way to a priority prompt and goes on from what it finished (the long one is up to a chunk later). Off: a priority prompt waits until the running prefill ends. The value at start.":"オンのとき、エンジンは実行中の長い prefill を優先 prompt に譲らせ、終わった分から続けます（長い方が最大 1 チャンク遅れます）。オフのとき、優先 prompt は実行中の prefill が終わるまで待ちます。起動したときの値です。","On: every layer on the generic kernel, so a re-sort may move any expert. Off: layers all at 4 bit are not moved by a re-sort.":"オン = 全部の層を汎用のカーネルで動かし、並べ替えでどの expert も動かせます。オフ = 全部 4 bit の層は並べ替えで動かしません。","Only on 3 nodes":"3 台のときだけ","Only with DCP 2":"DCP 2 のときだけ","Optional":"任意","Also overtake a running prefill":"prefill も追い越すか","Panel port":"パネルのポート","Prompt chunk":"prompt の区切り","Purpose: a long thinking does not use up the KV (what the model can hold at once). Once the thinking is long, the engine has the model organize its thinking midway and puts the organized text in the place of the thinking before it, in the model's context; the model thinks on from it.":"目的: 長い思考で KV（モデルが一度に覚えておける量）を使い切らないようにします。モデルの思考が長くなると、エンジンは思考の途中でモデルに思考を整理させ、context の中のそれまでの思考を整理した文に置き換えます。モデルは整理した文を土台に考え続けます。","Purpose: the model itself keeps in mind how much it has thought and how much is left, and paces itself.":"目的: モデル自身に「どれだけ考えたか、あとどれだけか」を意識させ、ペース配分させます。","Purpose: when the model closes its thinking, the engine has it organize its thinking before the answer and puts the organized text in the place of the thinking in the context: a long reasoning becomes a plan before the answer, and the next turns get only the organized text.":"目的: モデルが思考を閉じたとき、エンジンは答えの前にモデルに思考を整理させ、context の中の思考を整理した文に置き換えます。長く考えた結論を計画にまとめてから答えを書かせ、次のターンにも整理した文だけを渡して会話を軽くします。","RDMA devices":"RDMA のデバイス","Rank 0's port for the ranks' rendezvous (NCCL). A different one a lane.":"ランクどうしの待ち合わせ（NCCL）に rank 0 が使うポート。レーンごとに別にします。","Rendezvous port":"待ち合わせのポート","Ring":"リング","RDMA cores":"RDMA 通信のコア","SP parts":"SP の分割","Saved · next start":"保存済み · 次の起動から","Saved, used from the next start: {0}":"保存済み、次の起動から使う変更: {0}","Saved: the next start uses them (the running engine keeps its own until then).":"保存しました。次の起動から使います（いまのエンジンはそのまま）。","Saved: the next start uses them.":"保存しました。次の起動から使います。","Set the concurrent inferences above, not TF_GLM53_MULTI.":"TF_GLM53_MULTI ではなく、上の「同時推論」で決めてください。","Sets: yes or no and, with yes, every how many thinking tokens the model is told (256 or more). No is 0 in glm53.conf. A restart is needed.":"設定するもの: する・しないと、するときにモデルが何トークン考えるごとに知らせるか（256 以上）。glm53.conf では、しないは 0 です。再起動が要ります。","Sets: the positions a request may reach, a multiple of 16,384 from 65,536 to 1,048,576. A restart is needed.":"設定するもの: 1 回の要求が使える位置の数。16,384 の倍数で 65,536〜1,048,576。再起動が要ります。","Sets: yes or no (the inference screen's [ REASONING CONTROL ] sets it too) and, with yes, the share in: organize after a thinking of N% of the thinking limit or more. With no thinking limit the share is of the reply's limit. Counted as the thinking since the last organizing. No is 0 in glm53.conf.":"設定するもの: する・しない（推論画面の [ REASONING CONTROL ] でも変えられます）と、「思考の上限の ○○% 以上の思考がおこなわれたら整理する」の割合。思考の上限がなければ応答の上限に対する割合です。数えるのは最後に整理してからの思考です。glm53.conf では、しないは 0 です。","Organize after a thinking of {0}% of the thinking limit or more":"思考の上限の {0}% 以上の思考がおこなわれたら整理する","Note: a small share organizes the short checks between tool calls too, a minute or two each time.":"注意: 割合を小さくすると、道具を使うたびの短い確認まで整理して、そのたびに 1〜2 分かかります。","The weights other than the experts":"エキスパート以外の重み","Speculative decoding":"投機デコード","Start timeout":"起動を待つ時間","Organize at the close":"思考完了時整理","Organize midway":"中間整理","Switch":"スイッチ","The MB each log (each rank's, the watcher's, the launcher's) keeps in memory.":"エンジンの各ランク・見張り役・ランチャーが、それぞれのログをメモリにこの量まで残します。","The address the API listens on. 0.0.0.0: every address (the network). The API has no key: keep the nodes on a closed network, or 127.0.0.1 for this node only.":"API が受け付けるアドレス。0.0.0.0 = どこからでも（ネットワーク）。API キーはないので、閉じたネットワークに置くか、127.0.0.1 でこのノードだけにします。","The checkpoint, the same path on every node. It is changed on the launch screen's [ WEIGHTS ], which checks it on every node first.":"チェックポイント。全部のノードで同じパスに置きます。変えるのは起動画面の [ WEIGHTS ] で、そこで全部のノードを確かめてから保存します。","The conversations decoded together. 2 or more needs DCP 2 and the pool cache (not on 3 nodes yet). The launch screen may choose another for one start.":"同時に decode する会話の数。2 以上は DCP 2 と pool が要ります（3 台ではまだ使えません）。起動画面で起動ごとに選び直せます。","The devices the ranks' RDMA traffic uses, separated by commas. The node check writes them with the cabling.":"エンジンのランクどうしが RDMA の通信に使うデバイス（カンマ区切り）。ノード確認が接続の形と一緒に書きます。","The drafter's directory, the same path on every node. It is changed on the launch screen's [ WEIGHTS ].":"drafter のディレクトリ。全部のノードで同じパスに置きます。変えるのは起動画面の [ WEIGHTS ] です。","The interface the ranks rendezvous and talk control over. The node check writes it with the cabling.":"エンジンのランクどうしが待ち合わせと制御の通信に使うネットワークのインターフェース。ノード確認が接続の形と一緒に書きます。","The lane's nodes in rank order, as the node check registered them (glm53.nodes.conf). They are changed by the node check.":"レーンのノード（rank の順）。ノード確認が登録したもの（glm53.nodes.conf）。変えるのはノード確認です。","The launch screen shows [ WEIGHTS ] once the engine is stopped.":"起動画面の [ WEIGHTS ] は、エンジンを止めると出ます。","The launch screen starts from this value and makes it shorter when the memory does not hold it.":"起動画面はこの値から始め、メモリに入りきらなければ短くします。","The launcher keeps this much on every node for the OS and other processes and plans the engine's KV and work areas in the rest (2 to 32 GiB). The launch screen may choose another for one start.":"ランチャーは、各ノードでこの量を OS とほかのプロセスのために残し、残りでエンジンの KV と作業領域を計画します（2〜32 GiB）。起動画面で起動ごとに選び直せます。","The launcher waits this long for the engine to take requests after it starts it, then counts the start as failed.":"ランチャーは、エンジンを起動してから要求を受け付けられるようになるまでこの秒数待ち、越えたら起動の失敗とします。","The name the engine answers /v1/models and its replies with.":"エンジンが /v1/models と応答で返すモデルの名前。","The parts a prompt chunk is split into over the ranks (sequence parallel). Development.":"DCP 2 のとき、エンジンは prompt の 1 区切りをこの数に分けて、ランクで分担して計算します（系列並列）。開発用。","The port the engine takes API requests on (/v1/chat/completions, /v1/messages and the others). Changed only while the engine is stopped.":"エンジンが API（/v1/chat/completions、/v1/messages など）の要求を受け付けるポート。エンジンが止まっている間だけ変えられます。","The port the launcher serves this panel on. Used once the launcher is started again.":"ランチャーがこのパネルを出すポート。ランチャーを起動し直したときから使います。","The rows of a prompt chunk with DCP 2. More rows use more memory on every node, and the KV gets smaller.":"DCP 2 のときの prompt の 1 区切りの行数。増やすと各ノードのメモリを多く使い、KV が小さくなります。","The same as the start values in glm53.conf":"glm53.conf の起動時の値と同じです","The token fixes have their own rows above.":"切り方の直しは上の専用の行で決めてください。","The tokens drafted a round (1 to 7), with MTP only.":"1 回に下書きする数（1〜7）。MTP のときだけ。","The user's screen shows it too, as part of the thinking.":"注意: 利用者の画面にも、思考の一部として表示されます。","The user's screen still gets the whole thinking (the organized text replaces it in the model's context only).":"注意: 利用者の画面には思考の全文が表示されます（整理で消えるのはモデルの context の中だけ）。","The value at start. The value in use is changed on the inference screen's GPU split, and Use these at the next start too writes it here.":"起動したときの値。動作中の値は推論画面の「GPU の配分」で変え、「次の起動もこの値で」でここへ書けます。","Thinking and answer sizes":"思考と答えの大きさ","Thinking limit":"思考の上限","Organize every":"整理する間隔","About how often it organizes":"整理する間隔について","A reply of {0}: organized each {1} thinking tokens":"応答 {0} のとき: 思考 {1} トークンごとに整理","Organized each {0} thinking tokens":"思考 {0} トークンごとに整理","It takes the requests that start after it and is written to glm53.conf, so the next start keeps it.":"変えた後に始まる要求から効き、glm53.conf にも書くので、次の起動もこの値です。","A request that names its own thinking budget keeps it. With organizing midway it counts the thinking that took out of the KV too (virtual).":"自分で思考の予算を指定した要求は、その値のままです。中間整理ありでは、整理で KV から外した思考も数えます（仮想）。","The size target for organizing midway is on the engine settings screen.":"中間整理のサイズの目安は、エンジン設定の画面にあります。","How often organizing midway comes: each time the thinking since the last organizing reaches this share of the reply's limit (1,024 tokens at least), so a short reply organizes sooner. 100%: no organizing until the limit.":"中間整理の間隔です。最後の整理からの思考が、応答の上限のこの割合（最低 1,024 トークン）に届くたびに整理します。短い応答ほど早く整理します。100%: 上限まで整理しません。","It has to come before the thinking's limit, or be 100%; greyed while organizing midway is off.":"思考の上限より前か、100% にします。中間整理が「しない」の間は灰色です。","Organizing has to come before the thinking's limit ({0}%), or be 100%. It stays as it was.":"整理は思考の上限（{0}%）より前か、100% にしてください。元のままです。","Sets: the share of each reply's limit the thinking may use, 0 to 100; at it the engine has the model close its thinking and answer in the rest, so a short reply keeps room for its answer too. 0: no limit (the thinking may use the whole reply).":"設定するもの: 各応答の上限のうち思考に使える割合（0〜100）。そこに届くと、エンジンがモデルに思考を閉じさせ、残りで答えを書かせるので、短い応答でも答えの分が残ります。0 = 上限なし（思考が応答の全部を使えます）。","The inference screen's [ REASONING CONTROL ] sets it too; either shows the other's change. Saving it also clears an older token budget (THINKING_BUDGET).":"関係: 推論画面の [ REASONING CONTROL ] でも変えられ、どちらで変えても両方に出ます。保存すると、古いトークン数の予算（THINKING_BUDGET）は 0 になります。","Sets: yes or no (the inference screen's [ REASONING CONTROL ] sets it too).":"設定するもの: する・しない（推論画面の [ REASONING CONTROL ] でも変えられます）。","Sets: how often organizing midway comes, as a share of each reply's limit, 10 to 100 (1,024 tokens at least): each time the thinking since the last organizing reaches it. 100: none until the limit.":"設定するもの: 中間整理の間隔を、各応答の上限に対する割合で。10〜100（最低 1,024 トークン）。最後の整理からの思考がそこに届くたびに整理します。100 = 上限まで整理しません。","It has to come before the thinking's limit. The inference screen's [ REASONING CONTROL ] sets it too.":"関係: 思考の上限より前でなければなりません。推論画面の [ REASONING CONTROL ] でも変えられます。","Make it smaller than the thinking limit ({0}%), or 100: organizing midway has to come before it.":"思考の上限（{0}%）より小さくするか、100 にしてください。中間整理はそれより前でなければなりません。","While the engine runs, a save applies it at once":"エンジンの稼働中は、保存するとすぐ効きます","At once":"すぐ効く","Saved and applied at once: {0}.":"保存し、すぐ効かせました: {0}。","Saved. Applied at once: {0}; the rest from the next start.":"保存しました。すぐ効いたもの: {0}。ほかは次の起動から。","The engine did not take them: {0}":"エンジンが受け付けませんでした: {0}","About the thinking limit":"思考の上限について","No limit":"上限なし","About organizing midway":"中間整理について","About organizing at the close":"思考完了時整理について","From the next request":"次の要求から","From the next start":"次の起動から","The thinking may use the whole reply":"思考は応答の全部を使えます","A reply of {0}: thinking {1} · answer {2}":"応答 {0} のとき: 思考 {1} · 答え {2}","The share of each reply's limit the thinking may use. At it the engine has the model close its thinking and answer in the rest, so a short reply keeps room for its answer too (a reply's limit of 32,000 at 80%: thinking 25,600 · answer 6,400). 100: no limit, the thinking may use the whole reply.":"各応答の上限のうち、思考に使える割合です。そこに届くと、エンジンがモデルに思考を閉じさせ、残りで答えを書かせます。短い応答でも答えの分が残ります（応答の上限 32,000 で 80% なら 思考 25,600 · 答え 6,400）。100 = 上限なし（思考が応答の全部を使えます）。","Now a token budget of {0} (an older glm53.conf's THINKING_BUDGET). Moving this makes it a share.":"いまはトークン数の予算 {0}（古い glm53.conf の THINKING_BUDGET）です。動かすと割合になります。","Written to glm53.conf at once, used from the next start.":"すぐ glm53.conf に書き、次の起動から使います。","Yes: once the thinking grows past {0} tokens, the engine has the model organize it into a text that takes the place of the thinking before it, in the KV only (the client still gets all of it), and the model thinks on from it. No: the whole thinking stays in the KV.":"する: 思考が {0} トークンを超えるたびに、エンジンがモデルに思考を整理させ、それまでの思考を整理した文に置き換えます（置き換えるのは KV の中だけで、クライアントには全部届きます）。モデルは整理した文から考え続けます。しない: 思考は全部 KV に残ります。","Yes: once the thinking grows long, the engine has the model organize it into a text that takes the place of the thinking before it, in the KV only (the client still gets all of it). No: the whole thinking stays in the KV.":"する: 思考が長くなると、エンジンがモデルに思考を整理させ、それまでの思考を整理した文に置き換えます（置き換えるのは KV の中だけで、クライアントには全部届きます）。しない: 思考は全部 KV に残ります。","Now: drop the old part (set in glm53.conf), neither of these.":"いまは「古い部分を捨てる」（glm53.conf の設定）で、どちらでもありません。","Yes: after a thinking of {0}% of the thinking limit or more (counted since the last organizing), the model organizes it before the answer into a text that takes its place, so the next turns get only that. No: the thinking stays as written.":"する: 思考の上限の {0}% 以上の思考がおこなわれたら（数えるのは最後に整理してからの思考）、答えの前に思考を整理させて置き換えます。次のターンには整理した文だけが渡ります。しない: 思考は書いたまま残ります。","The share is on the engine settings screen.":"この割合は、エンジン設定の画面にあります。","this engine does not change its thinking settings while it runs":"このエンジンは動作中に思考の設定を変えられません","Saved: from the next start":"保存しました（次の起動から）","Could not change it ({0}). It stays as it was.":"変えられませんでした（{0}）。元のままです。","Example: 276,480 with the thinking limit at 80% leaves 55,296 for the answer.":"例: 276,480 で思考の上限が 80% なら、答えに 55,296 残ります。","A reply is its thinking and then its answer. A reply's limit is set here and the thinking's limit, a share of it, on [ REASONING CONTROL ]; the rest is left for the answer, and a thinking that ends early leaves the answer more.":"1 回の応答は、思考とそのあとの答えです。1 回の応答の上限はここで、思考の上限（その割合）は [ REASONING CONTROL ] で決め、残りが答えに残ります。思考が早く終われば、答えはそのぶん長く書けます。","A reply's limit {0}":"1 回の応答の上限 {0}","The answer's part":"答えの分","The share is of a reply's limit, at most of what the prompt leaves of the context length, so the sizes change with each prompt.":"割合は 1 回の応答の上限の、ただし prompt が context length に残す分までの割合です。大きさは prompt ごとに変わります。","Sets: the tokens one reply may write at most, as a share of the context length, 1 to 100. A restart is needed.":"設定するもの: 1 回の応答で書けるトークン数の上限を、context length に対する割合で。1〜100。再起動が要ります。","When the client sends its own max_tokens, that comes first.":"クライアントが max_tokens を送れば、そちらが優先します。","Example: 70% of a context length of 1,048,576 is 734,003 tokens.":"例: context length 1,048,576 の 70% は 734,003 トークンです。","{0}% · {1} tokens":"{0}% · {1} トークン","An older glm53.conf's MAX_TOKENS of {0} comes first until this is moved and saved, which clears it.":"古い glm53.conf の MAX_TOKENS {0} が優先されています。スライダーを動かして保存すると、割合に変わり MAX_TOKENS は消えます。","Thinking (the limit)":"思考（上限）","Thinking (the limit, virtual)":"思考（上限、仮想）","With organizing midway the engine puts an organized text in the place of the thinking before it, in the KV only (the client still gets all of it). So a reply's limit and the thinking limit count the tokens written (virtual) and may pass the context length, while the KV holds only the thinking since the last organizing and the answer.":"中間整理ありでは、エンジンがそれまでの思考を整理した文に置き換えます（置き換えるのは KV の中だけで、クライアントには全部届きます）。そのため 1 回の応答の上限と思考の上限は書いたトークンの数（仮想）で、context length を超えられます。KV に載るのは、最後の整理からの思考と答えだけです。","When the thinking limit ends the thinking, the same organizing takes the place of the closing sentence.":"関係: 思考の上限で思考が終わるときも、締めの一文の代わりに同じ整理を書かせます。","KV and context length":"KV と context length","For: every conversation: the KV cache is one pool of 256-position blocks they share.":"対象: すべての会話。KV キャッシュは、会話で分け合う 256 位置のブロックの 1 つのプールです。","Sets: the KV cache's positions in all, at least the context length (512 more with the pool). A start from this panel always takes all the room the plan leaves (the launch screen's KV rows show it); this value is for a start with tf-glm53 up. A restart is needed.":"設定するもの: KV キャッシュ全体の位置の数。context length 以上（pool では 512 多く）。このパネルからの起動は、いつも計画が残す空きを全部使います（起動画面の KV の行に出ます）。この値は tf-glm53 up で起動するときのものです。再起動が要ります。","A request takes up to the context length; the rest keeps earlier conversations' KV in whatever blocks are free, so their next turn resumes from the cache.":"関係: 1 回の要求が使うのは context length までで、残りには前の会話の KV が空いているブロックに残り、次のターンをキャッシュから続けられます。","Virtual":"仮想","Organizing midway takes thinking out of the KV, so this counts the tokens written and may pass the context length":"中間整理で思考が KV から外れるので、書いたトークンの数で数え、context length を超えることがあります","Sets: the tokens one reply may write at most, for a request that does not name its own max_tokens. From 1,024. A restart is needed.":"設定するもの: 1 回の応答で書けるトークン数の上限（max_tokens を指定しない要求に使う）。1,024 以上。再起動が要ります。","With organizing midway, or near the budget's end, it is virtual: the thinking they take out of the KV still counts, so it may pass the context length. With both off, a request that names a max_tokens which does not fit beside its prompt is refused (400).":"関係: 中間整理か予算の終わりの整理があれば仮想です。KV から外した思考も数えるので、context length を超えられます。両方オフでは、prompt の横に収まらない max_tokens を指定した要求は断られます (400)。","A request that names its max_tokens gets its own. The panel writes it to MAX_TOKENS.":"max_tokens を指定した要求は、その値を使います。パネルはこの値を MAX_TOKENS に書きます。","Thinking and answer":"思考と答え","What the client receives · a reply's limit {0} (virtual)":"クライアントに届く量 · 1 回の応答の上限 {0}（仮想）","Thinking and answer (virtual)":"思考と答え（仮想）","Token fix at the close":"閉じた時の切り方の直し","Wait for room at most":"空きを待つ上限","When the model closes its thinking, the engine compares the tokens the model wrote with the tokenizer's own split of the text and fixes them where they differ, so the next turn hits the cache. near: only when the difference is within the end's range. all: always. off: never. Passed in EXTRA_ENV.":"モデルが思考を閉じたとき、エンジンはモデルが出したトークンの切り方をトークナイザーの標準の切り方と比べ、違えば直します。次のターンでキャッシュを当てるためです。near = 違いが末尾の範囲の中にあるときだけ直す。all = いつも直す。off = 直さない。追加の環境変数で渡します。","While stopped":"停止中だけ","While the engine runs it stays as it is: change it once the engine is stopped.":"エンジンが動いている間は変えられません。止めてから変えてください。","With DFlash2 the engine keeps the drafter's state for this many conversations, so their next turn need not rebuild it. Concurrent inference with DFlash2 needs 1 or more.":"DFlash2 のとき、エンジンはこの数の会話について drafter の状態を残し、次のターンで作り直さずに使います。同時推論と DFlash2 では 1 以上が要ります。","With near, the engine fixes a difference only within this many tokens at the end of the thinking; one before it is computed again at the next turn.":"near のとき、エンジンは違いが思考の最後のこのトークン数の中にあるときだけ直します。それより前の違いは、次のターンでエンジンが計算し直します。","Write NAME=value, separated by spaces.":"NAME=値 を空白で区切って書いてください。","Written to glm53.conf: the next start uses these.":"glm53.conf に書きました。次の起動からこの値です。","Yes":"する","conversations":"件","fp4 takes half the memory of fp8, a little less accurate. The launch screen may choose another for one start.":"fp4 は fp8 の半分のメモリで、精度が少しだけ下がります。起動画面で起動ごとに選び直せます。","glm53.conf was not written ({0}).":"glm53.conf に書けませんでした（{0}）。","glm53.conf was not written: see the rows in red.":"glm53.conf に書けませんでした。赤の行を見てください。","rows":"行","the launcher does not answer":"ランチャーが応答しません","tokens each":"tokens ごと","{0} changes not saved: {1}":"未保存の変更 {0} 件: {1}","{0} nodes":"{0} 台","{0} or more":"{0} 以上","{0} to {1}":"{0}〜{1}","{0} unsaved":"未保存 {0}","Screens":"画面","Engine settings":"エンジン設定","Use these at the next start too":"次の起動もこの値で","Revert":"元に戻す","Save and restart":"保存して再起動","Restart":"再起動する","Restart without saving":"保存せず再起動","Restarting":"再起動中","The restart was cancelled. The settings saved are used from the next start.":"再起動は取り消しました。保存した設定は次の起動から使います。","Saves the settings and restarts the engine: the requests running stop, and the conversations in the KV pool are lost. Starting again takes a few minutes. Next comes the stop's question: whether to save this run's usage.":"保存してエンジンを再起動します。推論中の要求は止まり、KV プールの会話は消えます。起動し直すには数分かかります。このあと、停止と同じく、この稼働の利用記録を保存するかを聞きます。","These are the settings that need a restart. Save writes them to glm53.conf and the next start uses them; Save and restart uses them now.":"ここは再起動が必要な設定だけです。保存すると glm53.conf に書き、次の起動から使います。稼働中にすぐ効かせるなら「保存して再起動」。","The settings that change while running (the GPU split, the expert optimisation) are on the inference screen.":"動作中に変えられる設定（GPU の配分、エキスパート最適化）は推論画面にあります。","seconds":"秒","Start complete":"起動完了","last":"前回","The last one: nothing of it runs now":"前回の値（いまは動いていません）","When the prompt leaves less of the context length than a reply's limit, the share is of what it leaves.":"prompt が残す context length の方が応答の上限より小さいときは、残す分に対する割合です。","{0}% of the reply's limit":"応答の上限の {0}%","100%: no organizing until the limit":"100%: 上限まで整理しない","A725 only":"A725 だけ","Concurrent inference needs DCP 2.":"同時推論には DCP 2 が要ります。","The KV is split over two ranks (three on three nodes).":"KV を 2 ランクに分けます（3 台では 3 ランク）。","The cores the RoCE proxy threads poll on (they spin while the decode runs): A725 (cores 0 and 10, so they do not heat the fast cores) or OS (the scheduler's).":"RoCE の通信スレッドが待つ CPU（decode の間は回り続けます）。A725 = コア 0 と 10（速い X925 を温めません）、OS = スケジューラーに任せます。","Size target for organizing midway":"中間整理のサイズの目安","Sets: about how long it may be, as a share of the thinking it organizes, 10 to 100 (128 tokens at least), for organizing midway and at the close, not near the budget's end. A restart is needed.":"設定するもの: 整理した文の長さの目安を、整理する思考に対する割合で。10〜100（最低 128 トークン）。中間整理と思考完了時整理に効き、予算の終わりの整理には効きません。再起動が要ります。","Purpose: an organized text does not grow so long that it uses the context.":"目的: 整理した文が長くなりすぎて context を使うのを防ぎます。","Example: 70 keeps the text to about 70% of the thinking it organizes.":"例: 70 なら、整理した文は整理する思考の約 70% までです。"}</script>
+<script id="i18n" type="application/json">{"1 line":"1 本","1 token at a time":"1 token ずつ","10 s ·":"10 秒 ·","2 rows":"2 段","3 rows":"3 段","4 rows":"4 段","7-segment":"7 セグ","8 lines":"8 本","Abort":"中止","Accuracy":"精度","Afterglow":"残光","Agent":"エージェント","Agent A":"エージェント A","Agent B":"エージェント B","Aizome (Japanese colours)":"藍染 (和色)","All":"全部","Allocated (rank 0)":"確保 (rank 0)","Along the rings":"同心円に沿う","Already running":"起動済み","Amber terminal":"琥珀の端末","Any colour":"好きな色","Apply":"実行","Auto":"自動","Average bits":"平均ビット数","Balanced":"均衡","Beads":"数珠","Blue":"青","Brief":"短い","By bit":"bit ごとに変える","By inference":"推論ごと","By number":"番号順","By time":"時間ごと","By use":"使用順","Cancel":"取消","Catppuccin · mauve and grey":"Catppuccin · 藤と灰","Centre":"中心","Centre cells":"中心のマス","Centre row {0}, column {1}":"中心 {0} 段目 {1} 列","Centre row {0}, join columns {1}":"中心 {0} 段目 {1} 列を結合","Check":"確認","Circle":"サークル","Coding":"コーディング","Coding (en)":"コーディング 英","Coding (ja)":"コーディング 日","Colour":"色","Colours":"配色","Confirm":"確定","Constellation":"星座","Conversation caches":"会話のキャッシュ","Could not load the data or the drawing area.":"データまたは描画領域を読み込めなかった。","Could not read the usage counts from the engine (it counts them with TF_GLM53_EXPERT_LIVE=1).":"エンジンから使用回数を読めなかった (数えるのは TF_GLM53_EXPERT_LIVE=1 のとき)。","Count":"利用記録","Crimson and ink (Japanese colours)":"紅と墨 (和色)","Crystal":"結晶","Cyan":"水色","Data":"データ","Data visualisation":"データ可視化","Decode read":"decode の読み込み","Design first":"デザイン優先","Design systems":"デザインシステム","Digits":"数字","Display":"表示設定","Diverging":"発散","Does not fit":"入らない","Domains":"分野","Done":"完了","Dot LED":"ドット LED","Dracula · purple and pink":"Dracula · 紫と桃","Dropped":"消える","Editor themes":"エディタのテーマ","Effects":"演出","Elapsed":"経過","English":"英語","Estimate":"見積もり","Estimating":"見積もり中","Expert map":"expert の地図","Expert size":"expertサイズ","Experts":"exp数","Experts changed":"変わった expert","Experts to change":"変わる expert","Failed":"失敗","Failed · ":"失敗 · ","Can start":"起動できます","Flip-dot":"フリップドット","Free":"空き","From":"開始","Gaps":"区切り","Green":"緑","Green terminal":"緑の端末","Green · one hue":"グリーン · 一色","Greys + an accent":"無彩色 + 差し色","Gruvbox · warm":"Gruvbox · 暖色","Hide":"非表示","How long the light stays: longer keeps the experts picked again and again brighter":"光が残る長さ。長くすると、くり返し選ばれた expert ほど明るく残る","Hue wheel":"色相環","Inference stopped":"推論停止中","Inference stops":"推論の停止","Inflow":"流入","Japanese":"日本語","Join":"結合","KV room":"KV に回せる量","KV size":"KVサイズ","KV store":"KV 保存","Lamp":"点灯","Language":"言語","Layers":"層","Layers kept":"動かさない層","Light colour":"光の色","Light up":"光らせる","Line shape":"線","Lines":"本数","Linux ops (en)":"Linux 運用 英","Linux ops (ja)":"Linux 運用 日","Live":"ライブ","Load":"読み込み","Loading the domains…":"分野を読み込み中…","Loading the usage counts…":"使用回数を読み込み中…","MOCK ↺ Before start":"MOCK ↺ 起動前","Map of the 19,200 routed experts: layer 3 inside, layer 77 outside.":"19,200 個の routed expert の地図。内側が層 3、外側が層 77。","Margin":"余裕","Material · indigo":"Material · 藍","Material · teal":"Material · 青緑","Mean bits":"平均bit","Measured":"実測","Measured: usage (8 nodes · 12 domains) · estimated: 2/5 bit · decode · memory":"実測: 使用回数 (8 台 · 12 分野) · 推定: 2/5 bit · decode · メモリ","Memory":"メモリ","Memory bar":"メモリの棒","Needed":"必要","Nixie":"ニキシー管","No data":"データなし","No data · ":"データなし · ","No light":"光らせない","No usage":"利用記録なし","None":"なし","Nord · frost and night":"Nord · 霜と夜","Ocean (Tailwind)":"海 (Tailwind)","One colour":"1 色","Optimise experts":"エキスパート最適化","Orange":"オレンジ","Order":"並べ方","Other GPU processes · ":"ほかの GPU プロセス · ","Other weights":"ほかの重み","Pause":"再生を止める","Picked experts":"選ばれた expert","Plan":"計画","Play":"再生する","Purple":"紫","Random":"ランダム","Range":"範囲","Rank in its layer":"層の中の順位","Real speed":"実速度","Recorded":"実データ","Red":"赤","Ring interval (s)":"光の輪の間隔 (秒)","Rings":"光の輪","Rings are off":"光の輪は停止中","Ripples":"波紋","Rosé Pine · dawn":"Rosé Pine · 夜明け","Rows":"段","Running":"稼働中","Save":"保存","Save and stop":"保存して停止","Saved":"保存","Saved only · no change while running":"保存のみ · 動作中は変えない","Scan":"走査","Security (en)":"セキュリティ 英","Security (ja)":"セキュリティ 日","Sending":"送信","Set now":"いまの設定","Share":"割合","Share of picks":"選択の割合","Short":"不足","Show":"表示","Simulation":"シミュレーション","Size (MiB)":"サイズ (MiB)","Sky":"星空","Sorted by":"元の利用記録","Sorted by decode":"元の利用記録 decode","Sorted by prefill":"元の利用記録 prefill","Sparkle":"きらめき","Speed":"速さ","Spiral":"渦","Split-flap":"パタパタ","Standard":"標準","Start":"起動","Starting":"起動中","Still":"回転しない","Stop":"停止","Stop without saving":"保存せず停止","Stopped":"停止中","Stopping":"停止処理中","Straight":"対角線","Suggested":"提案","Test run":"試運転","Text":"文字","Text and centre":"文字と中心","The last run":"前回の稼働","The text's start goes round once a minute":"書き始めを 60 秒で 1 周させる","This browser could not unpack the usage counts (DecompressionStream is needed).":"このブラウザでは使用回数を展開できなかった (DecompressionStream が要る)。","This run":"この稼働","This run decode":"この稼働 decode","This run prefill":"この稼働 prefill","Can start (little room)":"起動できます（余裕なし）","Not enough memory":"メモリ不足","Not saved ({0}): used for this start only.":"保存できませんでした（{0}）。この起動にだけ使います。","Time":"時間","Tones · blue":"濃淡 · 青","Turn":"回転する","Usage":"使用頻度","Use":"利用率","View":"見せ方","Waiting for the request to end":"推論の終わりを待つ","Warm-up":"準備","Weights":"重み","Where use order starts (o'clock)":"使用順の開始 (時)","White":"白","Work":"作業域","Yellow":"黄","about ":"約 ","auto: a random colour and order every 30 s":"auto: 30 秒ごとに色と並べ方をランダムに","bit share of picks %":"bit 採択率 %","bit × usage":"bit × 使用頻度","bpw over the last 3 minutes":"bpw の推移 (直近 3 分)","est.":"推定","for a start after a stop":"停止後の起動用","layers":"層","left":"残り","mock only":"モックだけ","now":"今","o'clock":"時","runs":"回","s":"秒ごと","saved":"保存済み","{0} s ago":"{0} 秒前","−1 min":"−1 分","−2 min":"−2 分","−3 min":"−3 分","General":"全般","Bit colours":"bit の色","Pair":"組み合わせる色","Complement":"補色","Rim text":"外周の文字","Back to the preset":"プリセットに戻す","Blink":"点滅","Drafter":"ドラフター","Nodes":"ノード","Max":"最大","cut":"切り詰め","Offset":"オフセット","Centre offset X (px)":"中心のオフセット X (px)","Centre offset Y (px)":"中心のオフセット Y (px)","Keep for the OS":"OS に残す","Unpicked brightness":"未選択の明るさ","Picked brightness":"選択の明るさ","The step (of 24) an expert not picked rests at; 6 by default":"選ばれていない expert の明るさ (24 段の何段目か。既定は 6)","The step (of 24) a picked expert lights up to; 19 by default":"選ばれた expert が光る最大の明るさ (24 段の何段目か。既定は 19)","Open":"開く","Rename":"名前の変更","Delete":"削除","Name":"名前","Note":"メモ","New name":"新しい名前","deleted":"削除済み","New · unsaved":"新規 · 未保存","Optimised · unsaved":"最適化 · 未保存","No change while running":"動作中は変えません","Shares":"割合","Optimised":"最適化","Re-sort":"並べ替え","Saved while running":"稼働中に保存","Copy":"複製","The rest: the narrowest width with data":"残り (データのある一番狭い幅)","Reading…":"読み込み中…","This launcher keeps no list of saved allocations":"このランチャーは保存した割り当ての一覧を出しません","No saved allocations yet":"保存した割り当てはまだありません","Could not read the list":"一覧を読めませんでした","Could not read {0}":"{0} を読めませんでした","Cannot start on this lane":"このレーンでは起動できません","Name: letters, digits and _ . - (64 at most, not starting with . or -)":"名前: 英数字と _ . - (64 文字まで。. と - は先頭に使えません)","That name is taken":"その名前はもうあります","Saving…":"保存中…","Saved allocations and the last run":"保存した割り当てと前回の稼働","Save under a name":"名前を付けて保存","Save for a start":"起動用に保存","Allocation name":"割り当ての名前","Saved as {0} · ":"{0} で保存済み · ","The bits loaded are not read yet":"載っている bit をまだ読めていません","Usage record":"利用記録","Give the allocation a name":"割り当ての名前を入れてください","That name is taken: press again to overwrite it":"その名前はもうあります。もう一度押すと上書きします","{0} runs":"{0} 回","How Max is found":"最大の出し方","This drafter":"このドラフター","Max is the longest request the memory left after the start holds. The experts, the other weights and the KV are computed; the work area (CUDA, buffers, graphs, and DFlash2's model and state) is not.":"最大は、起動後に残るメモリで受けられる最長の要求です。expert・ほかの重み・KV は計算で出せますが、作業域 (CUDA、計算の途中の置き場、グラフ、DFlash2 のモデルと状態) は出せません。","After each start the launcher measures each node's memory and keeps the work area it found, a drafter at a time. Later starts with that drafter on as many nodes are planned from it.":"起動のたびにランチャーが各ノードのメモリを測り、作業域の実際の大きさをドラフターごとに残します。同じドラフター・同じ台数の次の起動から、その値で見積もります。","Until a start with the drafter has been measured, the plan takes built-in sizes and keeps 2 GiB more, so Max is shorter (est.).":"そのドラフターでまだ起動していないあいだは、組み込みの値に 2 GiB の余裕を足して見積もるので、最大は短めになります (推定)。","The measurement is taken just after the start, with nothing running. Requests make the work area grow a little, so at Max a node can dip a little under what it keeps for the OS.":"測るのは起動直後の、何も動いていないときです。推論中は作業域が少し増えるので、最大で動かすとノードの空きが「OS に残す」量を少し割ることがあります。","Now: {0}, estimated (not started on this lane yet)":"いま: {0} は推定 (このレーンでまだ起動していない)","Now: {0}, measured":"いま: {0} は実測","Server":"サーバー","Node count":"台数","Another node count: plans are estimated until a start on it has been measured":"台数を変えると、その台数で一度起動して測るまで、起動前の見積もりは推定です","Saved.":"保存しました","Next start: {0}":"次回起動時反映: {0}","Check and save":"確認して保存","Being checked":"確認中","Fix the rows marked ✕, then press again":"✕ の行を直して、もう一度押してください","The check no longer matches these paths: press again":"確認した内容と保存する内容が変わりました。もう一度押してください","A check is running: press again when it ends":"確認が動いています。終わってからもう一度押してください","The check did not finish: press again":"確認が終わりませんでした。もう一度押してください","Only while the engine is stopped":"エンジンが止まっている間だけ変えられます","Nothing changed":"変更なし","Check this list, then save":"確認してから保存します","Registered workers":"登録済みの worker","Use {0} / {1}":"使う {0} / {1}","A worker's address (ConnectX-7)":"worker のアドレス (ConnectX-7)","Add":"追加","Tick {0} workers":"worker を {0} 台チェックしてください","That address cannot be added: empty, malformed, the head, or registered already":"このアドレスは追加できません (空欄・形の誤り・head・登録済み)","The lane uses it now: untick it and save, then it can be deleted":"今のレーンで使っています。チェックを外して保存すると削除できます","Back to defaults":"既定に戻す","Every viewer of this lane gets the defaults":"このレーンを見る全員の表示が既定に戻ります","Memory per node":"ノードごとのメモリ","for the swap":"入れ替えに要る","Least available":"最も少ない空き","{0} has {1} GiB available and changing the experts needs {2} GiB on every node. A start with more in Keep for the OS leaves room for it (the KV takes all the room the plan leaves, whatever the context length).":"{0} の空きは {1} GiB で、エキスパートの入れ替えにはどのノードにも {2} GiB 要ります。「OS に残す」を増やして起動すると空きができます（KV は context length に関係なく、計画が残す空きを全部使います）。","Rendezvous":"待ち合わせ","Image":"イメージ","Expert banks":"expert の bank","Kernel · driver · FW":"カーネル · ドライバ · FW","Package":"パッケージ","Key refused":"鍵で入れない","Host key unknown":"ホスト鍵が未登録","No answer":"応答なし","LAN address unknown":"LAN のアドレス不明","No link":"リンクなし","link {0}G":"リンク {0}G","Not a GB10":"GB10 でない","In use":"使用中","GPU in use · {0}":"GPU 使用中 · {0}","Each node":"ノードごと","GPU in use ({0})":"GPU 使用中（{0}）","{0} GiB free":"空き {0} GiB","CX7: {0}'s LLDP":"CX7: {0} の LLDP","GB10: LAN address (NODES · ARP) · the head's key · nvidia-smi · MemAvailable · LLDP":"GB10: LAN のアドレス（NODES · ARP）· head の鍵 · nvidia-smi · MemAvailable · LLDP","Ring: {0}":"リング: {0}","RING: closed · {0}":"リング: 閉じた · {0}","RING: open":"リング: 閉じていない","RING: none":"リング: なし","Scanning the network":"ネットワーク走査中","Not traced":"たどる前","No ring":"リングなし","Ring open":"リングが閉じていない","A node not read":"読めない台あり","A node in use":"使用中の台あり","Not crossed":"交差していない線あり","A lane down":"片側だけの線あり","Ring · as set":"リング · 設定と同じ","Differs from the settings":"設定と違う","Not registered":"未登録","{0} {1}: no link":"{0} {1}: リンクなし","{0} ⇄ {1}: not crossed (port 0 to the next node's port 1)":"{0} ⇄ {1}: 交差していない（port 0 を隣の port 1 へ）","{0}: {1} down":"{0}: {1} が落ちている","{0}: GPU in use · {1}":"{0}: GPU 使用中 · {1}","{0}: not a GB10":"{0}: GB10 でない","not crossed":"交差していない","Read again":"もう一度読む","{0}'s LAN address":"{0} の LAN のアドレス","open":"閉じていない","Checking":"確かめています","Not checked":"確認がまだ","All present":"そろった","Error {0}":"error {0}","Register these nodes":"このノードを登録します","Measuring…":"測っています…","Measure bandwidth":"帯域を測る","closed":"閉じた","Check: {0}":"確認: {0}","CHECK: tf-glm53 deploy + check · {0}":"確認: tf-glm53 deploy + check · {0}","  all present":"  そろった","  error":"  error","Bandwidth: {0}":"帯域: {0}","BANDWIDTH: ib_write_bw · a lane and a direction at a time":"帯域: ib_write_bw · 1 レーン 1 方向ずつ","failed":"失敗","  {0} runs · {1} to {2} Gb/s":"  {0} 本 · {1}〜{2} Gb/s","Pull: {0}":"イメージ: {0}","Register: {0}":"登録: {0}","Registered · NODES {0}":"登録しました · NODES {0}","An IPv4 address on the LAN":"LAN の IPv4 アドレス","PROBE {0} · ssh · nvidia-smi · LLDP":"読む {0} · ssh · nvidia-smi · LLDP","{0} is {1}, not {2}":"{0} は {1}（{2} ではない）","{0} nodes · registered":"{0} 台 · 登録済み","Last node check · {0}":"最後のノード確認 · {0}","Started":"起動済み","Starting {0} %":"起動中 {0} %","Down":"断","Link":"線","Even lane":"偶数レーン","Odd lane":"奇数レーン","Servers and ring":"サーバーとリング","Launch settings":"起動設定","Live panel":"稼働","Startup flow":"起動の流れ","Close":"閉じる","Terminal · the head node":"ターミナル · 先頭ノード","On the head node, ./tf-glm53 up starts the launcher, which prints the panel's address.":"先頭ノードで ./tf-glm53 up。ランチャーが起動して、パネルのアドレスを出します。","Open that address in a browser.":"そのアドレスをブラウザで開きます。","The first time, it opens on the server check; once the nodes are registered, on the launch settings.":"初めてはサーバー確認から、ノードを登録したあとは起動設定から開きます。","Server check":"サーバー確認","\"Detect\" reads what the head node's CX7 cables reach: a ring, or a switch.":"「検出」で、先頭ノードの CX7 の先がリングかスイッチかを見ます。","A ring goes on by itself through the check, the registration and the bandwidth, then \"Environment check complete\" and the launch settings.":"リングは確認・登録・帯域まで続けて進み、「環境確認完了」のあと起動設定へ移ります。","A switch lists the servers that answer ssh on the CX7 /24: choose the ones to use, then \"Check\" and \"Register\".":"スイッチは CX7 の /24 で ssh に答えるサーバーを並べます。使うものを選び、「確認」から「登録」へ。","[ BIT ALLOC ] sets each expert's bits.":"[ BIT ALLOC ] で expert ごとの bit を決めます。","[ NODE ] shows each node's memory and the verdict, and takes the KV, the drafter and the concurrent inferences. \"Not enough memory\" cannot start.":"[ NODE ] に各ノードのメモリと判定。KV・ドラフター・同時推論もここで選びます。「メモリ不足」では起動できません。","[ WEIGHTS ] sets where the weights are.":"重みの場所は [ WEIGHTS ] で決めます。","within 8 s":"8 秒以内","Press \"Start\", then \"Confirm\" within 8 seconds.":"「起動」を押し、8 秒以内に「確定」を押します。","While the weights load, the circle lights layer by layer.":"重みを読み込むあいだ、読んだ層からサークルが点きます。","When it is ready, the panel turns to the live screen. \"Stop\" in [ NODE ] stops it.":"終わると稼働の画面に変わります。止めるときは [ NODE ] の「停止」。","In the ring":"接続ノード","Unavailable":"使用不可","The head's LLDP":"head の LLDP","Key · GPU · LLDP":"鍵 · GPU · LLDP","Until it closes":"閉じるまで","Pull the image":"イメージをそろえる","Register":"登録","Steps":"手順","The ring the head's CX7 cables make":"head の CX7 の線がつくるリング","No key":"鍵なし","No address":"アドレス不明","CHECK: tf-glm53 check · {0}":"確認: tf-glm53 check · {0}","  the package not copied":"  パッケージが未配布","The engine gives no usage counts (it counts them when started with TF_GLM53_EXPERT_LIVE=1, as a start from this panel is): no picks and no optimisation.":"エンジンから使用回数が来ません (数えるのは TF_GLM53_EXPERT_LIVE=1 で起動したとき。このパネルからの起動はそうなります)。選択の表示と最適化はありません。","Detect":"検出","Detect again":"再検出","Detecting…":"検出中…","Registered":"登録済み","glm53.conf has no workers":"glm53.conf に worker なし","Brightness · Gb/s":"明るさ · Gb/s","Non-expert":"expert 以外","embeddings etc. BF16":"埋め込み等 BF16","expert {0} bit · other {1} bit":"expert {0} bit · ほか {1} bit","RING-{0} · {1} links · {2} lanes":"RING-{0} · {1} 本 · {2} レーン","Shared":"共有","Conversations":"会話","Evicted":"押し出し","continued":"続き","shared start":"共有","new":"新規","Requests":"リクエスト","Read from the cache":"キャッシュヒット","in use":"推論中","next trimmed":"削除候補","{0} min ago":"{0} 分前","{0} h ago":"{0} 時間前","not in the engine yet (mock)":"エンジンにまだない口（モック）","The KV pool's blocks: the shared start, the conversations kept, free":"KV pool のブロック: 共有の頭、保存中の会話、空き","in block order":"ブロックの並び","grouped by kind":"種類ごと","Cache in use":"使っているキャッシュ","Newly added":"新しく足された分","On the circle":"サークルに表示","running":"推論中","auto":"自動","chosen":"選択","Chosen":"選択中","not running":"待機中","Other inferences":"ほかの推論","Chosen conversation":"選択中の会話","Choose a row to switch":"行を選ぶと切り替わります","Shown on the circle and the map; choose again for automatic":"サークルと地図に表示する会話を選びます（もう一度で自動）","Bandwidth":"帯域","Environment check complete":"環境確認完了","Concurrent":"同時推論","{0} each":"1 本あたり {0}","{0} GiB a node":"ノードあたり {0} GiB","in flight":"推論中","{0} s left":"残り {0} 秒","BANDWIDTH: ib_write_bw · each lane both ways, several at once":"帯域: ib_write_bw · レーンごとに両向き、いくつか同時に","decode total":"decode 合計","GPU split":"GPU の配分","Priority prompt":"優先 prompt","Lower the priority prompt's limit":"優先 prompt の上限を下げる","Raise the priority prompt's limit":"優先 prompt の上限を上げる","Overtake a running prefill too":"実行中の prefill も追い越す","0: off · counted: the new tokens past the cache":"0 で無効 · 数えるのはキャッシュより後ろの新しい tokens","the engine does not answer":"エンジンが応答しません","the engine takes it only with an API key or from the head node":"API キーか先頭ノードからでないとエンジンが受け付けません","this engine has no schedule":"このエンジンには配分がありません","Applying…":"反映中…","Applied":"反映しました","Prompts first: while a prefill runs the decode stops, and the prompts waiting are taken one after another.":"prompt を先に計算します。prefill の間は decode を止め、待っている prompt も続けて受け入れます。","Decode first: while a conversation is generating, new prompts wait (a running prefill stops too).":"decode を先にします。生成中の会話がある間、新しい prompt は待ちます（実行中の prefill も止まります）。"," Priority prompts (up to {0} tokens) go through.":"優先 prompt（{0} tokens 以下）は通します。"," Priority prompts wait too.":"優先 prompt も待ちます。","While prompts and decoding overlap, {0}% of the GPU's time goes to the decode. When only one of them has work, it uses all of it.":"prompt と decode が重なる間、GPU の時間の {0}% を decode に回します。片方だけのときは、その仕事が全部を使います。","prompts waiting <b>{0}<\/b> · longest {1} s":"prompt 待ち <b>{0}<\/b> · 最長 {1} 秒","No priority prompts: the prompts waiting go in the order they came, by the split.":"優先 prompt はありません。待っている prompt は来た順に、配分に従って入ります。","A prompt with up to {0} new tokens to compute goes in first whatever the split and is computed without a pause (meanwhile the GPU is all the prompt's and the decode stops).":"新しく計算するのが {0} tokens 以下の prompt は、配分にかかわらず先に入り、止まらずに計算します（その間 GPU は prompt に 100% で、decode は止まります）。","On: a long prefill running gives way to a priority prompt too and goes on from what it finished (the chunk it was in is computed again, so the long one is up to a chunk later).":"オン: 実行中の長い prefill も優先 prompt に譲り、終わった分から続けます（途中のチャンクは計算し直すので、長い方が最大 1 チャンク遅れます）。","Off (default): a priority prompt waits until the running prefill ends.":"オフ（既定）: 優先 prompt は、実行中の prefill が終わるまで待ちます。","At start {0}":"起動時 {0}","Could not change it ({0}). It stays at {1}.":"変更できませんでした（{0}）。いまの値 {1} のままです。","Give 0 to {0} tokens. It stays at {1}.":"0〜{0} tokens で入れてください。いまの値 {1} のままです。","Could not change it ({0}). It stays {1}.":"変更できませんでした（{0}）。{1}のままです。","on":"オン","off":"オフ","mixed":"混在","DCP pair":"DCP 組","Between nodes":"ノード間"," (where they ran last)":"（いま動いている CPU）"," (kept there from the start)":"（起動時に固定）","kept on A725":"A725固定","kept on X925":"X925固定","left to the OS":"OS 任せ","the head shows the cores they run on now; the OS moves the other nodes', so —":"head は今動いているコア、ほかのノードは OS が動かすので「—」","About the GPU split":"GPU の配分について","About priority prompts":"優先 prompt について","About overtaking a running prefill":"追い越しについて","Node check":"ノード確認","Check the nodes":"ノード確認","Check the nodes again":"もう一度ノード確認","Checking the nodes…":"ノード確認中…","Check the nodes first":"先にノード確認","CX7: the head's ports · ssh (tcp/22) on each /24":"CX7: head のポート · /24 ごとに ssh (tcp/22)","The head's ports":"head のポート","Each /24":"/24 ごと","Key · GPU":"鍵 · GPU","Ring or switch":"リングかスイッチか","{0} answer":"{0} 台が応答","down":"落ちている","LINK: one GB10 at the end of each cable · a ring":"LINK: 線の先はそれぞれ GB10 · リング","LINK: one cable · {0} · {1}":"LINK: 1 本の線 · {0} · {1}","No other node":"ほかの台なし","No other node answers over ConnectX-7":"ConnectX-7 の先で答える台がない","No other host answered ssh on this /24":"この /24 で ssh に答えた台はない","in this lane":"このレーン","On the switch":"スイッチの先","SWITCH · {0} nodes":"SWITCH · {0} 台","of {0} nodes":"{0} 台のうち","GB10 · free":"GB10 · 空き","Ring · registered":"リング · 登録済み","Differs from the registered nodes":"登録と違う","written by Register":"登録で書く","Check this list, then register":"この一覧を確認してから登録","Checkpoint":"チェックポイント","with its MTP layer":"MTP 層つき","Empty: not used":"空なら使わない","{0}-bit experts":"{0} bit のエキスパート","A path: ~/… or /…, without spaces":"場所は ~/… か /… で (空白なし)","Saved · banks.json not sent to {0}":"保存 · banks.json を {0} に送れなかった","Every node":"全ノード","not here":"ここに無い","on no node: that width is not offered":"どのノードにも無い: この bit は使わない","no manifest {0}":"manifest が無い {0}","this bank is {0} bit":"このバンクは {0} bit","{0} safetensors":"safetensors {0} 個","a different bank here":"ここは別のバンク","as banks.json":"banks.json のとおり","in the directory":"ディレクトリの中","expert-banks":"expert-banks","no such directory":"ディレクトリが無い","{0} of {1} layer files missing":"層のファイル {1} 個のうち {0} 個が無い","a different bank here ({0}; the head has {1})":"ここは別のバンク ({0}、head は {1})","Browse":"参照","Choose {0}'s directory":"{0} のディレクトリを選ぶ","Choose a directory":"ディレクトリを選ぶ","Choose a directory · {0}":"ディレクトリを選ぶ · {0}","Up one level":"ひとつ上へ","Choose this directory":"このディレクトリを選ぶ","Directory":"ディレクトリ","Bank":"バンク","Model":"モデル","Manifests":"目録","Choose":"選ぶ","More directories than shown: type the path":"ほかにもあります: 場所を入力してください","No directory here":"ここにはディレクトリがない","RDMA proxy threads: {0}":"RDMA 通信スレッド：{0}","not used":"使わない",", ":"、","A prompt with at most this many new tokens to compute past the cache goes in first whatever the split, computed without a pause (the decode stops meanwhile). The value at start; the value in use is changed on the inference screen. 0: none.":"キャッシュより後ろの新しく計算する分がこのトークン数以下の prompt を、エンジンは GPU の配分にかかわらず先に入れ、止めずに計算します（その間 decode は止まります）。起動したときの値で、動作中の値は推論画面で変えます。0 = 優先しない。","max_tokens":"max_tokens","A request waits this long for room beside the conversations in flight, then gets 503 (busy) so the client can retry. 0: no limit.":"要求は走っている会話の横に空きができるまでこの秒数待ち、越えたら 503（混雑）を返します（クライアントがやり直せるように）。0 = 待ち続ける。","API address":"API のアドレス","API port":"API のポート","About {0}":"{0} の説明","Advanced (development)":"上級（開発用）","Advanced (development): prompt chunk, SP, RoCE cores, token fixes, extra environment …":"上級（開発用）を開く: prompt の区切り、SP、RoCE の CPU、切り方の直し、追加の環境変数 …","Any layer, any width":"どの層でもどの幅でも","At most {0} characters.":"{0} 文字までにしてください。","Cabling":"接続の形","Change in [ WEIGHTS ]":"[ WEIGHTS ] で変える","Changed":"変更","Close advanced (development)":"上級（開発用）を閉じる","Concurrent inference":"同時推論","Concurrent inference of 2 or more needs DCP 2":"同時推論 2 以上は DCP 2 が要ります","Concurrent inference with DFlash2 needs 1 or more.":"同時推論と DFlash2 では 1 以上が要ります。","Conversations keeping drafter state":"drafter の状態を残す会話","DFlash2 model":"DFlash2 のモデル","Default: {0}":"既定: {0}","Drop the old part":"古い部分を捨てる","Drop the page cache before a start":"起動前にページキャッシュを落とす","Every node's page cache dropped before a start. Needs sudo -n (no password) on every node.":"起動の前に各ノードのページキャッシュを落とします。各ノードで sudo -n（パスワードなし）が要ります。","Example: with a thinking limit of 400,000 tokens, 100 organizes only a thinking that reached the limit and 5 one of 20,000 tokens or more.":"例: 思考の上限が 400,000 トークンのとき、100 なら上限まで考えた思考だけを、5 なら 20,000 トークン以上の思考を整理します。","Example: 5,000 has the engine write into the thinking, every 5,000 thinking tokens, how many it used and about how many are left, in the model's own words.":"例: 5,000 なら、思考が 5,000 トークン増えるごとに、エンジンが思考の中へ「約○トークン使い、残り約○」とモデル自身の言葉で書き込みます。","Example: with yes and the thinking limit at 90%, the engine has the thinking organized once it fills 90% of what the prompt leaves of the context length.":"例: 「する」で思考の上限が 90% なら、思考が、prompt が context length に残す分の 90% を埋めたときにエンジンが整理させます。","Extra environment":"追加の環境変数","Fix range (the end)":"直す範囲（末尾）","For: a thinking that grows long.":"対象: 長くなったモデルの思考。","For: one reply of the model (its thinking and its answer together).":"対象: モデルの 1 回の応答（思考と答えの合計）。","For: one request (its prompt and its reply together).":"対象: 1 回の要求（prompt と応答の合計）。","For: one organized text the model writes.":"対象: モデルが書く整理 1 回の長さ。","For: the KV cache (what the model keeps of the conversation).":"対象: KV キャッシュ（モデルが会話について覚えておくもの）。","For: the model (a line written to it).":"対象: モデル（モデルに向けた文）。","For: the model's thinking (the part before the answer, which the user sees too).":"対象: モデルの思考（答える前に考える部分。利用者にも見える）。","For: the thinking at the point the model ends it.":"対象: モデルが考え終えた時点の思考。","GPU share":"GPU 配分","Give 0 or {0}.":"0 か {0} にしてください。","Give a multiple of {0}, {1}.":"{0} の倍数で {1} にしてください。","Give a whole number.":"整数にしてください。","Give {0}.":"{0} にしてください。","HOST:PORT where rank 0 also answers /metrics, /health and /v1/experts/usage, read-only, for a monitor on another host. Empty: none.":"HOST:PORT。rank 0 がそこでも /metrics・/health・/v1/experts/usage を読み取り専用で返します（別のホストの監視用）。空 = なし。","How the engine drafts the next tokens for speculative decoding: MTP = the model's own MTP layer; DFlash2 = a separate small model (the drafter); None = no drafts, one token at a time. The launch screen writes its choice here.":"エンジンが投機デコードで次のトークンの下書きを作る方法。MTP = モデル自身の MTP 層で下書きする。DFlash2 = 別の小さなモデル（drafter）で下書きする。なし = 下書きせず 1 トークンずつ計算する。起動画面で選ぶと、ここに書きます。","How the nodes are cabled. The node check decides it.":"ノードのつなぎ方。ノード確認が決めます。","Inference":"推論","KV format":"KV の形式","Launch":"起動","Launcher restart":"ランチャーの再起動","Log kept":"ログを残す量","MTP drafts":"MTP の下書き数","Make it differ from the API's port.":"API のポートと別にしてください。","Memory kept for the OS":"OS に残すメモリ","Model name":"モデル名","Monitor address":"監視の口","NAME=value tokens, separated by spaces, passed to every rank. Not the concurrent inference's or the ring's variables, nor the token fixes (their own rows).":"全部のランクに渡す NAME=値（空白区切り）。同時推論とリングの変数、切り方の直し（専用の行）は書けません。","Network interface":"通信のインターフェース","No":"しない","No DFlash2 model is set (the launch screen's [ WEIGHTS ])":"DFlash2 のモデルがありません（起動画面の [ WEIGHTS ]）","No changes":"変更なし","Nodes and parallelism":"ノードと並列","Not in the form this setting takes.":"この設定の形になっていません。","Not on 3 nodes yet":"3 台ではまだ使えません","Not one of the choices.":"選べる値ではありません。","Not touched as a rule":"普段は触りません","Notice of what is left":"残りのお知らせ","On: a long prefill running gives way to a priority prompt and goes on from what it finished (the long one is up to a chunk later). Off: a priority prompt waits until the running prefill ends. The value at start.":"オンのとき、エンジンは実行中の長い prefill を優先 prompt に譲らせ、終わった分から続けます（長い方が最大 1 チャンク遅れます）。オフのとき、優先 prompt は実行中の prefill が終わるまで待ちます。起動したときの値です。","On: every layer on the generic kernel, so a re-sort may move any expert. Off: layers all at 4 bit are not moved by a re-sort.":"オン = 全部の層を汎用のカーネルで動かし、並べ替えでどの expert も動かせます。オフ = 全部 4 bit の層は並べ替えで動かしません。","Only on 3 nodes":"3 台のときだけ","Only with DCP 2":"DCP 2 のときだけ","Optional":"任意","Also overtake a running prefill":"prefill も追い越すか","Panel port":"パネルのポート","Prompt chunk":"prompt の区切り","Purpose: a long thinking does not use up the KV (what the model can hold at once). Once the thinking is long, the engine has the model organize its thinking midway and puts the organized text in the place of the thinking before it, in the model's context; the model thinks on from it.":"目的: 長い思考で KV（モデルが一度に覚えておける量）を使い切らないようにします。モデルの思考が長くなると、エンジンは思考の途中でモデルに思考を整理させ、context の中のそれまでの思考を整理した文に置き換えます。モデルは整理した文を土台に考え続けます。","Purpose: the model itself keeps in mind how much it has thought and how much is left, and paces itself.":"目的: モデル自身に「どれだけ考えたか、あとどれだけか」を意識させ、ペース配分させます。","Purpose: when the model closes its thinking, the engine has it organize its thinking before the answer and puts the organized text in the place of the thinking in the context: a long reasoning becomes a plan before the answer, and the next turns get only the organized text.":"目的: モデルが思考を閉じたとき、エンジンは答えの前にモデルに思考を整理させ、context の中の思考を整理した文に置き換えます。長く考えた結論を計画にまとめてから答えを書かせ、次のターンにも整理した文だけを渡して会話を軽くします。","RDMA devices":"RDMA のデバイス","Rank 0's port for the ranks' rendezvous (NCCL). A different one a lane.":"ランクどうしの待ち合わせ（NCCL）に rank 0 が使うポート。レーンごとに別にします。","Rendezvous port":"待ち合わせのポート","Ring":"リング","RDMA cores":"RDMA 通信のコア","SP parts":"SP の分割","Saved · next start":"保存済み · 次回起動時反映","Saved, used from the next start: {0}":"保存済み、次回起動時反映: {0}","Saved: the next start uses them (the running engine keeps its own until then).":"保存しました。次回起動時に反映します（いまのエンジンはそのまま）。","Saved: the next start uses them.":"保存しました。次回起動時に反映します。","Set the concurrent inferences above, not TF_GLM53_MULTI.":"TF_GLM53_MULTI ではなく、上の「同時推論」で決めてください。","Sets: yes or no and, with yes, every how many thinking tokens the model is told (256 or more). A restart is needed.":"設定するもの: する・しないと、するときにモデルが何トークン考えるごとに知らせるか（256 以上）。再起動が要ります。","Sets: the positions a request may reach, a multiple of 16,384 from 65,536 to 1,048,576. A restart is needed.":"設定するもの: 1 回の要求が使える位置の数。16,384 の倍数で 65,536〜1,048,576。再起動が要ります。","Sets: yes or no (the inference screen's [ REASONING CONTROL ] sets it too) and, with yes, the share in: organize after a thinking of N% of the thinking limit or more. With no thinking limit the share is of max_tokens. Counted as the thinking since the last organizing.":"設定するもの: する・しない（推論画面の [ REASONING CONTROL ] でも変えられます）と、「思考の上限の ○○% 以上の思考がおこなわれたら整理する」の割合。思考の上限がなければ max_tokens に対する割合です。数えるのは最後に整理してからの思考です。","Organize after a thinking of {0}% of the thinking limit or more":"思考の上限の {0}% 以上の思考がおこなわれたら整理する","Note: a small share organizes the short checks between tool calls too, a minute or two each time.":"注意: 割合を小さくすると、道具を使うたびの短い確認まで整理して、そのたびに 1〜2 分かかります。","The weights other than the experts":"エキスパート以外の重み","Speculative decoding":"投機デコード","Start timeout":"起動を待つ時間","Organize at the close":"思考完了時整理","Organize midway":"中間整理","Switch":"スイッチ","The MB each log (each rank's, the watcher's, the launcher's) keeps in memory.":"エンジンの各ランク・見張り役・ランチャーが、それぞれのログをメモリにこの量まで残します。","The address the API listens on. 0.0.0.0: every address (the network). The API has no key: keep the nodes on a closed network, or 127.0.0.1 for this node only.":"API が受け付けるアドレス。0.0.0.0 = どこからでも（ネットワーク）。API キーはないので、閉じたネットワークに置くか、127.0.0.1 でこのノードだけにします。","The checkpoint, the same path on every node. It is changed on the launch screen's [ WEIGHTS ], which checks it on every node first.":"チェックポイント。全部のノードで同じパスに置きます。変えるのは起動画面の [ WEIGHTS ] で、そこで全部のノードを確かめてから保存します。","The conversations decoded together. 2 or more needs DCP 2 and the pool cache (not on 3 nodes yet). The launch screen writes its choice here.":"同時に decode する会話の数。2 以上は DCP 2 と pool が要ります（3 台ではまだ使えません）。起動画面で選ぶと、ここに書きます。","The devices the ranks' RDMA traffic uses, separated by commas. The node check writes them with the cabling.":"エンジンのランクどうしが RDMA の通信に使うデバイス（カンマ区切り）。ノード確認が接続の形と一緒に書きます。","The drafter's directory, the same path on every node. It is changed on the launch screen's [ WEIGHTS ].":"drafter のディレクトリ。全部のノードで同じパスに置きます。変えるのは起動画面の [ WEIGHTS ] です。","The interface the ranks rendezvous and talk control over. The node check writes it with the cabling.":"エンジンのランクどうしが待ち合わせと制御の通信に使うネットワークのインターフェース。ノード確認が接続の形と一緒に書きます。","The lane's nodes in rank order, as the node check registered them. They are changed by the node check.":"レーンのノード（rank の順）。ノード確認が登録したもの。変えるのはノード確認です。","The launch screen shows [ WEIGHTS ] once the engine is stopped.":"起動画面の [ WEIGHTS ] は、エンジンを止めると出ます。","The launch screen starts from this value and makes it shorter when the memory does not hold it.":"起動画面はこの値から始め、メモリに入りきらなければ短くします。","The launcher keeps this much on every node for the OS and other processes and plans the engine's KV and work areas in the rest (2 to 32 GiB). The launch screen writes its choice here.":"ランチャーは、各ノードでこの量を OS とほかのプロセスのために残し、残りでエンジンの KV と作業領域を計画します（2〜32 GiB）。起動画面で選ぶと、ここに書きます。","The launcher waits this long for the engine to take requests after it starts it, then counts the start as failed.":"ランチャーは、エンジンを起動してから要求を受け付けられるようになるまでこの秒数待ち、越えたら起動の失敗とします。","The name the engine answers /v1/models and its replies with.":"エンジンが /v1/models と応答で返すモデルの名前。","The parts a prompt chunk is split into over the ranks (sequence parallel). Development.":"DCP 2 のとき、エンジンは prompt の 1 区切りをこの数に分けて、ランクで分担して計算します（系列並列）。開発用。","The port the engine takes API requests on (/v1/chat/completions, /v1/messages and the others). Changed only while the engine is stopped.":"エンジンが API（/v1/chat/completions、/v1/messages など）の要求を受け付けるポート。エンジンが止まっている間だけ変えられます。","The port the launcher serves this panel on. Used once the launcher is started again.":"ランチャーがこのパネルを出すポート。ランチャーを起動し直したときから使います。","The rows of a prompt chunk with DCP 2. More rows use more memory on every node, and the KV gets smaller.":"DCP 2 のときの prompt の 1 区切りの行数。増やすと各ノードのメモリを多く使い、KV が小さくなります。","The token fixes have their own rows above.":"切り方の直しは上の専用の行で決めてください。","The tokens drafted a round (1 to 7), with MTP only.":"1 回に下書きする数（1〜7）。MTP のときだけ。","The user's screen shows it too, as part of the thinking.":"注意: 利用者の画面にも、思考の一部として表示されます。","The user's screen still gets the whole thinking (the organized text replaces it in the model's context only).":"注意: 利用者の画面には思考の全文が表示されます（整理で消えるのはモデルの context の中だけ）。","The value at start. The value in use is changed on the inference screen's GPU split.":"起動したときの値。動作中の値は推論画面の「GPU の配分」で変えます。","Thinking and answer sizes":"思考と答えの大きさ","Thinking limit":"思考の上限","Organize every":"整理する間隔","About how often it organizes":"整理する間隔について","max_tokens {0}: organized each {1} thinking tokens":"max_tokens {0} のとき: 思考 {1} トークンごとに整理","Organized each {0} thinking tokens":"思考 {0} トークンごとに整理","It takes the requests that start after it, and the next start keeps it.":"変えた後に始まる要求から効き、次の起動もこの値です。","A request that names its own thinking budget keeps it. With organizing midway it counts the thinking that took out of the KV too (virtual).":"自分で思考の予算を指定した要求は、その値のままです。中間整理ありでは、整理で KV から外した思考も数えます（仮想）。","The size target for organizing midway is on the engine settings screen.":"中間整理のサイズの目安は、エンジン設定の画面にあります。","How often organizing midway comes: each time the thinking since the last organizing reaches this share of max_tokens (1,024 tokens at least), so a short reply organizes sooner. 100%: no organizing until the limit.":"中間整理の間隔です。最後の整理からの思考が、max_tokens のこの割合（最低 1,024 トークン）に届くたびに整理します。短い応答ほど早く整理します。100%: 上限まで整理しません。","It has to come before the thinking's limit, or be 100%; greyed while organizing midway is off.":"思考の上限より前か、100% にします。中間整理が「しない」の間は灰色です。","Organizing has to come before the thinking's limit ({0}%), or be 100%. It stays as it was.":"整理は思考の上限（{0}%）より前か、100% にしてください。元のままです。","Sets: the share of max_tokens the thinking may use, 0 to 100; at it the engine has the model close its thinking and answer in the rest, so a short reply keeps room for its answer too. 0: no limit (the thinking may use the whole reply).":"設定するもの: max_tokens のうち思考に使える割合（0〜100）。そこに届くと、エンジンがモデルに思考を閉じさせ、残りで答えを書かせるので、短い応答でも答えの分が残ります。0 = 上限なし（思考が応答の全部を使えます）。","The inference screen's [ REASONING CONTROL ] sets it too; either shows the other's change. Saving it also clears an older token budget (THINKING_BUDGET).":"関係: 推論画面の [ REASONING CONTROL ] でも変えられ、どちらで変えても両方に出ます。保存すると、古いトークン数の予算（THINKING_BUDGET）は 0 になります。","Sets: yes or no (the inference screen's [ REASONING CONTROL ] sets it too).":"設定するもの: する・しない（推論画面の [ REASONING CONTROL ] でも変えられます）。","Sets: how often organizing midway comes, as a share of max_tokens, 10 to 100 (1,024 tokens at least): each time the thinking since the last organizing reaches it. 100: none until the limit.":"設定するもの: 中間整理の間隔を、max_tokens に対する割合で。10〜100（最低 1,024 トークン）。最後の整理からの思考がそこに届くたびに整理します。100 = 上限まで整理しません。","It has to come before the thinking's limit. The inference screen's [ REASONING CONTROL ] sets it too.":"関係: 思考の上限より前でなければなりません。推論画面の [ REASONING CONTROL ] でも変えられます。","Make it smaller than the thinking limit ({0}%), or 100: organizing midway has to come before it.":"思考の上限（{0}%）より小さくするか、100 にしてください。中間整理はそれより前でなければなりません。","While the engine runs, a save applies it at once":"エンジンの稼働中は、保存すると即時反映します","Applied at once":"即時反映","Saved and applied at once: {0}.":"保存して即時反映しました: {0}。","Saved. Applied at once: {0}; the rest from the next start.":"保存しました。即時反映: {0}。ほかは次回起動時に反映します。","The engine did not take them: {0}":"エンジンが受け付けませんでした: {0}","About the thinking limit":"思考の上限について","No limit":"上限なし","About organizing midway":"中間整理について","About organizing at the close":"思考完了時整理について","From the next request":"次の要求から","From the next start":"次回起動時反映","The share of max_tokens the thinking may use. At it the engine has the model close its thinking and answer in the rest, so a short reply keeps room for its answer too (max_tokens 32,000 at 80%: thinking 25,600 · answer 6,400). 100: no limit, the thinking may use the whole reply.":"max_tokens のうち、思考に使える割合です。そこに届くと、エンジンがモデルに思考を閉じさせ、残りで答えを書かせます。短い応答でも答えの分が残ります（max_tokens 32,000 で 80% なら 思考 25,600 · 答え 6,400）。100 = 上限なし（思考が応答の全部を使えます）。","Now a token budget of {0} (an older setting, THINKING_BUDGET). Moving this makes it a share.":"いまはトークン数の予算 {0}（古い設定の THINKING_BUDGET）です。動かすと割合になります。","Saved at once, used from the next start.":"すぐ保存し、次回起動時に反映します。","Yes: once the thinking grows past {0} tokens, the engine has the model organize it into a text that takes the place of the thinking before it, in the KV only (the client still gets all of it), and the model thinks on from it. No: the whole thinking stays in the KV.":"する: 思考が {0} トークンを超えるたびに、エンジンがモデルに思考を整理させ、それまでの思考を整理した文に置き換えます（置き換えるのは KV の中だけで、クライアントには全部届きます）。モデルは整理した文から考え続けます。しない: 思考は全部 KV に残ります。","Yes: once the thinking grows long, the engine has the model organize it into a text that takes the place of the thinking before it, in the KV only (the client still gets all of it). No: the whole thinking stays in the KV.":"する: 思考が長くなると、エンジンがモデルに思考を整理させ、それまでの思考を整理した文に置き換えます（置き換えるのは KV の中だけで、クライアントには全部届きます）。しない: 思考は全部 KV に残ります。","Now: drop the old part (set by hand), neither of these.":"いまは「古い部分を捨てる」（手で設定した値）で、どちらでもありません。","Yes: after a thinking of {0}% of the thinking limit or more (counted since the last organizing), the model organizes it before the answer into a text that takes its place, so the next turns get only that. No: the thinking stays as written.":"する: 思考の上限の {0}% 以上の思考がおこなわれたら（数えるのは最後に整理してからの思考）、答えの前に思考を整理させて置き換えます。次のターンには整理した文だけが渡ります。しない: 思考は書いたまま残ります。","The share is on the engine settings screen.":"この割合は、エンジン設定の画面にあります。","this engine does not change its thinking settings while it runs":"このエンジンは動作中に思考の設定を変えられません","Saved: from the next start":"保存しました（次回起動時に反映）","Could not change it ({0}). It stays as it was.":"変えられませんでした（{0}）。元のままです。","Example: 276,480 with the thinking limit at 80% leaves 55,296 for the answer.":"例: 276,480 で思考の上限が 80% なら、答えに 55,296 残ります。","A reply is its thinking and then its answer. max_tokens, one reply's limit, is set here and the thinking's limit, a share of it, on [ REASONING CONTROL ]; the rest is left for the answer, and a thinking that ends early leaves the answer more.":"1 回の応答は、思考とそのあとの答えです。その上限の max_tokens はここで、思考の上限（その割合）は [ REASONING CONTROL ] で決め、残りが答えに残ります。思考が早く終われば、答えはそのぶん長く書けます。","max_tokens {0}":"max_tokens {0}","The answer's part":"答えの分","The share is of max_tokens, at most of what the prompt leaves of the context length, so the sizes change with each prompt.":"割合は max_tokens の、ただし prompt が context length に残す分までの割合です。大きさは prompt ごとに変わります。","Sets: the tokens one reply may write at most, as a share of the context length, 1 to 100. A restart is needed.":"設定するもの: 1 回の応答で書けるトークン数の上限を、context length に対する割合で。1〜100。再起動が要ります。","When the client sends its own max_tokens, that comes first.":"クライアントが max_tokens を送れば、そちらが優先します。","Example: 70% of a context length of 1,048,576 is 734,003 tokens.":"例: context length 1,048,576 の 70% は 734,003 トークンです。","{0}% of the context length · {1} tokens":"Context length の {0}% · {1} トークン","An older setting, MAX_TOKENS {0}, comes first until this is moved, which clears it.":"古い設定の MAX_TOKENS {0} が優先されています。スライダーを動かすと、割合に変わり MAX_TOKENS は消えます。","Thinking (the limit)":"思考（上限）","Thinking (the limit, virtual)":"思考（上限、仮想）","With organizing midway the engine puts an organized text in the place of the thinking before it, in the KV only (the client still gets all of it). So max_tokens and the thinking limit count the tokens written (virtual) and may pass the context length, while the KV holds only the thinking since the last organizing and the answer.":"中間整理ありでは、エンジンがそれまでの思考を整理した文に置き換えます（置き換えるのは KV の中だけで、クライアントには全部届きます）。そのため max_tokens と思考の上限は書いたトークンの数（仮想）で、context length を超えられます。KV に載るのは、最後の整理からの思考と答えだけです。","When the thinking limit ends the thinking, the same organizing takes the place of the closing sentence.":"関係: 思考の上限で思考が終わるときも、締めの一文の代わりに同じ整理を書かせます。","KV and context length":"KV と context length","For: every conversation: the KV cache is one pool of 256-position blocks they share.":"対象: すべての会話。KV キャッシュは、会話で分け合う 256 位置のブロックの 1 つのプールです。","Sets: the KV cache's positions in all, at least the context length (512 more with the pool). A start from this panel always takes all the room the plan leaves (the launch screen's KV rows show it); this value is for a start with tf-glm53 up. A restart is needed.":"設定するもの: KV キャッシュ全体の位置の数。context length 以上（pool では 512 多く）。このパネルからの起動は、いつも計画が残す空きを全部使います（起動画面の KV の行に出ます）。この値は tf-glm53 up で起動するときのものです。再起動が要ります。","A request takes up to the context length; the rest keeps earlier conversations' KV in whatever blocks are free, so their next turn resumes from the cache.":"関係: 1 回の要求が使うのは context length までで、残りには前の会話の KV が空いているブロックに残り、次のターンをキャッシュから続けられます。","Virtual":"仮想","Organizing midway takes thinking out of the KV, so this counts the tokens written and may pass the context length":"中間整理で思考が KV から外れるので、書いたトークンの数で数え、context length を超えることがあります","Sets: the tokens one reply may write at most, for a request that does not name its own max_tokens. From 1,024. A restart is needed.":"設定するもの: 1 回の応答で書けるトークン数の上限（max_tokens を指定しない要求に使う）。1,024 以上。再起動が要ります。","With organizing midway, or near the budget's end, it is virtual: the thinking they take out of the KV still counts, so it may pass the context length. With both off, a request that names a max_tokens which does not fit beside its prompt is refused (400).":"関係: 中間整理か予算の終わりの整理があれば仮想です。KV から外した思考も数えるので、context length を超えられます。両方オフでは、prompt の横に収まらない max_tokens を指定した要求は断られます (400)。","A request that names its max_tokens gets its own. The panel writes it to MAX_TOKENS.":"max_tokens を指定した要求は、その値を使います。パネルはこの値を MAX_TOKENS に書きます。","Thinking and answer":"思考と答え","What the client receives · max_tokens {0} (virtual)":"クライアントに届く量 · max_tokens {0}（仮想）","Thinking and answer (virtual)":"思考と答え（仮想）","Token fix at the close":"閉じた時の切り方の直し","Wait for room at most":"空きを待つ上限","When the model closes its thinking, the engine compares the tokens the model wrote with the tokenizer's own split of the text and fixes them where they differ, so the next turn hits the cache. near: only when the difference is within the end's range. all: always. off: never. Passed in EXTRA_ENV.":"モデルが思考を閉じたとき、エンジンはモデルが出したトークンの切り方をトークナイザーの標準の切り方と比べ、違えば直します。次のターンでキャッシュを当てるためです。near = 違いが末尾の範囲の中にあるときだけ直す。all = いつも直す。off = 直さない。追加の環境変数で渡します。","While stopped":"停止中だけ","While the engine runs it stays as it is: change it once the engine is stopped.":"エンジンが動いている間は変えられません。止めてから変えてください。","With DFlash2 the engine keeps the drafter's state for this many conversations, so their next turn need not rebuild it. Concurrent inference with DFlash2 needs 1 or more.":"DFlash2 のとき、エンジンはこの数の会話について drafter の状態を残し、次のターンで作り直さずに使います。同時推論と DFlash2 では 1 以上が要ります。","With near, the engine fixes a difference only within this many tokens at the end of the thinking; one before it is computed again at the next turn.":"near のとき、エンジンは違いが思考の最後のこのトークン数の中にあるときだけ直します。それより前の違いは、次のターンでエンジンが計算し直します。","Write NAME=value, separated by spaces.":"NAME=値 を空白で区切って書いてください。","Yes":"する","conversations":"件","fp4 takes half the memory of fp8, a little less accurate. The launch screen writes its choice here.":"fp4 は fp8 の半分のメモリで、精度が少しだけ下がります。起動画面で選ぶと、ここに書きます。","Could not save ({0}).":"保存できませんでした（{0}）。","Could not save: see the rows in red.":"保存できませんでした。赤の行を見てください。","rows":"行","the launcher does not answer":"ランチャーが応答しません","tokens each":"tokens ごと","{0} changes not saved: {1}":"未保存の変更 {0} 件: {1}","{0} nodes":"{0} 台","{0} or more":"{0} 以上","{0} to {1}":"{0}〜{1}","{0} unsaved":"未保存 {0}","Screens":"画面","Engine settings":"エンジン設定","Revert":"元に戻す","Save and restart":"保存して再起動","Restart":"再起動する","Restart without saving":"保存せず再起動","Restarting":"再起動中","The restart was cancelled. The settings saved are used from the next start.":"再起動は取り消しました。保存した設定は次回起動時に反映します。","Restarts the engine: the requests running stop, and the conversations in the KV pool are lost. Starting again takes a few minutes. Next comes the stop's question: whether to save this run's usage.":"エンジンを再起動します。推論中の要求は止まり、KV プールの会話は消えます。起動し直すには数分かかります。このあと、停止と同じく、この稼働の利用記録を保存するかを聞きます。","A change is saved as it is made. It takes effect at the next start, or at once where the row says Applied at once; Restart to apply uses it now.":"変更はすぐ保存します。次回の起動で反映し、「即時反映」の行はすぐ効きます。いま反映するなら「再起動して反映」です。","The settings that change while running (the GPU split, the expert optimisation) are on the inference screen.":"動作中に変えられる設定（GPU の配分、エキスパート最適化）は推論画面にあります。","seconds":"秒","Start complete":"起動完了","last":"前回","The last one: nothing of it runs now":"前回の値（いまは動いていません）","When the prompt leaves less of the context length than max_tokens, the share is of what it leaves.":"prompt が残す context length の方が max_tokens より小さいときは、残す分に対する割合です。","{0}% of max_tokens":"max_tokens の {0}%","100%: no organizing until the limit":"100%: 上限まで整理しない","A725 only":"A725 だけ","Concurrent inference needs DCP 2.":"同時推論には DCP 2 が要ります。","The KV is split over two ranks (three on three nodes).":"KV を 2 ランクに分けます（3 台では 3 ランク）。","The cores the RoCE proxy threads poll on (they spin while the decode runs): A725 (cores 0 and 10, so they do not heat the fast cores) or OS (the scheduler's).":"RoCE の通信スレッドが待つ CPU（decode の間は回り続けます）。A725 = コア 0 と 10（速い X925 を温めません）、OS = スケジューラーに任せます。","Size target for organizing midway":"中間整理のサイズの目安","Sets: about how long it may be, as a share of the thinking it organizes, 10 to 100 (128 tokens at least), for organizing midway and at the close, not near the budget's end. A restart is needed.":"設定するもの: 整理した文の長さの目安を、整理する思考に対する割合で。10〜100（最低 128 トークン）。中間整理と思考完了時整理に効き、予算の終わりの整理には効きません。再起動が要ります。","Purpose: an organized text does not grow so long that it uses the context.":"目的: 整理した文が長くなりすぎて context を使うのを防ぎます。","Example: 70 keeps the text to about 70% of the thinking it organizes.":"例: 70 なら、整理した文は整理する思考の約 70% までです。","Restart to apply":"再起動して反映","no DFlash2 model is set (the launch screen's [ WEIGHTS ])":"DFlash2 のモデルが設定されていません（起動画面の [ WEIGHTS ]）"}</script>
 <script>
 (async function () {
 'use strict';
@@ -1705,7 +1698,7 @@ function queueBase() {
   baseQueued = true;
   requestAnimationFrame(() => {
     baseQueued = false;
-    if (revealing) return;
+    if (revealing || !disk.clientWidth) return;   // hidden: drawn on the way back (discBack) / 隠れている: 戻るときに描く
     renderBase(); drawHover();
   });
 }
@@ -1857,7 +1850,23 @@ function renderTrail(prog) {
   x.restore();
 }
 function drawToken(t, prog) { if (glowOn()) lightToken(t, prog); renderTrail(prog); }
+// each frame. The next one is asked for first: an exception in a frame reaches the console and the disc goes on (the
+// chain used to end there for good). While the disc is hidden (the settings, the node check) no frames are asked for
+// and nothing is drawn; the picks are still counted (liveDrain). discWake brings the frames back, discBack draws the
+// disc once, for now
+// 毎フレームの処理。次のフレームを先に頼む: 例外はコンソールに出て円盤は続く (前はそこで止まったままになった)。円盤が隠れて
+// いる間 (設定、ノード確認) はフレームを頼まず何も描かない。選択は数える (liveDrain)。discWake で再開し、discBack で今の状態を 1 回描く
+let loopRaf = 0, discGone = false;
+function discWake() {
+  if (!disk.clientWidth) { liveDrain(); return; }
+  if (!loopRaf) loopRaf = requestAnimationFrame(loop);
+}
+function discBack() { discGone = false; liveFromNow(); liveT = 0; PF.last = 0; bd.dirty = true; discResize(); }
 function loop(ts) {
+  loopRaf = 0;
+  if (!disk.clientWidth) { discGone = true; return; }
+  loopRaf = requestAnimationFrame(loop);
+  if (discGone) discBack();
   if (st.data === 'live') { if (!revealing && g) liveStep(ts); }
   else if (!revealing && g && cur) {
     if (st.speed === 'step') {
@@ -1883,7 +1892,6 @@ function loop(ts) {
   stepBoard(ts);
   drawBpw(ts);
   if (LIVE && g) { drawThink(ts, !LN.on && !LN.out); if (LN.on) drawLaunch(ts); else if (LN.out) lnHandoff(ts); else if (rsShown()) { drawResort(); drawPrefill(ts, true); } else drawPrefill(ts); }   // c-fx: the effects, the re-sort / 演出、並べ替え
-  requestAnimationFrame(loop);
 }
 $('play').addEventListener('click', () => {
   st.playing = !st.playing; $('play').setAttribute('aria-pressed', String(st.playing));
@@ -2407,8 +2415,8 @@ function showGroups() {
 function restart() {
   clearTrace(); resetGlow(); boardReset(); nextRound = 0; rings.length = 0; lastRing = -1e12;
   beadStart = performance.now() - REVEAL;
-  clearHist(); resetTape();
-  if (st.data === 'live') { cur = null; liveQ.length = 0; return; }
+  clearHist(); resetTape(); liveQ.length = 0;
+  if (st.data === 'live') { cur = null; return; }
   cur = makeToken(); countPicks(cur); boardShowNow('1 token'); pushTurn([cur]); tapeToken(cur, false);
   if (!revealing && g) drawToken(cur, 1);
 }
@@ -2805,7 +2813,7 @@ const METRICS = [
 ];
 // the launcher: LN.on while /v1/launch/status says the engine is not running (the page is the launch screen); LN.nouse
 // while the running engine gives no usage counts (usageNone)
-const LN = { has: false, on: false, nouse: false, st: null, plan: null, nodes: null, bitsStr: '', bits: null, done: null, planT: 0, pollT: 0, armT: 0, planSeq: 0, planKey: '', planBusy: false, planAt: 0,
+const LN = { has: false, on: false, polling: false, pollAgain: false, landed: false, nouse: false, st: null, plan: null, nodes: null, bitsStr: '', bits: null, done: null, planT: 0, pollT: 0, armT: 0, planSeq: 0, planKey: '', planBusy: false, planAt: 0,
   arm: false, msg: '', bad: false, kvf: null, ed: null, shown: null, q: [], fl: [], amb: [], cur: -1, perLayer: false, fin: 0, phase: '', phT: 0,
   dirty: true, off: null, mean: 0, margin: 0, pct: 0, sec: 0 };
 const lnBusy = () => !!LN.fin || (!!LN.st && (LN.st.state === 'starting' || LN.st.state === 'stopping'));   // LN.fin: the finale keeps the start's look
@@ -3211,10 +3219,29 @@ if (LIVE) {
   $('data').innerHTML = '<button data-v="live" aria-pressed="true">' + T("Live") + '</button><button data-v="sim" aria-pressed="false">' + T("Simulation") + '</button>';
   document.querySelector('.pill').hidden = true;   // no LIVE pill (10-31) / LIVE の札は出さない
 }
-async function liveGet(path, json = true) {
-  const r = await fetch(path);
+// gives up after ms: a reply that never comes held a poll for good / ms で諦める: 来ない答えが取得を止めたままにした
+const LIVE_GET_MS = 60000, LIVE_POLL_MS = 8000;
+const liveLimit = (ms) => AbortSignal.timeout ? { signal: AbortSignal.timeout(ms) } : {};   // (a browser without it waits, as before / 無いブラウザは前のとおり待つ)
+async function liveGet(path, json = true, ms = LIVE_GET_MS) {
+  const r = await fetch(path, liveLimit(ms));
   if (!r.ok) throw new Error(path + ' ' + r.status);
   return json ? r.json() : r.text();
+}
+// a poll: the next is asked for only when the last has answered (setInterval stacked them up behind a slow engine, and
+// their replies could arrive out of order), far less often while the tab is hidden, and at once on the way back
+// 定期の取得: 前の答えが来てから次を頼む (setInterval だと遅いエンジンの後ろに積み上がり、答えの順も入れ替わった)。タブが
+// 隠れている間はずっと少なく、戻ったらすぐ
+const LIVE_POLLS = [], LIVE_HIDDEN_X = 5;
+function livePoll(f, ms, first = true) {
+  const wait = typeof ms === 'function' ? ms : () => ms;
+  const p = { t: 0, busy: false, run: async () => {
+    clearTimeout(p.t); if (p.busy) return; p.busy = true;
+    try { await f(); } catch (e) { console.error(e); }
+    p.busy = false; p.t = setTimeout(p.run, document.hidden ? wait() * LIVE_HIDDEN_X : wait());
+  } };
+  LIVE_POLLS.push(p);
+  if (first) p.run(); else p.t = setTimeout(p.run, wait());
+  return p;
 }
 function b64bytes(s) { const b = atob(s), n = b.length, o = new Uint8Array(n); for (let k = 0; k < n; k++) o[k] = b.charCodeAt(k); return o; }
 // u64 LE counts as numbers, from their two u32 halves (exact below 2^53; a BigInt each took longer)
@@ -3277,8 +3304,10 @@ const DEC_WIN = 5, decWin = []; let liveLastT = 0, liveLastDecN = 0;
 // dropped before any decoding; it used to sort the 19,200 experts and draw the whole disk again every 5 s
 // 前回と同じ回数と bit (それから選択なし: 待機中) なら何も変わらないので、読み解く前に捨てる (前は 5 秒ごとに並べ直して描き直していた)
 let usageSeen = null;
+let usageAsk = 0;
 async function liveUsage(first, path = '/v1/experts/usage?window=10') {
-  const u = await liveGet(path);
+  const ask = ++usageAsk, u = await liveGet(path);
+  if (ask !== usageAsk) return;   // a later ask is under way: this reply is older / 後の取得が走っている: この答えは古い
   const seen = [path, u.total.decode, u.total.prompt || '', u.bits || '', u.rows ? u.rows.decode + ',' + u.rows.prompt : '', u.runs, u.pending ? JSON.stringify(u.pending) : '', u.last ? JSON.stringify(u.last) : ''];
   if (!first && usageSeen && seen.every((v, k) => v === usageSeen[k])) return;
   usageSeen = seen;
@@ -3387,20 +3416,25 @@ segPick('basis', (v) => {
 // A hidden tab draws nothing (requestAnimationFrame stops) while timers still run, so the picks of the hidden time
 // used to pile up and light at once on return (every cell at its brightest, then fading back). Now the polls pause
 // while hidden and the play starts again from now on return (liveGen drops a poll that was under way); the usage
-// totals come from /v1/experts/usage, so nothing is lost there. A queue longer than LIVE_Q_MAX (any other stall) keeps
-// its newest picks only.
+// totals come from /v1/experts/usage, so nothing is lost there. The same on the way back to a hidden disc (discBack).
+// The queue never holds more than its newest LIVE_Q_MAX picks.
 // 隠れたタブは描画が止まるがタイマーは動くので、隠れていた間の選択が溜まり、戻った瞬間にまとめて光っていた (全セルが最大の
 // 明るさになってから戻る)。隠れている間は取得を止め、戻ったら今から再生し直す (liveGen で途中の取得を捨てる)。使用回数の
-// 合計は /v1/experts/usage から取るので欠けない。列が LIVE_Q_MAX を超えたら (ほかの止まり) 新しい分だけ残す
+// 合計は /v1/experts/usage から取るので欠けない。隠れた円盤に戻るときも同じ (discBack)。列は新しい LIVE_Q_MAX 個までしか持たない
 const LIVE_Q_MAX = 128;
 let liveGen = 0;
-document.addEventListener('visibilitychange', () => {
+function liveFromNow() {
   if (!LIVE) return;
   liveGen++; liveQ.length = 0; liveSeq = null; phReset();
   if (!document.hidden && LN.on && LN.shown) {   // the launch screen: the experts due while hidden appear without flashes
     const due = []; for (let j = 0; j < LN.q.length; j += 3) if (!LN.shown[LN.q[j]]) { LN.shown[LN.q[j]] = 1; due.push(LN.q[j]); }
     LN.q.length = 0; LN.fl.length = 0; LN.amb.length = 0; if (due.length && LN.off) lnSolid(due);
   }
+}
+document.addEventListener('visibilitychange', () => {
+  if (!LIVE) return;
+  liveFromNow();
+  if (!document.hidden) for (const p of LIVE_POLLS) p.run();
 });
 async function livePicks() {
   if (liveBusy || document.hidden || LN.nouse) return;
@@ -3409,8 +3443,13 @@ async function livePicks() {
   try {
     // from now: the newest row's seq is all the first poll needs (it took 512 rows, 450 KB, and dropped them)
     // 今から: 最初の取得は最新の行の seq だけでよい (前は 512 行 450 KB を取って捨てていた)
-    const r = await liveGet(liveSeq == null ? '/v1/experts/recent?max=1' : '/v1/experts/recent?max=512&after=' + liveSeq);
+    // paused, or on Simulation: nothing queued (the queue grew for as long as that lasted) and only the newest row's seq
+    // asked for, so Play goes on from now / 一時停止中とシミュレーション中: 列に入れない (続く間ずっと増えていた)。最新の行の seq だけ聞き、再生は今から
+    const held = () => !st.playing || st.data !== 'live';
+    if (held()) { liveSeq = null; liveQ.length = 0; }
+    const r = await liveGet(liveSeq == null ? '/v1/experts/recent?max=1' : '/v1/experts/recent?max=512&after=' + liveSeq, true, LIVE_POLL_MS);
     if (gen !== liveGen) return;
+    if (held()) liveSeq = null;
     // the count went back (the engine started again under an open page): from now on; asking after the old seq got nothing
     // 数が戻った (開いたままのページの下でエンジンが起動し直した): 今から。前の seq の後を聞き続けると何も来ない
     if (liveSeq != null && liveSeq >= r.seq) liveSeq = null;
@@ -3430,6 +3469,7 @@ async function livePicks() {
       liveSeq = rec.seq; liveRow = rec;
     }
     if (liveSeq == null) liveSeq = r.seq - 1;
+    if (liveQ.length > LIVE_Q_MAX) liveQ.splice(0, liveQ.length - LIVE_Q_MAX);
   } catch (e) { } finally { liveBusy = false; }
 }
 // decode and prefill tok/s from the engine's totals over the last interval (kept while idle, marked 前回). /health, read each second
@@ -3459,7 +3499,7 @@ async function liveSpeed() {
     let v = {};
     if (liveHealth && SPEED_KEYS.every(k => Number.isFinite(liveHealth[k]))) for (const k of SPEED_KEYS) v[k] = liveHealth[k];
     else {
-      const text = await liveGet('/metrics', false);
+      const text = await liveGet('/metrics', false, LIVE_POLL_MS);
       for (const line of text.split('\n')) { const m = line.match(/^tensorfold_health:(\w+)\s+([0-9.eE+-]+)/); if (m) v[m[1]] = +m[2]; }
     }
     const many = !!(liveHealth && liveHealth.multi && liveHealth.multi.n >= 2);
@@ -3485,14 +3525,14 @@ async function liveSpeed() {
     renderStats();
   } catch (e) { }
 }
-async function liveMemory() { try { liveMem = await liveGet('/v1/memory'); renderAlloc(); } catch (e) { } }
-async function liveHealthGet() { try { liveHealth = await liveGet('/health'); pfHealth(liveHealth); renderNow(); } catch (e) { if (LN.has) stopCheck(); return; } schSync(); rdSync(); thSync(); }
+async function liveMemory() { try { liveMem = await liveGet('/v1/memory', true, LIVE_POLL_MS); renderAlloc(); } catch (e) { } }
+async function liveHealthGet() { try { liveHealth = await liveGet('/health', true, LIVE_POLL_MS); pfHealth(liveHealth); renderNow(); } catch (e) { if (LN.has) stopCheck(); return; } schSync(); rdSync(); thSync(); }
 // stopped elsewhere: the launch screen. Asked every 10 s, and at once when /health does not answer (it was every 3 s;
 // the status carries the plan's bits, 26 KB) / 別の所で止められた: 起動画面へ。10 秒ごとと、/health が答えないとき
 let stopAsked = -1e9;
 async function stopCheck() {
   const now = performance.now(); if (now - stopAsked < 2500) return; stopAsked = now;
-  try { if ((await liveGet('/v1/launch/status')).state !== 'running') location.reload(); } catch (e) { }
+  try { if ((await liveGet('/v1/launch/status', true, LIVE_POLL_MS)).state !== 'running') location.reload(); } catch (e) { }
 }
 // the usage counts change only with the rows the engine computes and with a swap: while no request runs and neither
 // /health's totals nor the swap's status (300 B; a swap by another client moves no total) change, the 525 KB poll is
@@ -3505,10 +3545,10 @@ async function usageTick() {
   const h = liveHealth, p = h && h.progress, now = performance.now();
   let key = h ? [h.requests_total, h.completion_tokens_total, h.prefill_tokens_total, h.cached_tokens_total].join() : '';
   const idle = !!p && p.phase === 'idle' && !liveQ.length;
-  if (idle && key) { try { const s = await liveGet('/v1/experts/swap'); key += '|' + [s.seq, s.state, s.done].join(); } catch (e) { } }
+  if (idle && key) { try { const s = await liveGet('/v1/experts/swap', true, LIVE_POLL_MS); key += '|' + [s.seq, s.state, s.done].join(); } catch (e) { } }
   if (!LN.nouse && idle && key && key === usageKey && now - usageAt < USAGE_STALE_MS) return;   // no counts yet: every tick / 回数が来るまでは毎回
   usageKey = idle ? key : ''; usageAt = now;
-  liveUsage(false).catch(() => {});
+  await liveUsage(false).catch(() => {});
 }
 // each frame: play the queued picks so the queue drains in about 0.25 s; a frame's tokens are one turn
 // フレームごと: 並んだ選択を約 0.25 秒で捌ける速さで再生する。1 フレームのトークンを 1 ターンとする
@@ -3516,13 +3556,16 @@ let liveT = 0;
 function liveStep(ts) {
   const dt = liveT ? Math.min(100, ts - liveT) : 16; liveT = ts;
   if (!st.playing || !liveQ.length) return;
-  if (liveQ.length > LIVE_Q_MAX) liveQ.splice(0, liveQ.length - LIVE_Q_MAX);
   const n = Math.min(liveQ.length, Math.max(1, Math.ceil(liveQ.length * dt / 250)));
   const grp = liveQ.splice(0, n);
   for (const t of grp) { cur = t; countPicks(t); if (glowOn()) lightToken(t, 1); tapeLive(t); }
   pushTurn(grp); renderTrail(1);
   if (!PF.on) orderAuto('use');   // decode picks: 使用順 (also without /health's phase) / decode の選択: 使用順
 }
+
+// the disc hidden: the picks counted, nothing drawn (its trail is there on the way back)
+// 円盤が隠れている間: 選択は数えるが描かない (軌跡は戻ったときに出る)
+function liveDrain() { const grp = liveQ.splice(0); for (const t of grp) { cur = t; countPicks(t); } if (grp.length) pushTurn(grp); }
 
 /* ---------- live: posts to the launcher, the card's plan as a bit table ---------- */
 // The bits are set at start and do not change while running: the panel no longer asks the engine for a
@@ -3845,7 +3888,7 @@ $('c-bpw').addEventListener('pointerleave', () => { bpw.hover = null; $('bpw-tip
 // 稼働したらライブのパネルとして読み直す
 const LN_FLASH_MS = 520;   // a cell just loaded brightens for LN_FLASH_MS
 const LN_STATE = { stopped: T("Stopped"), starting: T("Starting"), running: T("Running"), stopping: T("Stopping"), failed: T("Failed") };
-const LN_VERDICT = { fits: T("Fits"), tight: T("Tight"), no: T("Does not fit") };
+const LN_VERDICT = { fits: T("Can start"), tight: T("Can start (little room)"), no: T("Not enough memory") };
 const ARM_MS = 8000;   // 起動 → 確定: the second press within 8 s (4 s was too short) / 確定は 8 秒以内 (4 秒では短すぎた)
 const LN_PHASES = [['checking', T("Check")], ['weights', T("Weights")], ['kv', 'KV'], ['prewarm', T("Warm-up")], ['ready', T("Test run")]];
 const LN_COL = MEM_COL;   // the preset's (palColours) / プリセットの色
@@ -3859,12 +3902,27 @@ function lnPlanSoon(force) { clearTimeout(LN.planT); LN.planT = setTimeout(() =>
 // a context the launcher cut is shown under the row. A launcher without it (no kv.conf_context) gets none
 // 起動画面で選ぶ context length: null = CONF の、数、'max' = 選んだ形式で入る最長。入らない長さは灰色、切り詰めは下に出す。
 // 最大と灰色はランチャーの max_context による (KV サイズからは出さない: エンジンは context のほかに KV を要る。pool は 512 token)
-LN.ctx = 'max';   // the longest by default / 既定は最大
+LN.ctx = CFG.lnKept ? null : 'max';   // the longest until the panel has written one / パネルが書くまでは最大
 const CTX_STEPS = [131072, 262144, 524288];
 // token counts read as kpos everywhere (1,000 = K, 1,000,000 = M): the same count never shows two ways
 // token 数はどこも kpos (K = 1,000、M = 1,000,000): 同じ数を 2 通りに出さない
 const ctxLab = (v) => kpos(v);
 const ctxView = () => LN.plan && LN.plan.kv && LN.plan.kv.conf_context != null ? LN.plan.kv : null;
+// what the launch screen picks goes into glm53.conf as it is picked (11-05), so the settings screen and the next page read
+// it; at the start, the context length the plan took (最大 has no number before). The KV stays the plan's: tf-glm53 check
+// works out a node's memory from KV_SIZE, so the whole KV there would refuse the node check; it only rises to what the
+// context needs. A write that fails stops nothing: the pick holds for this start, and the line says so
+// 起動画面で選んだ値は選んだ時点で glm53.conf にも書く。起動のときは計画の context length を書く (最大はそれまで数字がない)。KV は計画のまま:
+// tf-glm53 check は KV_SIZE からノードのメモリを見積もるので、KV 全部を書くとノード確認が落ちる。context に要る分までだけ上げる。
+// 書けなくても止めない: その起動にだけ使い、そう知らせる
+async function lnKeep(vals) {
+  const values = {}; for (const k in vals) if (ES.m[k]) values[k] = String(vals[k]);
+  if (!ES.ok || !Object.keys(values).length) return;
+  const r = await livePost('/v1/launch/settings', { values }).catch(() => ({ ok: false, status: 0, j: null }));
+  if (r.ok && r.j && Array.isArray(r.j.keys)) { esTake(r.j); cfgPut('lnKept', true); if (LN.keepBad) { LN.keepBad = LN.bad = false; LN.msg = ''; renderLaunch(); } if (ES.on) esRender(); return; }
+  LN.keepBad = LN.bad = true; LN.msg = F("Not saved ({0}): used for this start only.", errText(r.j) || (r.status ? String(r.status) : T("the launcher does not answer"))); renderLaunch();
+}
+const ctxKeep = (c) => (Number(ES.m.KV_SIZE && ES.m.KV_SIZE.value) || 0) >= c + 512 ? { CONTEXT_LENGTH: c } : { CONTEXT_LENGTH: c, KV_SIZE: c + 512 };
 function ctxAsk() {   // the context the next plan asks for / 次の計画で頼む context
   if (LN.ctx !== 'max') return LN.ctx;
   const k = ctxView(), f = k && k.formats && k.formats[LN.kvf || k.format];
@@ -3879,7 +3937,7 @@ $('ln-ctx').addEventListener('click', (ev) => {
   if (ev.target.closest('[data-help]')) { ctxHelpOpen(!LN.ctxHelp); return; }
   const b = ev.target.closest('button[data-cx]'); if (!b || b.disabled || !LN.on) return;
   const k = ctxView(), v = b.dataset.cx;
-  LN.ctx = v === 'max' ? 'max' : k && +v === k.conf_context ? null : +v; renderLaunch(); lnPlanSoon();
+  LN.ctx = v === 'max' ? 'max' : k && +v === k.conf_context ? null : +v; renderLaunch(); if (v !== 'max') lnKeep(ctxKeep(+v)); lnPlanSoon();
 });
 // what a node keeps for the OS, picked on the launch screen (5f8491f6). The KV takes all the room the rest leaves: the
 // store is always "max" (everything the context leaves; while the plan is an estimate the launcher keeps 2 GiB more), so
@@ -3894,19 +3952,19 @@ const rsvView = () => LN.plan && LN.plan.conf_reserve != null ? LN.plan : null;
 const confRsv = () => Math.round(LN.plan.conf_reserve / GIB_B * 10) / 10;
 $('ln-rsv').addEventListener('click', (ev) => {
   const b = ev.target.closest('button[data-rs]'); if (!b || b.disabled || !LN.on) return;
-  const v = +b.dataset.rs; LN.rsv = rsvView() && v === confRsv() ? null : v; renderLaunch(); lnPlanSoon();
+  const v = +b.dataset.rs; LN.rsv = rsvView() && v === confRsv() ? null : v; renderLaunch(); lnKeep({ RESERVE_GB: v }); lnPlanSoon();
 });
 // the drafter picked on the launch screen (LN.drf; null: CONF's DRAFTER_KIND): mtp / dflash2 / none, offered as
 // status.drafter says (DFlash2 only when DRAFTER holds its model on every node; why otherwise). A launcher without
 // drafters gets none of it / 起動画面で選んだ drafter (null = CONF の)。status.drafter にあるものだけ選べる
 const DRAFTER_NAME = { mtp: 'MTP', dflash2: 'DFlash2', none: T("None") };
 const drName = (d) => DRAFTER_NAME[d] || esc(d || '—');
-const drWhy = (t) => t === DR_WAIT ? T("Being checked") : t;
+const drWhy = (t) => t === DR_WAIT ? T("Being checked") : T(t);
 const drView = () => LN.st && LN.st.drafter && Array.isArray(LN.st.drafter.available) ? LN.st.drafter : null;
 const drPick = () => LN.drf || (LN.plan && LN.plan.drafter && LN.plan.drafter.kind) || (drView() && drView().conf) || null;
 $('ln-dr').addEventListener('click', (ev) => {
   const b = ev.target.closest('button[data-dr]'); if (!b || b.disabled || !LN.on) return;
-  LN.drf = b.dataset.dr; renderLaunch(); lnPlanSoon(); if (RG.on) renderAlloc();   // ring: its drafter row (ring.js)
+  LN.drf = b.dataset.dr; renderLaunch(); lnKeep({ DRAFTER_KIND: LN.drf }); lnPlanSoon(); if (RG.on) renderAlloc();   // ring: its drafter row (ring.js)
 });
 // 同時推論 picked on the launch screen (10-31 「起動設定画面で同時推論数を指定できるように。現時点で1,2,3,4すべて出してよし」;
 // ring-mock's DESIGN-multi-start.md §3): 1 2 3 4, 1 = MULTI 0; LN.mu null = CONF's MULTI. status.multi says what the lane
@@ -3920,14 +3978,14 @@ const muAsk = () => muPick() >= 2 ? muPick() : 0;   // what the launcher takes (
 const MU_COL = '#7D6AA8';   // the memory bar's 同時推論 (ring-mock's --m-multi)
 $('ln-mu').addEventListener('click', (ev) => {
   const b = ev.target.closest('button[data-mu]'); if (!b || b.disabled || !LN.on) return;
-  const v = +b.dataset.mu; LN.mu = muView() && v === muConf() ? null : v; renderLaunch(); lnPlanSoon();
+  const v = +b.dataset.mu; LN.mu = muView() && v === muConf() ? null : v; renderLaunch(); lnKeep({ MULTI: muAsk() }); lnPlanSoon();
 });
 // an error's text: the launcher's {error: {message}}, or {error: "..."} (a drafter refused at the start)
 const errText = (j) => j && j.error ? (typeof j.error === 'string' ? j.error : j.error.message || '') : '';
 // the KV format picked on the launch screen (null: CONF's) / 起動画面で選んだ KV の形式 (null = CONF の)
 $('ln-kv').addEventListener('click', (ev) => {
   const b = ev.target.closest('button[data-kv]'); if (!b || b.disabled || !LN.on) return;
-  LN.kvf = b.dataset.kv; renderLaunch(); lnPlanSoon();
+  LN.kvf = b.dataset.kv; renderLaunch(); lnKeep({ KV: LN.kvf }); lnPlanSoon();
 });
 // the same ask in flight or answered in the last PLAN_SAME_MS is not sent again (the launch screen's start and its first
 // redraw both asked at once); force: the nodes changed (the cluster's settings saved), so the same ask answers anew
@@ -3957,10 +4015,17 @@ async function lnPlan(force) {
   renderLaunch(); lnBoard();
 }
 async function lnNodes() { try { LN.nodes = await liveGet('/v1/launch/nodes'); renderLaunch(); worldTitle(LN.nodes && Array.isArray(LN.nodes.nodes) ? LN.nodes.nodes.length : 0); } catch (e) { } }
+// one at a time: a call while one is under way asks again when it answers (each call used to start a chain of its own),
+// and the start's end is taken once / 一度に 1 本: 走っている間の呼び出しは、答えが来てからもう一度読む (前は呼び出しごとに
+// 連鎖が増えた)。起動の終わりは 1 回だけ
 async function lnPoll() {
-  clearTimeout(LN.pollT);
-  let s = null; try { s = await liveGet('/v1/launch/status'); } catch (e) { }
+  if (LN.landed) return;
+  if (LN.polling) { LN.pollAgain = true; return; }
+  clearTimeout(LN.pollT); LN.polling = true;
+  let s = null; try { s = await liveGet('/v1/launch/status', true, LIVE_POLL_MS); } catch (e) { }
+  LN.polling = false;
   if (s && s.state === 'running') {   // loaded: the finale, then the live panel / 読み終えた: 締めの演出のあとライブのパネルへ
+    LN.landed = true;
     const was = LN.st && LN.st.state;
     if (was === 'starting' && !reduced) LN.fin = performance.now();   // before lnSet, so the card keeps its steps (all done)
     lnSet(s); LN.pct = 100; lnBoard();
@@ -3968,6 +4033,7 @@ async function lnPoll() {
     return;
   }
   if (s) lnSet(s);
+  if (LN.pollAgain) { LN.pollAgain = false; lnPoll(); return; }
   LN.pollT = setTimeout(lnPoll, lnBusy() ? 250 : lnWaiting() ? 500 : 2000);
 }
 // widths without data: status.banks, the launcher's check of
@@ -4243,8 +4309,10 @@ $('ln-go').addEventListener('click', async () => {
   body.store = 'max';                                                                      // the KV planned: all the room
   if (rsvView() && LN.rsv != null) body.reserve_gib = LN.rsv;                              // what a node keeps for the OS
   if (muView()) body.multi = muAsk();                                                       // 同時推論 (1 = 0)
+  // what this start takes, before it reads glm53.conf / この起動の値を、起動が glm53.conf を読む前に
+  await lnKeep({ ...(kv ? { KV: kv } : {}), ...(dr ? { DRAFTER_KIND: dr } : {}), ...(ctxView() && LN.plan.kv.context ? ctxKeep(LN.plan.kv.context) : {}), ...(rsvView() && LN.rsv != null ? { RESERVE_GB: LN.rsv } : {}), ...(muView() ? { MULTI: muAsk() } : {}) });
   const r = await livePost('/v1/launch/start', body).catch(() => ({ ok: false, status: 0, j: null }));
-  LN.bad = !r.ok; LN.msg = r.ok ? '' : r.status === 412 ? missText(r.j) || (r.j && r.j.drafter ? errText(r.j) : '') || T("Does not fit") : r.status === 409 && !/^Bank/.test(errText(r.j)) ? T("Already running") : errText(r.j) || T("Failed · ") + r.status;
+  LN.bad = !r.ok || !!LN.keepBad; LN.msg = r.ok ? (LN.keepBad ? LN.msg : '') : r.status === 412 ? missText(r.j) || (r.j && r.j.drafter ? errText(r.j) : '') || T("Not enough memory") : r.status === 409 && !/^Bank/.test(errText(r.j)) ? T("Already running") : errText(r.j) || T("Failed · ") + r.status;
   renderLaunch(); lnPoll();
 });
 $('ln-stop').addEventListener('click', async () => {
@@ -4260,7 +4328,7 @@ function liveLaunch() {
   $('launch').hidden = false;
   for (const id of ['ln-nodes', 'ln-sum', 'ln-kv', 'ln-steps', 'ln-prog', 'ln-go', 'ln-stop']) $(id).hidden = true;
   $('ln-down').hidden = false; $('ln-st').textContent = LN_STATE.running;
-  lnLiveNodes(); setInterval(lnLiveNodes, 5000); lnNote();
+  livePoll(lnLiveNodes, 5000); lnNote();
 }
 // the live card's note while the engine gives no counts (usageNone), gone when they come; a stop's message is left
 // alone / 回数の来ないエンジンの間の稼働カードの注記 (来たら消す)。停止のメッセージには触らない
@@ -4276,7 +4344,7 @@ function lnNote() {
 // 稼働中のサーバー (ランチャーが 5 秒ごとに各ノードを見たもの): head (rank 0) と worker、空きメモリ、GPU と CPU の温度
 // (GPU のものと、SoC の温度ゾーンの最も高いもの)。ランチャーが出さない値は「—」(作らない)
 async function lnLiveNodes() {
-  let r; try { r = await liveGet('/v1/launch/nodes'); } catch (e) { return; }
+  let r; try { r = await liveGet('/v1/launch/nodes', true, LIVE_POLL_MS); } catch (e) { return; }
   const ns = r && Array.isArray(r.nodes) ? r.nodes.slice().sort((a, b) => a.rank - b.rank) : [];
   $('ln-live').hidden = !ns.length; worldTitle(ns.length);
   const deg = (v) => Number.isFinite(v) ? `${Math.round(v)}<span class="u">°C</span>` : '—';
@@ -4527,21 +4595,22 @@ async function cfPoll() {
   if (CF.check && CF.check.state === 'checking') CF.pollT = setTimeout(cfPoll, 1000);
 }
 // the live panel's polls (at the page's start while running, or after the launch screen: lnLive) / 稼働パネルの取得
+let liveOn = false;
 function liveStart() {
+  if (liveOn) return; liveOn = true;
   alLive();
   if (LN.has) {
-    setInterval(stopCheck, 10000);
+    livePoll(stopCheck, 10000, false);
     liveLaunch();
     rgLiveStart();   // a ring lane's [ RING ] (ring.js)
   }
   poolStart();   // the KV pool under the disc (pool.js)
-  liveSpeed(); liveMemory(); liveHealthGet(); rsInit();
-  setInterval(liveHealthGet, 1000);   // each second: prefill's progress for the effects / 毎秒: 演出用の prefill の進み
+  livePoll(liveSpeed, 2000); livePoll(liveMemory, 10000);
+  livePoll(liveHealthGet, 1000);   // each second: prefill's progress for the effects / 毎秒: 演出用の prefill の進み
+  rsInit();
   setInterval(livePicks, 250);
   setInterval(livePrefill, 1000);   // the prompt's chunks for 実測 / prompt の区切り (実測用)
-  setInterval(usageTick, 5000);
-  setInterval(liveSpeed, 2000);
-  setInterval(liveMemory, 10000);
+  livePoll(usageTick, 5000, false);
 }
 
 /* ---------- the ring: 1 servers and the ring, the steps in the header, the live lanes ---------- */
@@ -4622,7 +4691,7 @@ const rgMem = (h) => h.other ? ' · ' + F("GPU in use ({0})", esc(h.other)) : rg
 
 // the stage's animations: tweens run by the stage's frame / 舞台の動き
 const RGA = new Set();
-function rgAnim(dur, f, done) { const a = { t: 0, dur: reduced ? Math.min(dur, 0.15) : dur, f, done }; RGA.add(a); return a; }
+function rgAnim(dur, f, done) { const a = { t: 0, dur: reduced ? Math.min(dur, 0.15) : dur, f, done }; RGA.add(a); rgLoop(); return a; }
 function rgAnimTick(dt) { for (const a of [...RGA]) { a.t += dt; const q = rgClamp(a.t / a.dur); a.f(rgEase(q)); if (q >= 1) { RGA.delete(a); if (a.done) a.done(); } } }
 const RGC = () => { const c = getComputedStyle(document.documentElement), v = (n) => c.getPropertyValue(n).trim();
   return { even: v('--lane-even'), odd: v('--lane-odd'), acc: v('--acc'), hi: v('--acc-hi'), ink: v('--ink'), ink2: v('--ink-2'), ink3: v('--ink-3'),
@@ -4654,7 +4723,7 @@ class RgRing {
   laneR(h) { return this.Rr + (h ? 6 : -6); }
   arcPt(li, h, t) { const n = Math.max(1, this.order().length), a0 = -Math.PI / 2 + (li + 0.5) / n * 2 * Math.PI, a1 = a0 + 2 * Math.PI / n, pad = 0.13 * (4 / n), a = rgLerp(a0 + pad, a1 - pad, t), r = this.laneR(h);
     return { x: this.cx + Math.cos(a) * r, y: this.cy + Math.sin(a) * r, a }; }
-  packet(li, h, dir, opt = {}) { this.packets.push(Object.assign({ li, h, dir, t: 0, sp: 1.8, col: h ? RGCOL.odd : RGCOL.even, sz: 2.2 }, opt)); }
+  packet(li, h, dir, opt = {}) { this.packets.push(Object.assign({ li, h, dir, t: 0, sp: 1.8, col: h ? RGCOL.odd : RGCOL.even, sz: 2.2 }, opt)); rgLoop(); }
   spark(px, py, col) { for (let k = 0; k < 14; k++) { const a = Math.random() * 2 * Math.PI, v = 30 + Math.random() * 70; this.sparks.push({ x: px, y: py, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1, col }); } }
   frame(x, dt) {
     const cx = this.cx, cy = this.cy, ord = this.order(), segs = rgSegs(), rIn = this.Rr * 0.42;
@@ -4738,22 +4807,39 @@ function rgProblem(k) {
 const RGR = new RgRing();
 let rgW = 0, rgDpr = 1, rgLast = 0, rgRaf = 0;
 function rgSize() {
-  const cv = $('rg-cv'), r = cv.parentElement.getBoundingClientRect(); if (!r.width) return false;
-  rgDpr = Math.min(2, devicePixelRatio || 1); if (rgW !== r.width) { rgW = r.width; cv.width = Math.round(r.width * rgDpr); cv.height = Math.round(r.width * rgDpr); }
+  const cv = $('rg-cv'), r = cv.parentElement.getBoundingClientRect(), d = Math.min(2, devicePixelRatio || 1); if (!r.width) return false;
+  if (rgW !== r.width || rgDpr !== d) { rgW = r.width; rgDpr = d; cv.width = Math.round(r.width * d); cv.height = Math.round(r.width * d); }
   RGR.size(rgW); NDS.size(rgW); return true;
 }
+// frames only while something on it moves; when nothing does, one more whenever what it shows has changed (its size,
+// the colours, the texts, the nodes' and links' states): rgWake looks four times a second, and a frame that threw leaves
+// the signature empty, so it is tried again
+// フレームは何かが動いている間だけ。動いていなければ、見せるものが変わったとき (大きさ、色、文字、台と線の状態) に 1 回:
+// rgWake が毎秒 4 回見る。例外で終わったフレームは印が空のままなので、もう一度描く
+let rgSig = '';
+const rgMoving = () => RGA.size > 0 || (RG.kind === 'switch' ? NDS.t < (ndList().length + 1) * 0.09 + 0.35
+  : RGR.packets.length > 0 || RGR.sparks.length > 0 || RGR.link.some(l => l.draw > 0 && (l.glow[0] > 0 || l.glow[1] > 0)) || Object.values(RGR.node).some(n => n.on > 0.01 && n.pulse > 0));
+function rgSigNow() {
+  const shows = RG.kind === 'switch' ? [NDS.hud, ndHeadName(), rgHeadAddr(), ndSel(), ndList().map(h => [h.addr, h.name, h.reg, h.other, h.access, ndUsable(h)])]
+    : [RGR.hud, RGR.node, RGR.link, RGR.order().map((a, k) => [a, rgRankName(k), RG.ring ? rgProblem(k) : null]), rgSegs().map(sg => rgSegText(sg))];
+  return JSON.stringify([$('rg-cv').parentElement.getBoundingClientRect().width, Math.min(2, devicePixelRatio || 1), RG.kind, ACC.hex, shows]);
+}
 function rgFrame(now) {
-  rgRaf = 0; if (RG.view !== 'srv') return;
+  rgRaf = 0; rgSig = ''; if (RG.view !== 'srv') return;
   const dt = Math.min(0.05, rgLast ? (now - rgLast) / 1000 : 0); rgLast = now;
   if (!RGCOL) RGCOL = RGC();
-  if (rgSize()) {
-    rgAnimTick(dt);
-    const x = context($('rg-cv')); x.setTransform(rgDpr, 0, 0, rgDpr, 0, 0); x.clearRect(0, 0, rgW, rgW);
-    (RG.kind === 'switch' ? NDS : RGR).frame(x, dt);   // a switch: its star (nodes.js) / スイッチは星形 (nodes.js)
-  }
-  rgRaf = requestAnimationFrame(rgFrame);
+  if (!rgSize()) return;   // hidden (the settings) / 隠れている (設定)
+  rgAnimTick(dt);
+  const x = context($('rg-cv')); x.setTransform(rgDpr, 0, 0, rgDpr, 0, 0); x.clearRect(0, 0, rgW, rgW);
+  (RG.kind === 'switch' ? NDS : RGR).frame(x, dt);   // a switch: its star (nodes.js) / スイッチは星形 (nodes.js)
+  rgSig = rgSigNow();
+  if (rgMoving()) rgRaf = requestAnimationFrame(rgFrame);
 }
 const rgLoop = () => { if (!rgRaf) { rgLast = 0; rgRaf = requestAnimationFrame(rgFrame); } };
+function rgWake() {
+  if (RG.view !== 'srv' || rgRaf || !$('rg-cv').parentElement.clientWidth) return;
+  if (rgMoving() || rgSigNow() !== rgSig) { RGCOL = RGC(); rgLoop(); }
+}
 
 // a node as the launcher read it, for the log / ランチャーが読んだ台 (ログ用)
 function rgHostLine(h) {
@@ -4847,8 +4933,8 @@ function rgState() {
   if (has('busy')) return ['bad', T("A node in use")];
   if (has('uncrossed')) return ['bad', T("Not crossed")];
   if (has('half')) return ['bad', T("A lane down")];
-  if (rgConfMatch()) return ['ok', RG.steps ? T("Ring · registered") : T("Ring · as glm53.conf")];
-  return ['warn', !rgRegistered() ? T("Not registered") : RG.steps ? T("Differs from the registered nodes") : T("Differs from glm53.conf")];
+  if (rgConfMatch()) return ['ok', RG.steps ? T("Ring · registered") : T("Ring · as set")];
+  return ['warn', !rgRegistered() ? T("Not registered") : RG.steps ? T("Differs from the registered nodes") : T("Differs from the settings")];
 }
 const rgWorkers = () => RG.kind === 'switch' ? ndSel() : RG.ring && RG.ring.nodes ? RG.ring.nodes.slice(1) : [];
 // rank 0's address for a check and 登録: the ring's head as traced, a switch's head on the /24 of the servers chosen
@@ -4925,11 +5011,9 @@ function rgCheckUI() {
   const fails = mine ? c.nodes.reduce((s, n) => s + rgItems(n).filter(i => i.state === 'fail').length, 0) + (c.ring && c.ring.state === 'fail' ? 1 : 0) : 0;
   const st = running ? ['run', T("Checking")] : !mine ? (LN.st && LN.st.state === 'running' && rgRegistered() ? ['ok', T("Started")] : ['', T("Not checked")]) : rgPassed() ? ['ok', T("All present")] : rgPkgOnly() ? ['warn', T("Not checked")] : ['bad', F("Error {0}", Math.max(1, fails))];
   $('rg-ck-st').textContent = st[1]; $('rg-ck-st').className = 'rg-pill ' + st[0];
-  const same = RG.kind === 'switch' ? ndSaved() : rgConfMatch(), tp = RG.steps && mine && c.topology && c.topology.mode ? c.topology : null, file = RG.cfg && RG.cfg.node_file;
-  // with the node file: the lines 登録 writes there, as the check judged them; else glm53.conf's NODES
-  // ノード設定ファイルがあれば、登録で書く行 (確認の判定のとおり)。無ければ glm53.conf の NODES
-  setHTML($('rg-conf'), tp ? `<div class="lbl">${esc(file)}${rgRegistered() && same ? '' : ' · ' + T("written by Register")}</div><pre>${[`TOPOLOGY=${tp.mode}`, `NODES=(${tp.order.join(' ')})`, `SOCKET_IFNAME=${tp.ifname}`, `IB_HCA=${tp.hca}`].map(esc).join('\n')}</pre>`
-    : !RG.steps && RG.ring && RG.ring.ring === 'closed' && rgWorkers().every(Boolean) ? `<div class="lbl">${same ? 'glm53.conf' : T("glm53.conf · written by Register")}</div><pre>NODES=(${RG.ring.nodes.map(esc).join(' ')})</pre>` : '');
+  // what 登録 does, in words: the file and its lines are the launcher's / 登録で何をするか。ファイルとその行はランチャーの話
+  const same = RG.kind === 'switch' ? ndSaved() : rgConfMatch();
+  setHTML($('rg-conf'), mine && rgPassed() && !(rgRegistered() && same) ? `<div class="lbl">${T("Register these nodes")}</div>` : '');
   // ［イメージをそろえる］: only for an image row that fails (RUNTIME=docker) / イメージの行が fail のときだけ
   const old = mine ? c.nodes.filter(n => (n.items || []).some(i => i.key === 'image' && i.state === 'fail')).map(n => n.addr) : [];
   $('rg-pull').hidden = !old.length; $('rg-pull').dataset.nodes = old.join(' ');
@@ -5158,7 +5242,7 @@ function rgShow(v) {
   $('rg-srv').hidden = RG.view !== 'srv'; $('main-hero').hidden = RG.view === 'srv';
   if (RG.view !== 'srv' && RG.on) { $('rg-ov').hidden = false; rgOvLoop(); }
   if (RG.view === 'srv') { RGCOL = null; rgUI(); rgLoop(); }
-  else window.dispatchEvent(new Event('resize'));   // the disk's canvases sized again after being hidden / 隠れていた円盤を測り直す
+  else discWake();   // the disc back at once (discBack measures it) / 円盤をすぐ戻す (測り直しは discBack)
   rgFlow();
 }
 $('rg-flow').addEventListener('click', (ev) => {
@@ -5173,7 +5257,7 @@ const RG_FULL_GBPS = 3;
 // the live panel's [ RING ]: each lane's traffic as the launcher reads it (both ends' sends, about every 2 s), 断 for
 // a lane that is down / 稼働パネルの [ RING ]: レーンごとの通信量 (ランチャーが約 2 秒ごとに読む)。落ちたレーンは 断
 async function rgLinks() {
-  let j; try { j = await liveGet('/v1/launch/links'); } catch (e) { return; }
+  let j; try { j = await liveGet('/v1/launch/links', true, LIVE_POLL_MS); } catch (e) { return; }
   const ls = j && Array.isArray(j.links) ? j.links : []; RG.lanes = ls; $('rg-live').hidden = !ls.length || !(LN.st && LN.st.state === 'running' && !LN.on); if (!ls.length) return;
   // each lane's /24 from the trace, when the trace is glm53.conf's ring / たどったリングが今の NODES なら各レーンの /24
   const sub = (a, b, h) => { const l = rgConfMatch() && (RG.ring.links || []).find(x => (x.a === a && x.b === b) || (x.a === b && x.b === a)); return l && l.subnets[h] ? '.' + l.subnets[h].split('.')[2] : ''; };
@@ -5185,20 +5269,35 @@ async function rgLinks() {
   setHTML($('rg-links'), `<div class="lk hd"><span>${T("Link")}</span><span>${T("Even lane")}</span><span>${T("Odd lane")}</span></div>` + pairs.map(k => { const [a, b] = k.split('-').map(Number);
     return `<div class="lk"><span class="mono">${esc(nm(a))} ⇄ ${esc(nm(b))}</span>${lane(ls.find(l => l.a === a && l.b === b && l.half === 0))}${lane(ls.find(l => l.a === a && l.b === b && l.half === 1))}</div>`; }).join(''));
 }
-function rgLiveStart() { if (!RG.on) return; if (!RG.linksT) { rgLinks(); RG.linksT = setInterval(rgLinks, 2000); } $('rg-ov').hidden = false; rgOvLoop(); }
+function rgLiveStart() { if (!RG.on) return; if (!RG.linksT) RG.linksT = livePoll(rgLinks, 2000); $('rg-ov').hidden = false; rgOvLoop(); }
 
 // the ring over the live disc (10-28 "かさねて"): the nodes in rank order outside the rim's sign, each link as two lanes
 // (even inside, odd outside), each lane lit only by its measured traffic (links: both ends' sends, so no direction is
 // drawn), still and faint at 0, red and dashed when down; the nodes at the corners, where the square has room
 // 稼働中の円盤にリングを重ねる: 外周の文字帯の外に rank 順の台、線ごとに 2 本のレーン。レーンの明るさは実測の通信量だけで
 // 決める (両端の送信の和なので向きは描かない)。0 なら暗いまま動かず、落ちたレーンは赤の破線。台は四隅 (正方形で広い所)
-const RGO = { raf: 0, last: 0, lit: {} };
+// frames only while a lane's brightness is easing to its traffic: the drawing does not change otherwise. rgOvWake looks
+// four times a second whether what it shows has (the lanes' values, the size, the text's switch, the colours, the nodes);
+// a frame that threw leaves the signature empty, so it is tried again
+// フレームはレーンの明るさが通信量へ向かう間だけ (それ以外は絵が変わらない)。rgOvWake が毎秒 4 回、見せるものが変わったか見る
+// (レーンの値、大きさ、文字の切り替え、色、台)。例外で終わったフレームは印が空のままなので、もう一度描く
+const RGO = { raf: 0, last: 0, lit: {}, sig: '' };
+// a font arrived: text drawn before it is redrawn / フォントが届いた: その前に描いた文字を描き直す
+document.fonts.addEventListener('loadingdone', () => { RGO.sig = ''; rgSig = ''; });
 function rgOvLoop() { if (!RGO.raf) { RGO.last = 0; RGO.raf = requestAnimationFrame(rgOvFrame); } }
+function rgOvSigNow() {
+  const css = $('disk').clientWidth, o = RG.cfg && RG.cfg.nodes || [];
+  return JSON.stringify([css, dpr, css && g ? [g.c, rgRimBase()] : 0, st.marquee, ACC.hex, o, o.map(a => rgName(a)), RG.lanes]);
+}
+function rgOvWake() {
+  if (RGO.raf || !RG.on || $('rg-ov').hidden || rgOvSigNow() === RGO.sig) return;
+  RGCOL = RGC(); rgOvLoop();
+}
 function rgOvFrame(now) {
-  RGO.raf = 0;
+  RGO.raf = 0; RGO.sig = '';
   const cv = $('rg-ov'), css = $('disk').clientWidth;
   if (cv.hidden || !RG.on) return;
-  if (!css || !g) { RGO.raf = requestAnimationFrame(rgOvFrame); return; }
+  if (!css || !g) { RGO.sig = rgOvSigNow(); return; }   // the disc hidden / 円盤が隠れている
   if (!RGCOL) RGCOL = RGC();
   const dt = Math.min(0.1, RGO.last ? (now - RGO.last) / 1000 : 0); RGO.last = now;
   // the disc measured at another width than it has now (the ring's circle is 8% smaller, body.ring, set after the page
@@ -5213,7 +5312,7 @@ function rgOvFrame(now) {
   const W = Math.round(css * 1.4 * dpr); if (cv.width !== W) cv.width = cv.height = W;
   const x = context(cv), o = RG.cfg && RG.cfg.nodes || [], n = o.length;
   x.setTransform(1, 0, 0, 1, 0, 0); x.clearRect(0, 0, W, W);
-  if (n < 2) { RGO.raf = requestAnimationFrame(rgOvFrame); return; }
+  if (n < 2) { RGO.sig = rgOvSigNow(); return; }
   // drawn as the node check's ring (11-01 「起動設定・起動後画面のサークル表現をノード確認の物をベースに」), the disc's
   // centre as it was: the ticks round it (open at 12 o'clock, where the reply's THINKING / ANSWER line stands), each link
   // as two lanes (even inside, odd outside) lit by their measured traffic, the nodes as the check draws them, in CSS px
@@ -5234,11 +5333,13 @@ function rgOvFrame(now) {
     x.strokeStyle = k % 10 === 0 ? 'rgba(220,230,245,.22)' : 'rgba(220,230,245,.08)'; x.beginPath(); x.moveTo(c + Math.cos(a) * tickR, c + Math.sin(a) * tickR); x.lineTo(c + Math.cos(a) * r1, c + Math.sin(a) * r1); x.stroke();
   }
   const pad = (rn + 7) / Rr, downAt = new Set();
+  let easing = false;
   for (let k = 0; k < n; k++) {
     const b = (k + 1) % n, a0 = ang(k) + pad, a1 = ang(k) + 2 * Math.PI / n - pad;
     for (const h of [0, 1]) {
       const l = ls.find(v => ((v.a === k && v.b === b) || (v.a === b && v.b === k)) && v.half === h), key = `${k}-${h}`;
-      const want = l && l.up ? rgClamp((l.gbps || 0) / RG_FULL_GBPS) : 0, q = RGO.lit[key] = (RGO.lit[key] || 0) + (want - (RGO.lit[key] || 0)) * Math.min(1, dt * 4);
+      const want = l && l.up ? rgClamp((l.gbps || 0) / RG_FULL_GBPS) : 0, was = RGO.lit[key] || 0, to = was + (want - was) * Math.min(1, dt * 4), q = RGO.lit[key] = Math.abs(want - to) < 0.004 ? want : to;
+      if (q !== want) easing = true;
       const down = !!l && !l.up, col = down ? RGCOL.bad : h ? RGCOL.odd : RGCOL.even;
       if (down) { downAt.add(k); downAt.add(b); }
       x.beginPath(); x.arc(c, c, Rr + (h ? 6 : -6), a0, a1);
@@ -5256,7 +5357,8 @@ function rgOvFrame(now) {
     rgLabel(x, p, rn, rgName(o[k]), k === 0 ? 'head' : `rank ${k}`);
   }
   x.textBaseline = 'alphabetic';
-  RGO.raf = requestAnimationFrame(rgOvFrame);
+  RGO.sig = rgOvSigNow();
+  if (easing) RGO.raf = requestAnimationFrame(rgOvFrame);
 }
 
 // the start's end: 起動完了 over the disk (11-02: was ALL SYSTEMS NOMINAL), or SYSTEMS ONLINE · N WARNING with the
@@ -5795,7 +5897,7 @@ $('wt-dlg').addEventListener('keydown', (ev) => {
 // 稼働パネルの KV pool: /health の pool (毎秒)。ブロックの地図 (共有の頭 → 会話 → 空き)、会話の数 / 64、追い出し、要求の
 // 使い方 (続き / 頭を共有 / 新規)、キャッシュから読んだ prompt の割合。GET /v1/pool (エンジンに依頼中) があれば会話ごとに
 // 描き (最近使った順、最後が次に削られる)、行を出す。無ければ会話はひとまとめで行なし。モックの答えなら「まだない口」と印
-const PL = { on: false, convs: null, proposed: false, gone: false, segs: [], cell: 0, cols: 0, now: null, owner: null, tables: new Map(), reqs: [], focus: null, sel: null };
+const PL = { rev: 0, revOf: '', key: '', on: false, convs: null, proposed: false, gone: false, segs: [], cell: 0, cols: 0, now: null, owner: null, tables: new Map(), reqs: [], focus: null, sel: null };
 const PL_SHARED = '95,208,220';   // the shared start's colour (the KV ring's teal) / 共有の頭の色
 // the blocks the running request uses, lit (10-29: 今の推論が使っているキャッシュがそこ！というのと、プレフィル後に新規で足された分):
 // the cache it reads (kept from before) and the blocks it has added (its prefill, then its reply)
@@ -5809,8 +5911,8 @@ const PL_LIT = { c: '#e9f1ff', n: '#ffad66', o: '#8fa8d6', s: '#ffd166' }, PL_HA
 function poolStart() {
   if (PL.on) return; PL.on = true;
   // the conversations and the blocks' owners: every second while a request runs, else every 2 s / 要求の間は毎秒、ほかは 2 秒ごと
-  const tick = async () => { await poolConvs(); if (!PL.gone) setTimeout(tick, PL.now ? 1000 : 2000); };
-  tick(); setInterval(poolDraw, 1000);
+  livePoll(poolConvs, () => PL.now ? 1000 : 2000);
+  setInterval(poolDraw, 1000);
 }
 // the request running now, from /health's progress: its whole blocks read from the cache (the block the cached part ends
 // in is computed again), and up to ub the blocks that hold its cache so far (computed, the reply written), not the ones
@@ -5853,12 +5955,13 @@ function plFocus() {
 const plTab = (id) => PL.tables.get(id) || null;
 async function poolConvs() {
   if (PL.gone) return;
-  let r; try { r = await fetch('/v1/pool'); } catch (e) { return; }
+  let r; try { r = await fetch('/v1/pool', liveLimit(LIVE_POLL_MS)); } catch (e) { return; }
   if (r.status === 404) { PL.gone = true; PL.convs = null; poolDraw(); return; }   // not in this engine / この engine には無い
   if (!r.ok) return;
   PL.proposed = !!r.headers.get('X-TF-Mock-Proposed');   // the mock's answer to a field asked for / モックの答え
   try {
     const j = await r.json(); PL.convs = Array.isArray(j.convs) ? j.convs : null;
+    const rev = JSON.stringify([j.convs, j.owner], (k, v) => k === 'idle_ms' ? undefined : v); if (rev !== PL.revOf) { PL.revOf = rev; PL.rev++; }   // what it draws, but the ages / 描くもの (経過時間のほか)
     // each block's owner (u16) and the conversations' tables (u32: the ones in use, or every one), for the map in block order
     // 各ブロックの持ち主 (u16) と会話の表 (u32: 使用中のもの、または全部)。地図をブロックの並びで描く
     const b = j.owner ? b64bytes(j.owner) : null;
@@ -5869,6 +5972,10 @@ async function poolConvs() {
   poolDraw();
 }
 const plAgo = (ms) => ms < 60000 ? F("{0} s ago", Math.round(ms / 1000)) : ms < 3600000 ? F("{0} min ago", Math.round(ms / 60000)) : F("{0} h ago", (ms / 3600000).toFixed(1));
+// each conversation's age, written without drawing the rest / 会話ごとの経過時間だけ書く
+function plAges() {
+  for (const c of PL.convs || []) { const el = c.active ? null : $('pl-cv-rows').querySelector(`.cr[data-id="${c.id}"] [data-ago]`), t = el && plAgo(c.idle_ms); if (el && el.textContent !== t) el.textContent = t; }
+}
 function poolDraw() {
   const p = liveHealth && liveHealth.pool, el = $('pool');
   if (!p || !(p.blocks > 0)) { el.hidden = true; PL.now = null; PL.focus = null; return; }
@@ -5876,6 +5983,11 @@ function poolDraw() {
   if (PL.sel != null && PL.convs && !PL.convs.some(c => c.id === PL.sel)) PL.sel = null;   // gone from the pool / pool から消えた
   PL.focus = plFocus();
   PL.now = PL.focus ? plNow(p.block_positions || 256, PL.focus.r) : null;
+  // all of it only when what it shows has changed (each second it drew the map and the rows again); else only the ages
+  // 見せるものが変わったときだけ全部描く (前は毎秒、地図と行を描き直していた)。それ以外は経過時間だけ
+  const key = JSON.stringify([PL.rev, p, liveHealth.prompt_tokens_total, liveHealth.cached_tokens_total, PL.sel, PL.proposed, PL.reqs, PL.focus && PL.focus.how, $('pl-map').clientWidth, devicePixelRatio, ACC.hex]);
+  if (key === PL.key) { plAges(); return; }
+  PL.key = key;
   const B = p.blocks, free = Math.max(0, p.free_blocks || 0), used = B - free, bp = p.block_positions || 256, shared = p.shared_blocks || 0;
   $('pl-pct').textContent = (100 * used / B).toFixed(1);
   $('pl-sub').textContent = `${fmt.format(used)} / ${fmt.format(B)} blocks · ${kpos(used * bp)} / ${kpos(B * bp)} token`;
@@ -5919,7 +6031,7 @@ function poolDraw() {
     setHTML(rows, cv.map((c, k) => `<div class="cr${c.active ? ' on' : ''}${c.id === PL.sel ? ' sel' : ''}${fo && many && c.id === fo.r.pool_id ? ' fo' : ''}" role="button" tabindex="0" aria-pressed="${c.id === PL.sel}" data-id="${c.id}" title="${T("Shown on the circle and the map; choose again for automatic")}"><span class="id">#${c.id}</span>` +
       `<span class="bar"><i class="s" style="width:${(100 * c.shared_blocks / mx).toFixed(2)}%"></i><i class="o" style="width:${(100 * (c.blocks - c.shared_blocks) / mx).toFixed(2)}%"></i></span>` +
       `<span class="len"><b>${kpos(c.positions)}</b> token</span><span class="bl">${fmt.format(c.blocks)} blocks</span>` +
-      `<span class="ago">${c.active ? plPhase(c.id) : plAgo(c.idle_ms)}${k === lastIdle && !c.active ? ` · <em class="lru">${T("next trimmed")}</em>` : ''}</span></div>`).join(''));
+      `<span class="ago">${c.active ? plPhase(c.id) : `<span data-ago>${plAgo(c.idle_ms)}</span>`}${k === lastIdle && !c.active ? ` · <em class="lru">${T("next trimmed")}</em>` : ''}</span></div>`).join(''));
     if (had != null) { const r = rows.querySelector(`.cr[data-id="${had}"]`); if (r) r.focus({ preventScroll: true }); }   // keep the keyboard's place / キーボードの位置を保つ
   }
   $('pl-mock').hidden = !PL.proposed;
@@ -6119,7 +6231,6 @@ function schShow() {
     st.textContent = F("At start {0}", sv); st.style.left = `calc(9px + (100% - 18px) * ${sv / 100})`;
   }
   if (!SCH.ap) { const ap = $('sch-ap'); ap.textContent = ''; ap.className = 'sch-ap'; }   // only 反映中… / 反映しました (no 重なり中, 11-01) / 反映の表示だけ
-  esKeep();   // 次の起動もこの値で (settings.js)
 }
 // each /health (every second): shown or hidden, the values followed (held for a moment after a change, so a /health
 // read before it does not undo it) / 毎秒の /health: 出すか、値を合わせる (変更の直後は少し待つ。変更前に読んだ /health で戻らない)
@@ -6273,8 +6384,7 @@ function rdSync() {
 // 停止と同じ問い (利用記録を名前で保存するか) のあと、ランチャーが止めて新しい設定で起動し直す。思考の大きさはエンジンの
 // とおり 1 回の応答の上限 (context length の %、MAX_TOKENS_SHARE。古い glm53.conf の MAX_TOKENS はスライダーを保存するまで優先)、思考の上限 (その %)、途中要約、要約する間隔 (%)、思考完了時要約。ランチャーが "live" と
 // する 4 つは稼働中ならすぐ効き (ランチャーがエンジンに送る)、推論画面の [ REASONING CONTROL ] と同じ値を出す (11-02)
-const ES = { ok: false, on: false, d: null, m: {}, edit: {}, srvErr: {}, info: {}, adv: false, msg: '', bad: false, busy: false, confirm: false,
-  keepMsg: '', keepOk: false, keepBad: false, keepBusy: false, keepT: 0 };
+const ES = { ok: false, on: false, d: null, m: {}, edit: {}, srvErr: {}, info: {}, adv: false, msg: '', bad: false, busy: false, confirm: false };
 const ES_MAX_DEFAULT = 4096;   // the server's max_tokens when MAX_TOKENS is empty / MAX_TOKENS が空のときのサーバーの既定
 // the rows: k the key, l the name, h the explanation's paragraphs, u the unit, o the choices' names, sl a slider, go where
 // a readonly one is changed, vt virtual with organizing midway
@@ -6294,21 +6404,21 @@ const ES_GROUPS = [
       "Sets: the KV cache's positions in all, at least the context length (512 more with the pool). A start from this panel always takes all the room the plan leaves (the launch screen's KV rows show it); this value is for a start with tf-glm53 up. A restart is needed.",
       "A request takes up to the context length; the rest keeps earlier conversations' KV in whatever blocks are free, so their next turn resumes from the cache."] },
     { k: 'KV', l: "KV format", o: { fp8: 'fp8', fp4: 'fp4' }, h: ["For: the KV cache (what the model keeps of the conversation).",
-      "fp4 takes half the memory of fp8, a little less accurate. The launch screen may choose another for one start."] }] },
+      "fp4 takes half the memory of fp8, a little less accurate. The launch screen writes its choice here."] }] },
   { t: "Thinking and answer sizes", info: 'think', items: [
-    { k: 'MAX_TOKENS_SHARE', l: "A reply's limit", vt: true, sl: true, h: ["For: one reply of the model (its thinking and its answer together).",
+    { k: 'MAX_TOKENS_SHARE', l: "max_tokens", vt: true, sl: true, h: ["For: one reply of the model (its thinking and its answer together).",
       "Sets: the tokens one reply may write at most, as a share of the context length, 1 to 100. A restart is needed.",
       "When the client sends its own max_tokens, that comes first.",
       "With organizing midway, or near the budget's end, it is virtual: the thinking they take out of the KV still counts, so it may pass the context length. With both off, a request that names a max_tokens which does not fit beside its prompt is refused (400).",
       "Example: 70% of a context length of 1,048,576 is 734,003 tokens."] },
-    { k: 'MAX_TOKENS', l: "A reply's limit", vt: true, u: 'tokens', w: '7em', h: ["For: one reply of the model (its thinking and its answer together).",
+    { k: 'MAX_TOKENS', l: "max_tokens", vt: true, u: 'tokens', w: '7em', h: ["For: one reply of the model (its thinking and its answer together).",
       "Sets: the tokens one reply may write at most, for a request that does not name its own max_tokens. From 1,024. A restart is needed.",
       "With organizing midway, or near the budget's end, it is virtual: the thinking they take out of the KV still counts, so it may pass the context length. With both off, a request that names a max_tokens which does not fit beside its prompt is refused (400).",
       "Example: 276,480 with the thinking limit at 80% leaves 55,296 for the answer.",
       "A request that names its max_tokens gets its own. The panel writes it to MAX_TOKENS."] },
-    { k: 'THINKING_SHARE', l: "Thinking limit", vt: true, of: "{0}% of the reply's limit", w: '5em', h: ["For: the model's thinking (the part before the answer, which the user sees too).",
-      "Sets: the share of each reply's limit the thinking may use, 0 to 100; at it the engine has the model close its thinking and answer in the rest, so a short reply keeps room for its answer too. 0: no limit (the thinking may use the whole reply).",
-      "When the prompt leaves less of the context length than a reply's limit, the share is of what it leaves.",
+    { k: 'THINKING_SHARE', l: "Thinking limit", vt: true, of: "{0}% of max_tokens", w: '5em', h: ["For: the model's thinking (the part before the answer, which the user sees too).",
+      "Sets: the share of max_tokens the thinking may use, 0 to 100; at it the engine has the model close its thinking and answer in the rest, so a short reply keeps room for its answer too. 0: no limit (the thinking may use the whole reply).",
+      "When the prompt leaves less of the context length than max_tokens, the share is of what it leaves.",
       "The inference screen's [ REASONING CONTROL ] sets it too; either shows the other's change. Saving it also clears an older token budget (THINKING_BUDGET)."] }] },
   { t: "Organize midway", items: [
     { k: 'THINKING_FOLD', l: "Organize midway", o: { checkpoint: "Yes", off: "No", recent: "Drop the old part" }, h: ["For: a thinking that grows long.",
@@ -6316,8 +6426,8 @@ const ES_GROUPS = [
       "Purpose: a long thinking does not use up the KV (what the model can hold at once). Once the thinking is long, the engine has the model organize its thinking midway and puts the organized text in the place of the thinking before it, in the model's context; the model thinks on from it.",
       "Example: with yes and the thinking limit at 90%, the engine has the thinking organized once it fills 90% of what the prompt leaves of the context length.",
       "The user's screen still gets the whole thinking (the organized text replaces it in the model's context only)."] },
-    { k: 'THINKING_FOLD_SHARE', l: "Organize every", vt: true, of: "{0}% of the reply's limit", w: '5em', h: ["For: a thinking that grows long.",
-      "Sets: how often organizing midway comes, as a share of each reply's limit, 10 to 100 (1,024 tokens at least): each time the thinking since the last organizing reaches it. 100: none until the limit.",
+    { k: 'THINKING_FOLD_SHARE', l: "Organize every", vt: true, of: "{0}% of max_tokens", w: '5em', h: ["For: a thinking that grows long.",
+      "Sets: how often organizing midway comes, as a share of max_tokens, 10 to 100 (1,024 tokens at least): each time the thinking since the last organizing reaches it. 100: none until the limit.",
       "It has to come before the thinking's limit. The inference screen's [ REASONING CONTROL ] sets it too."] },
     { k: 'THINKING_FOLD_CAP_SHARE', l: "Size target for organizing midway", u: '%', w: '5em', h: ["For: one organized text the model writes.",
       "Sets: about how long it may be, as a share of the thinking it organizes, 10 to 100 (128 tokens at least), for organizing midway and at the close, not near the budget's end. A restart is needed.",
@@ -6325,38 +6435,38 @@ const ES_GROUPS = [
       "Example: 70 keeps the text to about 70% of the thinking it organizes."] }] },
   { t: "Organize at the close", items: [
     { k: 'THINKING_FOLD_AT_CLOSE_SHARE', l: "Organize at the close", yn: () => thCloseOn(), of: "Organize after a thinking of {0}% of the thinking limit or more", w: '5em', h: ["For: the thinking at the point the model ends it.",
-      "Sets: yes or no (the inference screen's [ REASONING CONTROL ] sets it too) and, with yes, the share in: organize after a thinking of N% of the thinking limit or more. With no thinking limit the share is of the reply's limit. Counted as the thinking since the last organizing. No is 0 in glm53.conf.",
+      "Sets: yes or no (the inference screen's [ REASONING CONTROL ] sets it too) and, with yes, the share in: organize after a thinking of N% of the thinking limit or more. With no thinking limit the share is of max_tokens. Counted as the thinking since the last organizing.",
       "Purpose: when the model closes its thinking, the engine has it organize its thinking before the answer and puts the organized text in the place of the thinking in the context: a long reasoning becomes a plan before the answer, and the next turns get only the organized text.",
       "Example: with a thinking limit of 400,000 tokens, 100 organizes only a thinking that reached the limit and 5 one of 20,000 tokens or more.",
       "Note: a small share organizes the short checks between tool calls too, a minute or two each time.",
       "When the thinking limit ends the thinking, the same organizing takes the place of the closing sentence."] }] },
   { t: "Optional", items: [
     { k: 'THINKING_NOTICE', l: "Notice of what is left", yn: () => thInt('THINKING_NOTICE') || ES_NOTICE_ON, u: 'tokens each', w: '6em', h: ["For: the model (a line written to it).",
-      "Sets: yes or no and, with yes, every how many thinking tokens the model is told (256 or more). No is 0 in glm53.conf. A restart is needed.",
+      "Sets: yes or no and, with yes, every how many thinking tokens the model is told (256 or more). A restart is needed.",
       "Purpose: the model itself keeps in mind how much it has thought and how much is left, and paces itself.",
       "Example: 5,000 has the engine write into the thinking, every 5,000 thinking tokens, how many it used and about how many are left, in the model's own words.",
       "The user's screen shows it too, as part of the thinking."] }] },
   { t: "Concurrent inference", items: [
-    { k: 'MULTI', l: "Concurrent inference", o: { 0: '1', 2: '2', 3: '3', 4: '4' }, h: ["The conversations decoded together. 2 or more needs DCP 2 and the pool cache (not on 3 nodes yet). The launch screen may choose another for one start."] },
+    { k: 'MULTI', l: "Concurrent inference", o: { 0: '1', 2: '2', 3: '3', 4: '4' }, h: ["The conversations decoded together. 2 or more needs DCP 2 and the pool cache (not on 3 nodes yet). The launch screen writes its choice here."] },
     { k: 'MULTI_WAIT', l: "Wait for room at most", u: 'seconds', w: '6em', h: ["A request waits this long for room beside the conversations in flight, then gets 503 (busy) so the client can retry. 0: no limit."] },
-    { k: 'MULTI_DECODE_SHARE', l: "GPU share", u: '% decode', w: '6em', h: ["The value at start. The value in use is changed on the inference screen's GPU split, and Use these at the next start too writes it here."] },
+    { k: 'MULTI_DECODE_SHARE', l: "GPU share", u: '% decode', w: '6em', h: ["The value at start. The value in use is changed on the inference screen's GPU split."] },
     { k: 'MULTI_SHORT_PROMPT', l: "Priority prompt", u: 'tokens', w: '7em', h: ["A prompt with at most this many new tokens to compute past the cache goes in first whatever the split, computed without a pause (the decode stops meanwhile). The value at start; the value in use is changed on the inference screen. 0: none."] },
     { k: 'MULTI_SHORT_PREEMPT', l: "Also overtake a running prefill", h: ["On: a long prefill running gives way to a priority prompt and goes on from what it finished (the long one is up to a chunk later). Off: a priority prompt waits until the running prefill ends. The value at start."] }] },
   { t: "Speculative decoding", items: [
-    { k: 'DRAFTER_KIND', l: "Drafter", o: { mtp: 'MTP', dflash2: 'DFlash2', none: "None" }, h: ["How the engine drafts the next tokens for speculative decoding: MTP = the model's own MTP layer; DFlash2 = a separate small model (the drafter); None = no drafts, one token at a time. The launch screen may choose another for one start."] },
+    { k: 'DRAFTER_KIND', l: "Drafter", o: { mtp: 'MTP', dflash2: 'DFlash2', none: "None" }, h: ["How the engine drafts the next tokens for speculative decoding: MTP = the model's own MTP layer; DFlash2 = a separate small model (the drafter); None = no drafts, one token at a time. The launch screen writes its choice here."] },
     { k: 'MTP_K', l: "MTP drafts", u: 'tokens', w: '5em', h: ["The tokens drafted a round (1 to 7), with MTP only."] },
     { k: 'DRAFTER', l: "DFlash2 model", go: 'weights', h: ["The drafter's directory, the same path on every node. It is changed on the launch screen's [ WEIGHTS ]."] },
     { k: 'DRAFT_SAVES', l: "Conversations keeping drafter state", u: 'conversations', w: '5em', h: ["With DFlash2 the engine keeps the drafter's state for this many conversations, so their next turn need not rebuild it. Concurrent inference with DFlash2 needs 1 or more."] }] },
   { t: "Nodes and parallelism", items: [
-    { k: 'NODES', l: "Nodes", go: 'nodes', h: ["The lane's nodes in rank order, as the node check registered them (glm53.nodes.conf). They are changed by the node check."] },
-    { k: 'TOPOLOGY', l: "Cabling", o: { auto: "Auto", full: "Switch", ring4: "Ring" }, h: ["How the nodes are cabled. The node check writes it to the node file, which wins over glm53.conf."] },
+    { k: 'NODES', l: "Nodes", go: 'nodes', h: ["The lane's nodes in rank order, as the node check registered them. They are changed by the node check."] },
+    { k: 'TOPOLOGY', l: "Cabling", o: { auto: "Auto", full: "Switch", ring4: "Ring" }, h: ["How the nodes are cabled. The node check decides it."] },
     { k: 'SOCKET_IFNAME', l: "Network interface", w: '12em', h: ["The interface the ranks rendezvous and talk control over. The node check writes it with the cabling."] },
     { k: 'IB_HCA', l: "RDMA devices", w: '16em', h: ["The devices the ranks' RDMA traffic uses, separated by commas. The node check writes them with the cabling."] },
     { k: 'DCP', l: 'DCP', o: { 2: '2', 3: '3' }, h: ["The KV is split over two ranks (three on three nodes)."] },
     { k: 'ROCE_PROXY_CORES', l: "RDMA cores", o: { a725: "A725 only", os: 'OS' }, h: ["The cores the RoCE proxy threads poll on (they spin while the decode runs): A725 (cores 0 and 10, so they do not heat the fast cores) or OS (the scheduler's)."] },
     { k: 'MASTER_PORT', l: "Rendezvous port", w: '6em', h: ["Rank 0's port for the ranks' rendezvous (NCCL). A different one a lane."] }] },
   { t: "Memory", items: [
-    { k: 'RESERVE_GB', l: "Memory kept for the OS", u: 'GiB', w: '5em', h: ["The launcher keeps this much on every node for the OS and other processes and plans the engine's KV and work areas in the rest (2 to 32 GiB). The launch screen may choose another for one start."] },
+    { k: 'RESERVE_GB', l: "Memory kept for the OS", u: 'GiB', w: '5em', h: ["The launcher keeps this much on every node for the OS and other processes and plans the engine's KV and work areas in the rest (2 to 32 GiB). The launch screen writes its choice here."] },
     { k: 'READY_TIMEOUT', l: "Start timeout", u: 'seconds', w: '6em', h: ["The launcher waits this long for the engine to take requests after it starts it, then counts the start as failed."] },
     { k: 'LAUNCH_DROP_CACHES', l: "Drop the page cache before a start", h: ["Every node's page cache dropped before a start. Needs sudo -n (no password) on every node."] }] },
   { t: "Server", items: [
@@ -6389,7 +6499,8 @@ function esSrv(k) {
 }
 const esV = (k) => k in ES.edit ? ES.edit[k] : esSrv(k);
 const esChg = (k) => k in ES.edit && ES.edit[k] !== esSrv(k);
-const esNum = (k) => { const v = String(esV(k)).replace(/[,\s_]/g, ''); return /^\d+$/.test(v) ? Number(v) : NaN; };
+const esNumOf = (x) => { const v = String(x).replace(/[,\s_]/g, ''); return /^\d+$/.test(v) ? Number(v) : NaN; };
+const esNum = (k) => esNumOf(esV(k));
 const esFold = () => esV('THINKING_FOLD') !== 'off';
 // a row of 0 or a value (it.yn): 0 is No, a value Yes; a box emptied to type in stays Yes / 0 が「しない」、値が「する」。入力中に空にしても「する」のまま
 const esYes = (k) => { const v = String(esV(k)).replace(/[,\s_]/g, ''); return v === '' ? esChg(k) : !/^0+$/.test(v); };
@@ -6402,7 +6513,9 @@ const esCtxKey = () => ES.m.CONTEXT_LENGTH ? 'CONTEXT_LENGTH' : 'CONTEXT';
 function esMaxTok() {
   if (!ES.m.MAX_TOKENS_SHARE) return esNum('MAX_TOKENS');
   if (esOldMax() > 0 && !esChg('MAX_TOKENS_SHARE')) return esOldMax();
-  const c = esNum(esCtxKey()), s = esNum('MAX_TOKENS_SHARE');
+  // the context length its row shows: while the engine runs what the start took (it may be longer than glm53.conf's), a
+  // value typed first / 行に出ている context length: 稼働中は起動が取った値 (glm53.conf より長いことがある)。入れた値が先
+  const c = esNumOf(esShown(esCtxKey())), s = esNum('MAX_TOKENS_SHARE');
   return Number.isFinite(c) && Number.isFinite(s) ? Math.floor(c * s / 100) : NaN;
 }
 // the same from what glm53.conf holds, for a start at context length `ctx` (none: glm53.conf's), unsaved changes aside
@@ -6513,7 +6626,7 @@ function esLabel(k) {
 const esPendOf = (k) => ES.d && Array.isArray(ES.d.pending) && esRun() && (k === 'THINKING_SHARE' ? ['THINKING_SHARE', 'THINKING_BUDGET'].some(x => ES.d.pending.includes(x)) : k === 'MAX_TOKENS_SHARE' ? ['MAX_TOKENS_SHARE', 'MAX_TOKENS'].some(x => ES.d.pending.includes(x)) : ES.d.pending.includes(k)) && !(ES.m[k] && ES.m[k].when === 'live');
 // a slider's fill and its readout: the share and the tokens it gives / スライダーの塗りと表示: 割合とそのトークン数
 const esSlP = (n, r) => (100 * (n - r.min) / (r.max - r.min)).toFixed(1) + '%';
-const esSlText = (n) => F("{0}% · {1} tokens", n, esFmt(esMaxTok()));
+const esSlText = (n) => F("{0}% of the context length · {1} tokens", n, esFmt(esMaxTok()));
 // a row's control / 行の操作部
 function esCtl(it, m, off, er) {
   const k = it.k, v = esShown(k), id = 'es-c-' + k;
@@ -6576,20 +6689,21 @@ function esThinkFig() {
   const th = b > 0 ? Math.min(100, Math.round(100 * b / mx)) : 100, v = fold ? ' v' : '';
   const seg = (cls, pc) => pc > 0 ? `<i class="${cls}${v}" style="width:${pc}%"></i>` : '';
   const leg = (cls, t, pc) => `<span><i class="${cls}"></i>${esc(t)} <b>${pc}%</b></span>`;
-  const lab = fold ? F("What the client receives · a reply's limit {0} (virtual)", esFmt(mx)) : F("A reply's limit {0}", esFmt(mx));
+  const lab = fold ? F("What the client receives · max_tokens {0} (virtual)", esFmt(mx)) : F("max_tokens {0}", esFmt(mx));
   const legs = b > 0 ? leg('t', fold ? T("Thinking (the limit, virtual)") : T("Thinking (the limit)"), th) + leg('a', T("The answer's part"), 100 - th)
     : leg('t', fold ? T("Thinking and answer (virtual)") : T("Thinking and answer"), 100);
-  const ps = [T("The share is of a reply's limit, at most of what the prompt leaves of the context length, so the sizes change with each prompt.")];
-  if (fold) ps.push(T("With organizing midway the engine puts an organized text in the place of the thinking before it, in the KV only (the client still gets all of it). So a reply's limit and the thinking limit count the tokens written (virtual) and may pass the context length, while the KV holds only the thinking since the last organizing and the answer."));
-  return `<p>${esc(T("A reply is its thinking and then its answer. A reply's limit is set here and the thinking's limit, a share of it, on [ REASONING CONTROL ]; the rest is left for the answer, and a thinking that ends early leaves the answer more."))}</p>` +
+  const ps = [T("The share is of max_tokens, at most of what the prompt leaves of the context length, so the sizes change with each prompt.")];
+  if (fold) ps.push(T("With organizing midway the engine puts an organized text in the place of the thinking before it, in the KV only (the client still gets all of it). So max_tokens and the thinking limit count the tokens written (virtual) and may pass the context length, while the KV holds only the thinking since the last organizing and the answer."));
+  return `<p>${esc(T("A reply is its thinking and then its answer. max_tokens, one reply's limit, is set here and the thinking's limit, a share of it, on [ REASONING CONTROL ]; the rest is left for the answer, and a thinking that ends early leaves the answer more."))}</p>` +
     `<div class="es-fig"><div class="es-fb"><span class="es-fl">${esc(lab)}</span><div class="es-bar">${seg('t', th)}${seg('a', 100 - th)}</div><div class="es-leg">${legs}</div></div></div>` +
     ps.map(t => `<p>${esc(t)}</p>`).join('');
 }
 // while the engine runs, the rows a start may take otherwise than glm53.conf has (the launch screen's drafter, concurrent
-// inferences, KV format, context length, KV size, memory kept) show what it took, and beside them what the next start
-// takes when that differs (11-05 「設定画面は現状の設定を表示するように」). Only the shown value: esV, esChg and a save stay on
+// inferences, KV format, context length, KV size, memory kept) show what it took (11-05 「設定画面は現状の設定を表示するように」),
+// and beside a row saved since the start what the next start takes (11-05: the launch screen's picks are not glm53.conf's,
+// so nothing else can tell what the next start takes). Only the shown value: esV, esChg and a save stay on
 // glm53.conf, so a row only shown is never written; a press or a value typed is the next start's
-// 稼働中、起動で glm53.conf と違う値を取れる行は動いている値を出し、次の起動の値が違えば横に出す。変わるのは表示だけ: esV、esChg と保存は
+// 稼働中、起動で glm53.conf と違う値を取れる行は動いている値を出し、起動のあとに保存した行だけ横に次の起動の値を出す。変わるのは表示だけ: esV、esChg と保存は
 // glm53.conf のまま (表示しているだけの行は書かない)。押した値・入れた値は次の起動の値
 function esNow(k) {
   const s = LN.st; if (!esRun() || !s) return null;
@@ -6599,7 +6713,7 @@ function esNow(k) {
 }
 const esShown = (k) => { if (k in ES.edit) return ES.edit[k]; const v = esNow(k); return v != null && ES.m[k] ? v : esV(k); };
 function esNextTag(it) {
-  const run = esNow(it.k), v = String(esV(it.k)); if (run == null || !ES.m[it.k] || v === run) return '';
+  const run = esNow(it.k), v = String(esV(it.k)); if (run == null || !ES.m[it.k] || v === run || !esPendOf(it.k)) return '';
   const o = it.o && it.o[v] != null ? T(it.o[v]) : /^\d+(\.\d+)?$/.test(v) ? fmt.format(Number(v)) + (it.u ? ' ' + T(it.u) : '') : v;
   return `<span class="es-next">${esc(F("Next start: {0}", o))}</span>`;
 }
@@ -6610,14 +6724,14 @@ function esRow(it, errs) {
   else if (esPendOf(k)) tags.push(`<span class="es-tg pend">${esc(T("Saved · next start"))}</span>`);
   if (it.vt && esFold()) tags.push(`<span class="es-tg vt" title="${esc(T("Organizing midway takes thinking out of the KV, so this counts the tokens written and may pass the context length"))}">${esc(T("Virtual"))}</span>`);
   if (m.when === 'launcher') tags.push(`<span class="es-tg">${esc(T("Launcher restart"))}</span>`);
-  if (m.when === 'live') tags.push(`<span class="es-tg live" title="${esc(T("While the engine runs, a save applies it at once"))}">${esc(T("At once"))}</span>`);
+  if (m.when === 'live') tags.push(`<span class="es-tg live" title="${esc(T("While the engine runs, a save applies it at once"))}">${esc(T("Applied at once"))}</span>`);
   if (m.when === 'stopped') tags.push(`<span class="es-tg">${esc(T("While stopped"))}</span>`);
   const lab = T(it.l);
   return `<div class="es-r${off ? ' off' : ''}"><div class="es-lc"><div class="es-n"><span id="es-l-${k}">${esc(lab)}</span>` +
     `<button type="button" class="qi" id="es-q-${k}" data-qi="${k}" aria-expanded="${open}" aria-controls="es-h-${k}" aria-label="${esc(F("About {0}", lab))}" title="${esc(F("About {0}", lab))}">i</button>${tags.join('')}</div>` +
     `<span class="es-key">${esc(k)}</span>` +
     (open ? `<div class="ln-help es-help" id="es-h-${k}">${esHelp(it).map(p => `<p>${esc(p)}</p>`).join('')}</div>` : '') +
-    (k === 'MAX_TOKENS_SHARE' && esOldMax() > 0 ? `<p class="es-note">${esc(F("An older glm53.conf's MAX_TOKENS of {0} comes first until this is moved and saved, which clears it.", esFmt(esOldMax())))}</p>` : '') +
+    (k === 'MAX_TOKENS_SHARE' && esOldMax() > 0 ? `<p class="es-note">${esc(F("An older setting, MAX_TOKENS {0}, comes first until this is moved, which clears it.", esFmt(esOldMax())))}</p>` : '') +
     (er ? `<p class="es-err">${esc(er)}</p>` : '') + `</div><div class="es-c">${esNextTag(it)}${esCtl(it, m, off, er)}</div>${it.yn && esYes(k) ? `<div class="es-c es-yn">${esBox(it, m, off, er)}</div>` : ''}</div>`;
 }
 // the rows a group shows: the launcher's keys (an older one may lack some), the panel's thinking rows when it has the
@@ -6633,18 +6747,20 @@ function esRender() {
   const gq = (g) => { if (!g.info) return ''; const k = 'g-' + g.info, lab = T(g.t), o = !!ES.info[k];
     return `<button type="button" class="qi" id="es-q-${k}" data-qi="${k}" aria-expanded="${o}" aria-controls="es-h-${k}" aria-label="${esc(F("About {0}", lab))}" title="${esc(F("About {0}", lab))}">i</button>`; };
   const gh = (g) => g.info && ES.info['g-' + g.info] ? `<div class="ln-help es-help es-gh" id="es-h-g-${g.info}">${esThinkFig()}</div>` : '';
+  // the rows written again drop the focused input: not a leaving (esCommit) / 書き直しで入力欄が消えるのは「離れた」のではない
+  ES.rendering = true;
   setHTML($('es-groups'), groups.map(({ g, items }) => `<div class="card alloc es-g"><div class="fhead"><h3>${esc(T(g.t))}${gq(g)}</h3>${g.n ? `<span class="tag">${esc(T(g.n))}</span>` : ''}</div>` +
     gh(g) + items.map(it => esRow(it, errs)).join('') + '</div>').join(''));
   if (id && $(id) && document.activeElement !== $(id)) { $(id).focus(); if (sel && $(id).setSelectionRange) try { $(id).setSelectionRange(sel[0], sel[1]); } catch (e) { } }
+  ES.rendering = false;
   const nodes = ES.m.NODES ? String(ES.m.NODES.value).split(/\s+/).filter(Boolean).length : 0;
-  $('es-where').textContent = (ES.d.conf || 'glm53.conf') + (nodes ? ' · ' + F("{0} nodes", nodes) : '');
+  $('es-where').textContent = nodes ? F("{0} nodes", nodes) : '';
   $('es-st').textContent = LN_STATE[LN.st && LN.st.state] || '—'; $('es-st').className = 'tag' + (run ? ' ok' : '');
   const pend = run && Array.isArray(ES.d.pending) ? ES.d.pending : [];
   $('es-pend').textContent = ch.length ? F("{0} changes not saved: {1}", ch.length, ch.map(esLabel).join(T(", ")))
     : pend.length ? F("Saved, used from the next start: {0}", [...new Set(pend.map(k => k === 'THINKING_BUDGET' ? 'THINKING_SHARE' : k === 'MAX_TOKENS' && ES.m.MAX_TOKENS_SHARE ? 'MAX_TOKENS_SHARE' : k))].map(esLabel).join(T(", "))) : T("No changes");
   $('es-pend').className = 'es-pend' + (ch.length ? ' on' : '');
-  $('es-revert').disabled = !ch.length || ES.busy;
-  $('es-save').disabled = !ch.length || bad || ES.busy;
+  $('es-revert').hidden = !ch.length; $('es-revert').disabled = ES.busy;
   $('es-restart').hidden = !run; $('es-restart').disabled = (!ch.length && !pend.length) || bad || ES.busy || ES.confirm;
   $('es-cf').hidden = !ES.confirm;
   $('es-msg').textContent = ES.msg; $('es-msg').className = 'ln-msg' + (ES.bad ? ' bad' : ES.msg ? ' ok' : '');
@@ -6671,7 +6787,7 @@ function esShow(on) {
   $('es').hidden = !ES.on;
   $('main-hero').hidden = ES.on || RG.view === 'srv';
   $('rg-srv').hidden = ES.on || RG.view !== 'srv';
-  if (ES.on) { esRender(); esLoad(); window.scrollTo(0, 0); } else { ES.confirm = false; window.dispatchEvent(new Event('resize')); }
+  if (ES.on) { esRender(); esLoad(); window.scrollTo(0, 0); } else { esCommit(); ES.confirm = false; discWake(); }
   esSw();
 }
 function esTake(j) {
@@ -6690,19 +6806,33 @@ async function esInit() {
   esTake(j); ES.ok = true; esRender();
 }
 function esSaveWhy(r) {
-  if (r.j && r.j.errors && typeof r.j.errors === 'object') { ES.srvErr = r.j.errors; return T("glm53.conf was not written: see the rows in red."); }
-  return F("glm53.conf was not written ({0}).", r.status ? `${r.status}${errText(r.j) ? ' · ' + errText(r.j) : ''}` : T("the launcher does not answer"));
+  if (r.j && r.j.errors && typeof r.j.errors === 'object') { ES.srvErr = r.j.errors; return T("Could not save: see the rows in red."); }
+  return F("Could not save ({0}).", r.status ? `${r.status}${errText(r.j) ? ' · ' + errText(r.j) : ''}` : T("the launcher does not answer"));
 }
-// 保存 (and, for 保存して再起動, the stop's question next) / 保存 (保存して再起動 なら次に停止の問い)
-async function esSave(restart) {
-  const vals = esValues();
-  if (Object.keys(esErrs()).length) return;
+// a change is written as it is made (11-05): a press at once, a box when it is left or on Enter (never half typed), a slider
+// when it is let go. A row a rule refuses is not written and says why. Rows a rule joins wait for each other: while the rule
+// fails none of them goes, and they go in one write once it holds; the other rows go meanwhile
+// 変えた時点で書く: 押したらすぐ、入力欄は離れたときか Enter (入力の途中は書かない)、スライダーは離したとき。規則に合わない行は書かず理由を出す。
+// 規則でつながる行は待ち合わせる: 規則が通らない間はどれも書かず、通ったら一度に書く。ほかの行はその間も書く
+const ES_JOINED = [['MULTI', 'DRAFTER_KIND', 'DRAFT_SAVES', 'DCP'], ['MASTER_PORT', 'PORT'], ['THINKING_FOLD_SHARE', 'THINKING_SHARE', 'THINKING_FOLD'], ['CONTEXT_LENGTH', 'KV_SIZE']];
+async function esCommit() {
+  if (ES.busy) { ES.again = true; return; }
+  const errs = esErrs(), vals = esValues();
+  for (const set of ES_JOINED) if (set.some(k => errs[k])) for (const k of set) delete vals[k];
+  for (const k of Object.keys(errs)) delete vals[k];
+  if (Object.keys(vals).length) await esSave(false, vals); else esRender();
+  if (ES.again) { ES.again = false; esCommit(); }
+}
+// the write, and for 再起動して反映 the stop's question next / 書く。再起動して反映 なら次に停止の問い
+async function esSave(restart, only) {
+  const vals = only || esValues();
+  if (!only && Object.keys(esErrs()).length) return;
   ES.busy = true; ES.confirm = false; ES.msg = ''; ES.bad = false; esRender();
   if (Object.keys(vals).length) {
     const r = await livePost('/v1/launch/settings', { values: vals }).catch(() => ({ ok: false, status: 0, j: null }));
     ES.busy = false;
     if (!r.ok || !r.j || !Array.isArray(r.j.keys)) { ES.bad = true; ES.msg = esSaveWhy(r); esRender(); return; }
-    esTake(r.j); ES.edit = {}; ES.srvErr = {};
+    esTake(r.j); for (const k of Object.keys(vals)) delete ES.edit[k]; ES.srvErr = {};
     ES.applied = Array.isArray(r.j.applied) ? r.j.applied : []; ES.applyErr = typeof r.j.apply_error === 'string' ? r.j.apply_error : '';
   } else { ES.applied = []; ES.applyErr = ''; }
   ES.busy = false;
@@ -6727,7 +6857,6 @@ $('es-sw-0').addEventListener('click', () => esShow(false));
 $('es-sw-1').addEventListener('click', () => esShow(true));
 $('rg-flow').addEventListener('click', () => { if (ES.on) esShow(false); }, true);   // a step leaves the settings first / 手順を押したら設定を閉じる
 $('es-revert').addEventListener('click', () => { ES.edit = {}; ES.srvErr = {}; ES.msg = ''; ES.bad = false; ES.confirm = false; esRender(); });
-$('es-save').addEventListener('click', () => esSave(false));
 $('es-restart').addEventListener('click', () => { ES.confirm = true; esRender(); $('es-cf-go').focus(); });
 $('es-cf-go').addEventListener('click', () => esSave(true));
 $('es-cf-no').addEventListener('click', () => { ES.confirm = false; esRender(); $('es-restart').focus(); });
@@ -6745,7 +6874,7 @@ $('es-groups').addEventListener('click', (ev) => {
   const k = b.dataset.k; delete ES.srvErr[k];
   ES.edit[k] = b.dataset.sw ? (esV(k) === '1' ? '0' : '1') : b.dataset.v;
   if (!esChg(k) && esNow(k) == null) delete ES.edit[k];   // (on a row showing the running value it stays shown, with nothing to save / 動いている値を出す行では表示に残す。保存するものは無い)
-  ES.msg = ''; esRender();
+  ES.msg = ''; esRender(); esCommit();
 });
 $('es-groups').addEventListener('input', (ev) => {
   const i = ev.target.closest('input[data-k]'); if (!i) return;
@@ -6756,8 +6885,11 @@ $('es-groups').addEventListener('input', (ev) => {
   // スライダーはそれだけ動かし、離したときに書き直す (書き直すとドラッグが切れる)
   if (i.type === 'range') { i.style.setProperty('--p', esSlP(Number(i.value), ES.m[k].rule)); $('es-slv-' + k).textContent = esSlText(Number(i.value)); return; }
   esRender();
+  if (!$(i.id)) esCommit();   // a 0 typed took the box away, with no leaving to come / 0 を入れると入力欄が消え、離れることもない
 });
-$('es-groups').addEventListener('change', (ev) => { if (ev.target.matches('input[type=range][data-k]')) esRender(); });
+$('es-groups').addEventListener('change', (ev) => { if (ev.target.matches('input[type=range][data-k]')) { esRender(); esCommit(); } });
+$('es-groups').addEventListener('focusout', (ev) => { if (!ES.rendering && ev.target.matches('input[data-k]:not([type=range])')) esCommit(); });
+$('es-groups').addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && ev.target.matches('input[data-k]:not([type=range])')) { ev.preventDefault(); esCommit(); } });
 // Escape closes the explanations open, the focus back on the last one's ⓘ / Escape で開いている説明を閉じる
 $('es').addEventListener('keydown', (ev) => {
   if (ev.key !== 'Escape') return;
@@ -6765,30 +6897,6 @@ $('es').addEventListener('keydown', (ev) => {
   const open = Object.keys(ES.info).filter(k => ES.info[k]); if (!open.length) return;
   for (const k of open) ES.info[k] = false;
   esRender(); const q = $('es-q-' + open[open.length - 1]); if (q) q.focus();
-});
-// the GPU split's 「次の起動もこの値で」 (Entry board): the values in use written as glm53.conf's start values, no
-// restart; greyed while they are those already / GPU の配分の「次の起動もこの値で」: 使っている値を glm53.conf の起動時の値に
-// (再起動しない)。同じなら灰色
-function esKeep() {
-  const g = $('sch-keep-g'), c = SCH.cur, on = ES.ok && !!c && !LN.on && !!ES.m.MULTI_DECODE_SHARE;
-  if (g.hidden !== !on) g.hidden = !on;
-  if (!on) return;
-  const same = esSrv('MULTI_DECODE_SHARE') === String(c.decode_share) && esSrv('MULTI_SHORT_PROMPT') === String(c.short_prompt) && esSrv('MULTI_SHORT_PREEMPT') === (c.short_preempt ? '1' : '0');
-  $('sch-keep').disabled = same || ES.keepBusy;
-  const m = $('sch-keep-m'), t = ES.keepMsg || (same ? T("The same as the start values in glm53.conf") : T("Makes the values in use glm53.conf's start values (no restart)"));
-  if (m.textContent !== t) m.textContent = t;
-  m.className = 'ln-msg' + (ES.keepMsg && ES.keepOk ? ' ok' : ES.keepMsg && ES.keepBad ? ' bad' : '');
-}
-$('sch-keep').addEventListener('click', async () => {
-  const c = SCH.cur; if (!c || ES.keepBusy) return;
-  ES.keepBusy = true; esKeep();
-  const r = await livePost('/v1/launch/settings', { values: { MULTI_DECODE_SHARE: String(c.decode_share), MULTI_SHORT_PROMPT: String(c.short_prompt), MULTI_SHORT_PREEMPT: c.short_preempt ? '1' : '0' } })
-    .catch(() => ({ ok: false, status: 0, j: null }));
-  ES.keepBusy = false; clearTimeout(ES.keepT);
-  if (r.ok && r.j && Array.isArray(r.j.keys)) { esTake(r.j); ES.keepOk = true; ES.keepBad = false; ES.keepMsg = T("Written to glm53.conf: the next start uses these."); if (ES.on) esRender(); }
-  else { ES.keepOk = false; ES.keepBad = true; ES.keepMsg = F("Could not write glm53.conf ({0}).", r.status ? `${r.status}${errText(r.j) ? ' · ' + errText(r.j) : ''}` : T("the launcher does not answer")); }
-  ES.keepT = setTimeout(() => { ES.keepMsg = ''; ES.keepOk = ES.keepBad = false; esKeep(); }, 6000);
-  esKeep();
 });
 /* ---------- [ REASONING CONTROL ]: the thinking's limit and its summaries, changed while the engine runs (R-029) ---------- */
 // A card of its own under [ NODE ], shaped as the GPU split: the thinking's limit as a share of each reply's max_tokens
@@ -6850,15 +6958,12 @@ function thCloseOn() {
   return TH.lastClose > 0 ? TH.lastClose : s && s.at_close_share > 0 ? s.at_close_share : conf > 0 ? conf : TH_CLOSE_DEFAULT;
 }
 // "N% of the reply's limit" around a readout, as the language orders it / 表示の前後の「応答の上限の」(言語で順が違う)
-function thOf(pre, post, on) { const [a, b] = on ? T("{0}% of the reply's limit").split('{0}%') : ['', '']; $(pre).textContent = a; $(post).textContent = b; }
-// the slider's readout and the reply's split for a share (the slider's while it moves) / 表示と応答の内訳
+function thOf(pre, post, on) { const [a, b] = on ? T("{0}% of max_tokens").split('{0}%') : ['', '']; $(pre).textContent = a; $(post).textContent = b; }
+// the slider's readout for a share (the slider's while it moves) / 割合の表示
 function thShare(v) {
   $('th-share').style.setProperty('--p', ((v - 5) / 95 * 100).toFixed(1) + '%');
   $('th-v').textContent = v >= 100 ? T("No limit") : String(v);
   $('th-u').hidden = v >= 100; thOf('th-pre', 'th-post', v < 100);
-  const mx = thMax(), t = Math.floor(mx * v / 100);
-  $('th-split').textContent = v >= 100 ? T("The thinking may use the whole reply")
-    : mx ? F("A reply of {0}: thinking {1} · answer {2}", fmt.format(mx), fmt.format(t), fmt.format(mx - t)) : '';
 }
 const thWin = () => TH.info && TH.info.fold_window > 0 ? TH.info.fold_window : 0;   // an engine started by hand with one / 手で窓を指定して起動したエンジン
 // the engine's fold point for the server's reply limit: max(1,024, max_tokens × N %); at 100 none
@@ -6868,7 +6973,7 @@ function thFold(v) {
   $('th-fshare').style.setProperty('--p', ((v - 10) / 90 * 100).toFixed(1) + '%');
   $('th-fv').textContent = String(v); thOf('th-fpre', 'th-fpost', true);
   const e = thEvery(v);
-  $('th-fsplit').textContent = !e ? T("100%: no organizing until the limit") : v < 100 && thMax() ? F("A reply of {0}: organized each {1} thinking tokens", fmt.format(thMax()), fmt.format(e)) : F("Organized each {0} thinking tokens", fmt.format(e));
+  $('th-fsplit').textContent = !e ? T("100%: no organizing until the limit") : v < 100 && thMax() ? F("max_tokens {0}: organized each {1} thinking tokens", fmt.format(thMax()), fmt.format(e)) : F("Organized each {0} thinking tokens", fmt.format(e));
 }
 function thShow() {
   const c = TH.cur, sl = $('th-share');
@@ -6880,20 +6985,20 @@ function thShow() {
   for (const b of $('th-close').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.v === (c.at_close_share > 0 ? '1' : '0')));
   $('th-tag').textContent = TH.mode === 'live' ? T("From the next request") : T("From the next start");
   const fixed = c.budget > 0 && !TH.edit && !TH.pend;
-  const lv = TH.mode === 'live' ? T("It takes the requests that start after it and is written to glm53.conf, so the next start keeps it.") : T("Written to glm53.conf at once, used from the next start.");
+  const lv = TH.mode === 'live' ? T("It takes the requests that start after it, and the next start keeps it.") : T("Saved at once, used from the next start.");
   thHint('th-h-share', [
-    T("The share of each reply's limit the thinking may use. At it the engine has the model close its thinking and answer in the rest, so a short reply keeps room for its answer too (a reply's limit of 32,000 at 80%: thinking 25,600 · answer 6,400). 100: no limit, the thinking may use the whole reply."),
-    T("When the prompt leaves less of the context length than a reply's limit, the share is of what it leaves."),
-    fixed ? F("Now a token budget of {0} (an older glm53.conf's THINKING_BUDGET). Moving this makes it a share.", fmt.format(c.budget)) : '',
+    T("The share of max_tokens the thinking may use. At it the engine has the model close its thinking and answer in the rest, so a short reply keeps room for its answer too (max_tokens 32,000 at 80%: thinking 25,600 · answer 6,400). 100: no limit, the thinking may use the whole reply."),
+    T("When the prompt leaves less of the context length than max_tokens, the share is of what it leaves."),
+    fixed ? F("Now a token budget of {0} (an older setting, THINKING_BUDGET). Moving this makes it a share.", fmt.format(c.budget)) : '',
     lv, T("A request that names its own thinking budget keeps it. With organizing midway it counts the thinking that took out of the KV too (virtual).")].filter(Boolean), TH.bad);
   const w = thEvery(c.fold_share || 100);
   thHint('th-h-fold', [
     w ? F("Yes: once the thinking grows past {0} tokens, the engine has the model organize it into a text that takes the place of the thinking before it, in the KV only (the client still gets all of it), and the model thinks on from it. No: the whole thinking stays in the KV.", fmt.format(w))
       : T("Yes: once the thinking grows long, the engine has the model organize it into a text that takes the place of the thinking before it, in the KV only (the client still gets all of it). No: the whole thinking stays in the KV."),
-    c.fold === 'recent' ? T("Now: drop the old part (set in glm53.conf), neither of these.") : '',
+    c.fold === 'recent' ? T("Now: drop the old part (set by hand), neither of these.") : '',
     T("The size target for organizing midway is on the engine settings screen.")].filter(Boolean));
   thHint('th-h-fshare', [
-    T("How often organizing midway comes: each time the thinking since the last organizing reaches this share of the reply's limit (1,024 tokens at least), so a short reply organizes sooner. 100%: no organizing until the limit."),
+    T("How often organizing midway comes: each time the thinking since the last organizing reaches this share of max_tokens (1,024 tokens at least), so a short reply organizes sooner. 100%: no organizing until the limit."),
     T("It has to come before the thinking's limit, or be 100%; greyed while organizing midway is off.")], TH.fbad);
   thHint('th-h-close', [
     F("Yes: after a thinking of {0}% of the thinking limit or more (counted since the last organizing), the model organizes it before the answer into a text that takes its place, so the next turns get only that. No: the thinking stays as written.", c.at_close_share > 0 ? c.at_close_share : thCloseOn()),
@@ -7253,7 +7358,7 @@ async function lnLive() {
 // 締めの見た目を片付け、prefill の状態はページを開いたときと同じに (PF.total 1 は締めのもの)
 function lnLook() {
   context(cfx).clearRect(0, 0, cfx.width, cfx.height); context(cr).clearRect(0, 0, cr.width, cr.height);
-  PF.fade = PF.total = PF.cached = PF.shown = PF.done = 0; PF.arc = PF.painted = false; PH.next = PH.prev = null;
+  PF.fade = PF.total = PF.cached = PF.shown = PF.done = 0; PF.arc = PF.painted = false; PH.next = PH.prev = null; MIM.k = -1;
 }
 // the plan's cells, the finale's heat and its arc fading onto the live disk / 計画のセル・締めの熱と弧を稼働のサークルへ溶かす
 function lnHandoff(ts) {
@@ -7276,7 +7381,7 @@ function mimicLevels() {
 // three chunks, each swept in a third of MIMIC_MS, and the rim's arc round once / 区切り 3 つ (それぞれ 1/3 で掃く) と外周の弧 1 周
 function fxMimic(x, ts) {
   const u = Math.min(1, (ts - LN.fin) / MIMIC_MS), k = Math.min(2, Math.floor(u * 3));
-  if (k !== MIM.k) { MIM.k = k; PH.prev = k && PH.next ? PH.next : new Float32Array(N); PH.next = mimicLevels(); PH.t0 = LN.fin + k * MIMIC_MS / 3; PH.dur = MIMIC_MS / 3 - 200; PH.drawn = -1; }
+  if (k !== MIM.k || !PH.next || !PH.prev) { MIM.k = k; PH.prev = k && PH.next ? PH.next : new Float32Array(N); PH.next = mimicLevels(); PH.t0 = LN.fin + k * MIMIC_MS / 3; PH.dur = MIMIC_MS / 3 - 200; PH.drawn = -1; }
   PF.fade = Math.min(1, (ts - LN.fin) / 300);
   pfHeat(x, ts);
   PF.total = 1; PF.cached = 0; pfArc(ease(u), true);
@@ -7344,7 +7449,7 @@ async function livePrefill() {   // each second while 実測 is on: the chunks a
   PH.busy = true;
   const gen = liveGen, first = PH.seq == null;
   try {
-    const r = await liveGet('/v1/experts/prefill?' + (first ? 'max=1' : `after=${PH.seq}&max=8`));
+    const r = await liveGet('/v1/experts/prefill?' + (first ? 'max=1' : `after=${PH.seq}&max=8`), true, LIVE_POLL_MS);
     if (gen !== liveGen) return;
     if (!first && PH.seq >= r.seq) PH.seq = r.seq - 1;   // the count went back (as livePicks) / 数が戻った
     const fo = PL.focus, mine = (rec) => !fo || fo.r.conv == null || rec.conv === fo.r.conv;   // the chosen request's chunks (pool.js) / 選んだ推論の区切り
@@ -7376,6 +7481,8 @@ function pfHeatNext(ts) {
   PH.until = ts + PH.dur + 1500;
 }
 function pfHeat(x, ts) {
+  if (!PH.next) return;
+  PH.prev ||= new Float32Array(N);   // a pair half cleared threw here, in the frame / 片方だけ消えた組がここで例外になった
   PH.cv ||= document.createElement('canvas'); if (PH.cv.width !== cfx.width || PH.cv.height !== cfx.height) { PH.cv.width = cfx.width; PH.cv.height = cfx.height; PH.drawn = -1; }
   const sweep = ts < PH.t0 + PH.dur + 450;
   if ((sweep && ts - PH.rt >= 50) || PH.drawn !== PH.t0) {   // while sweeping 20 times a second, then once / 掃く間は毎秒 20 回、その後は 1 回
@@ -7652,17 +7759,23 @@ async function load() {
   else { const t0 = performance.now(); (function grow(now) { const k = Math.min(1, (now - t0) / 1100); renderBase(ease(k)); if (k < 1) requestAnimationFrame(grow); else { revealing = false; drawHover(); if (cur) drawToken(cur, 1); } })(t0); }
   setData(st.data);
   $('loading').remove();
-  requestAnimationFrame(loop);
+  loopRaf = requestAnimationFrame(loop);
+  // what stops drawing when nothing moves comes back from here: four times a second each looks whether it has to
+  // 動きがないと描くのを止めるものはここから戻る: 毎秒 4 回、それぞれ描く必要があるか見る
+  for (const f of [discWake, rgOvWake, rgWake]) setInterval(f, 250);
   if (LIVE) mockReset();
   if (LIVE && LN.has) await ringInit();   // a ring lane: its steps and 1 サーバーとリング (ring.js)
   if (LIVE && LN.has) esInit();   // the engine settings' switch, once the launcher has them (settings.js) / エンジン設定の切り替え
   if (LIVE && LN.on) startLaunch();
   else if (LIVE) liveStart();
   // while the disk is hidden (the settings, the node check) nothing is sized: its width is 0, the sign's radius would go
-  // negative and stop the frame loop for good; the way back sends a resize
-  // 円盤が隠れている間 (設定、ノード確認) は測らない。幅が 0 で看板の半径が負になり、毎フレームの処理が止まる。戻るときに resize が来る
+  // negative; the way back measures it (discBack)
+  // 円盤が隠れている間 (設定、ノード確認) は測らない。幅が 0 で看板の半径が負になる。戻るときに測る (discBack)
   let rt = 0; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(discResize, 150); });
 }
+// the checks' way in: check/flows.mjs sets window.__probe before the page's scripts; a page opened by a person has none
+// 試験の入口: check/flows.mjs がページのスクリプトより前に window.__probe を置く。人が開いたページには無い
+if (window.__probe) Object.assign(window.__probe, { liveQ: () => liveQ.length, livePicks, lnPoll, liveStart, rgShow, PH, MIM, PL, pfHeat, fxMimic, cfx, N, redraw: () => { rgSig = ''; RGO.sig = ''; } });
 $('doms').innerHTML = '<span class="cap">' + T("Loading the domains…") + '</span>';
 await load();
 } catch (error) {

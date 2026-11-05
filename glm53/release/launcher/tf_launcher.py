@@ -61,7 +61,7 @@ Defaults: CONF = glm53.conf beside this script's directory (PKG = the lane direc
 (a test from another machine). --dry-run: a start or a stop runs its read-only checks, prints what it would run, and runs
 nothing that changes a node.
 """
-import argparse, base64, hashlib, ipaddress, json, os, re, select, shlex, shutil, signal, socket, struct, subprocess, sys, threading, time
+import argparse, base64, glob, hashlib, ipaddress, json, os, re, select, shlex, shutil, signal, socket, struct, subprocess, sys, threading, time
 import http.client
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -215,7 +215,7 @@ NODES_OK_FAILS = ("weights", "banks")
 # the engine's rule: the 3-bit bank must be on every node, whatever a start uses, and a start that names no
 # widths loads every expert at 3 bits
 REQUIRED_BITS = 3
-CHECKPOINT_REPO = {4: "fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks", 8: "fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks"}  # on Hugging Face
+CHECKPOINT_REPO = "fiore-lab/GLM-5.3-EXL3-Base"  # on Hugging Face: what a start reads from a checkpoint, on any node count
 # the order of a node's check items (tf-glm53 check with CHECK_ITEMS, banks from the launcher)
 def lan_name():
     """This node's address on the default route (what another machine on the LAN opens), else its name."""
@@ -507,11 +507,11 @@ def set_line(text, key, value):
     """glm53.conf's text with KEY=value: its one KEY= line replaced (a comment after the value kept), or appended when
     it has none."""
     if not SET_LINE_VALUE.fullmatch(str(value)):
-        raise Fail(f"{key}: not a value glm53.conf can hold as plain text")
+        raise Fail(f"{key}: not a value the settings can hold as plain text")
     pat = re.compile(rf"^{key}=(?:[^#\n]*?)(\s+#.*)?$", re.M)
     n = len(pat.findall(text))
     if n > 1:
-        raise Fail(f"{key} must be one line of glm53.conf, {key}=...")
+        raise Fail(f"{key} must be one line of the settings, {key}=...")
     if n == 1:
         return pat.sub(lambda m: f"{key}={value}" + (m.group(1) or ""), text)
     return text + ("" if text.endswith("\n") or not text else "\n") + f"{key}={value}\n"
@@ -520,6 +520,12 @@ def set_line(text, key, value):
 def drop_lines(text, keys):
     """glm53.conf's text without its KEY= lines for `keys` (commented ones kept)."""
     return re.sub(r"^(?:" + "|".join(map(re.escape, keys)) + r")=.*\n?", "", text, flags=re.M)
+
+
+def copied_lately(path, within=600):
+    """A copy of PATH this recent: a panel writes each change as it is made, and one copy in ten minutes is enough."""
+    newest = max((os.path.getmtime(p) for p in glob.glob(glob.escape(path) + ".bak-*")), default=0)
+    return time.time() - newest < within
 
 
 def write_whole(path, text, keep=True):
@@ -1401,7 +1407,7 @@ class Launcher:
             st = dict(self.drafter_state)
         why = {}
         if not self.drafter_path:
-            why["dflash2"] = "DRAFTER is not set in glm53.conf"
+            why["dflash2"] = "no DFlash2 model is set (the launch screen's [ WEIGHTS ])"
         elif not st:
             why["dflash2"] = "not checked yet"
         elif any(v != "ok" for v in st.values()):
@@ -1684,7 +1690,7 @@ class Launcher:
         drafter = drafter or self.drafter_conf
         # no checkpoint here: refused now, not after the ranks start
         if not os.path.isfile(os.path.join(os.path.expanduser(self.weights_dir), "config.json")):
-            return 412, {"error": f"no checkpoint at {self.weights_dir} on this node: put {CHECKPOINT_REPO.get(self.world, 'the checkpoint')} there, the same path on every node "
+            return 412, {"error": f"no checkpoint at {self.weights_dir} on this node: put {CHECKPOINT_REPO} there, the same path on every node "
                                   "(POST /v1/launch/weights/check looks on every node)"}
         # the banks (and DFlash2's model) checked again now: a width without data refused here, not after the ranks start
         miss = self.missing_bits(set(bits) | {REQUIRED_BITS}, force=True)
@@ -2241,7 +2247,7 @@ class Launcher:
                 if it["state"] != "ok":
                     bank = next((b for b in banks if "bank:" + b["row"] == it["key"]), None)
                     repo = raw.get(bank["row"], {}).get("repo") if bank else ""
-                    it["fix"] = {"weights": f"put {CHECKPOINT_REPO.get(self.world, 'the checkpoint')} at {asked['weights']} on {row['name']}",
+                    it["fix"] = {"weights": f"put {CHECKPOINT_REPO} at {asked['weights']} on {row['name']}",
                                  "drafter": f"DFlash2's model at {asked['drafter']} on {row['name']}"}.get(
                         it["key"], f"{bank['bits']} bit: put {repo or 'its files'} at {bank['dir']} on {row['name']}" if bank and bank["dir"] else "")
         summary = []
@@ -2565,13 +2571,12 @@ class Launcher:
                             toks.append(f"{k}={v}")
                     new = set_line(new, "EXTRA_ENV", '"' + " ".join(toks) + '"')
                 if new != text:
-                    kept = write_whole(self.conf, new)
+                    kept = write_whole(self.conf, new, keep=not copied_lately(self.conf))
                     try:
                         read_settings(self.conf, self.node_file)
                     except subprocess.CalledProcessError as e:  # never leave a conf tf-glm53 cannot read
-                        if kept:
-                            shutil.copy2(kept, self.conf)
-                        return 500, {"error": f"the written {os.path.basename(self.conf)} did not read ({(e.stderr or '').strip()[-200:]}): the previous one put back"}
+                        write_whole(self.conf, text, keep=False)
+                        return 500, {"error": f"the settings written did not read ({(e.stderr or '').strip()[-200:]}): the previous one put back"}
                 log(f"engine settings saved: {' '.join(f'{k}={v}' for k, v in want.items())}" + (f" (the previous conf in {os.path.basename(kept)})" if kept else ""))
             cur = self.es_read()
         # the live keys sent to a running engine at once (R-029)
@@ -3529,7 +3534,7 @@ class Launcher:
                    f"{need / GiB:.1f} GiB on every node (layer {layer}: its new slabs {slabs / GiB:.1f} GiB after "
                    f"{grown / GiB:.1f} GiB grown in the layers before it, and {self.swap_margin // GiB} GiB to spare): "
                    "a start with more kept for the OS leaves room for it (a panel's start gives the KV all the room its plan "
-                   "leaves, whatever the context length; a start from glm53.conf alone: a smaller KV_SIZE)")
+                   "leaves, whatever the context length; a start without the panel: a smaller KV_SIZE)")
         return {"need_mib": need >> 20, "margin_mib": self.swap_margin >> 20, "layer": layer, "layer_slabs_mib": slabs >> 20,
                 "grown_before_mib": grown >> 20, "ranks": ranks, "fits": not short, "why": why}
 

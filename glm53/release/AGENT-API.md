@@ -272,7 +272,7 @@ The defaults below are `tf-glm53`'s. `docker run ... IMAGE up` writes `glm53.con
 | `THINKING_FOLD_AT_CLOSE_SHARE` | 0 | live | The least thinking (a percent of the thinking's limit) to organize when the model closes it. 0 is off |
 | `THINKING_CLOSE_PROMPT` | the org text | live | The text that asks for organizing at the close |
 | `THINKING_FOLD` | off | live | Organizing midway. off, checkpoint, recent, branch |
-| `THINKING_FOLD_SHARE` | 100 | live | How often to organize midway. A percent of the reply's limit. 100 is no organizing until the limit |
+| `THINKING_FOLD_SHARE` | 100 | live | How often to organize midway. A percent of `max_tokens`. 100 is no organizing until the limit |
 | `THINKING_FOLD_MAX` | 0 | live | The most organizing midway in 1 reply. 0 is no limit |
 | `THINKING_FOLD_CAP_SHARE` | 70 | start | The most an organized text may be. A percent of the thinking it organizes. 10 to 100 |
 | `TF_GLM53_BYTE_RESUME` | on | start | Resumes from the cache past a difference in how a text is cut (9.3). on, log, off |

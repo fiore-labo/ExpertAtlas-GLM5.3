@@ -272,7 +272,7 @@ s, r = call(LP, "POST", "/v1/launch/settings", {"values": {"THINKING_SHARE": "90
 | `THINKING_FOLD_AT_CLOSE_SHARE` | 0 | live | 模型结束思考时进行整理所需的思考最小量（思考上限的 %）。0 表示关闭 |
 | `THINKING_CLOSE_PROMPT` | org 文本 | live | 模型结束思考时的整理向模型提出的文本 |
 | `THINKING_FOLD` | off | live | 中途整理。off、checkpoint、recent、branch |
-| `THINKING_FOLD_SHARE` | 100 | live | 中途整理的间隔。回复上限的 %。100 表示到上限前不整理 |
+| `THINKING_FOLD_SHARE` | 100 | live | 中途整理的间隔。`max_tokens` 的 %。100 表示到上限前不整理 |
 | `THINKING_FOLD_MAX` | 0 | live | 1 次回复的中途整理次数上限。0 表示不限 |
 | `THINKING_FOLD_CAP_SHARE` | 70 | start | 整理大小的上限。被整理思考的 %。10 至 100 |
 | `TF_GLM53_BYTE_RESUME` | on | start | 跨过切分差异，从缓存继续（9.3）。on、log、off |

@@ -24,7 +24,7 @@ sit together at the top level.
 | [PANEL-GUIDE](glm53/release/PANEL-GUIDE.md) | The control panel's screens, item by item |
 | [CONFIG](glm53/release/CONFIG.md) | Every setting of `glm53.conf`: its default, who reads it, when a change takes effect |
 | [RUNTIME](packaging/RUNTIME.md) | Running it from the archive or by hand: every command, the cache, Claude Code, failures |
-| [T4](glm53/release/T4.md) | Four nodes: the checkpoint, the settings, the measurements |
+| [T4](glm53/release/T4.md) | Four nodes: the weights, the settings, the measurements |
 | [RING](glm53/release/RING.md) | Four nodes as a ring without a switch: the cabling, the fenced NCCL, the measurements |
 | [AGENT-API](glm53/release/AGENT-API.md) | The control API for an AI agent, with no dashboard |
 | [AI-GUIDE](glm53/release/AI-GUIDE.md) | The whole system on one page, for an AI assistant that helps you understand or run it |
@@ -51,7 +51,7 @@ sit together at the top level.
   blocks they share once.
 - Drafts checked by the model in each round: by GLM-5.3's own MTP layer by default, or by the optional DFlash2 drafter.
   The reply is the model's own choice in every case.
-- The thinking kept in bounds: a limit as a share of the reply's, and organizing a long thinking midway or at its close, set
+- The thinking kept in bounds: a limit as a share of `max_tokens`, and organizing a long thinking midway or at its close, set
   per request or while the engine runs.
 - `/metrics` (Prometheus text) and `/health` count the running request too, so a monitor reads prefill and decode
   speed, cache hits and draft acceptance while a request runs. `METRICS_LISTEN` serves the two read-only on an address
@@ -61,7 +61,8 @@ sit together at the top level.
 
 **Changes that need something from you:**
 
-- **The 3-bit bank is always needed**, beside the checkpoint, and a start with no plan loads every expert at 3 bits.
+- **The weights to download changed:** `fiore-lab/GLM-5.3-EXL3-Base` (21.2 GB) and the 3-bit bank (277.9 GB), on four nodes and on eight. A start reads every
+  routed expert from the banks, so the full checkpoints are no longer needed; if you have one, name it with `WEIGHTS`. A start with no plan loads every expert at 3 bits.
   `BITS` or a saved allocation chooses other widths, whose banks are then needed too.
 - **Settings renamed:** `CONTEXT_LENGTH` (one request's longest) and `KV_SIZE` (the whole KV cache) replace `CONTEXT` and
   `STORE`. An older `glm53.conf` is still read.
@@ -82,7 +83,7 @@ sit together at the top level.
   yet. Without it a proxy thread on Arm can hang with no error ([RING](glm53/release/RING.md), "The fenced NCCL").
 - **The node check** finds a ring or a switch's nodes from the cabling, checks them and registers them
   (`glm53.nodes.conf`), so `TOPOLOGY`, `SOCKET_IFNAME` and `IB_HCA` need no writing.
-- **Reasoning Control:** the thinking's limit as a share of the reply's limit, organizing midway and at the close, changed while
+- **Reasoning Control:** the thinking's limit as a share of `max_tokens`, organizing midway and at the close, changed while
   the engine runs from the panel or `POST /v1/thinking` ([CONFIG](glm53/release/CONFIG.md)).
 - **Several conversations at once:** `MULTI` (1 to 4) now works with the MTP layer too. While they run, the panel or
   `POST /v1/schedule` sets the GPU's split between prefill and decode, and a short prompt can go first.
@@ -149,22 +150,22 @@ the details.
 
 | What | Repository | Size | Used for |
 |---|---|---|---|
-| Eight-node checkpoint: every weight, the routed experts at 4 bits | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | **Required** on eight nodes. It also runs four nodes in place of the four-node checkpoint, and serves as the 4-bit bank |
-| Four-node checkpoint: the least used half of the routed experts at 3 bits | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | **Required** on four nodes, unless the eight-node checkpoint is used |
+| Base weights: everything but the routed experts | [fiore-lab/GLM-5.3-EXL3-Base](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Base) | 21.2 GB | **Required** on every start, on four nodes and on eight |
 | Expert bank, 2 bits | [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit) | 187.3 GB | Optional: for experts at 2 bits |
 | Expert bank, 3 bits | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | **Required** on every start |
 | Expert bank, 4 bits | [fiore-lab/GLM-5.3-EXL3-Experts-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) | 368.5 GB | Optional: for experts at 4 bits (not needed with the eight-node checkpoint) |
 | Expert bank, 5 bits | [fiore-lab/GLM-5.3-EXL3-Experts-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit) | 459.1 GB | Optional: for experts at 5 bits |
+| Eight-node checkpoint: every weight, the routed experts at 4 bits | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | Optional: not needed to start. Named by `WEIGHTS` it works as it is, and it serves as the 4-bit bank |
+| Four-node checkpoint: every weight, the least used half of the routed experts at 3 bits | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | Optional: not needed to start. Named by `WEIGHTS` it works as it is |
 
 A bank holds the 19,200 routed experts at one width; the engine loads each expert from the bank of the width its plan
-gives it. **Every start needs the checkpoint for the node count and the 3-bit bank; download the other banks only for the widths you
-want to use**: the panel offers the widths every node holds. For four nodes that is the four-node checkpoint and the
-3-bit bank, 622.5 GB together. Every node needs the same files at the same paths. Download once and copy to the other
+gives it. **Every start needs the Base weights and the 3-bit bank, 299.1 GB together on four nodes and on eight; download the other banks only for the widths you
+want to use**: the panel offers the widths every node holds. Every node needs the same files at the same paths. Download once and copy to the other
 nodes, for example (`python3 -m venv` needs the `python3-venv` package):
 
 ```sh
 python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
-~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks --local-dir ~/models/GLM-5.3-EXL3-4x-DGX-Sparks
+~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-Base --local-dir ~/models/GLM-5.3-EXL3-Base
 ~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-Experts-3bit --local-dir ~/models/GLM-5.3-EXL3-Experts-3bit
 ```
 
@@ -174,7 +175,7 @@ the checks (`./tf-glm53 verify`, `./tf-glm53 verify-banks`).
 ## Making the weights yourself
 
 Weights cannot be read like code: weights altered to behave differently in some cases look like any others, so you
-may not want to rely on weights whose making you cannot check. You do not have to rely on Fiore-lab's. Every weight file this recipe loads, the eight-
+may not want to rely on weights whose making you cannot check. You do not have to rely on Fiore-lab's. Every weight file this recipe loads, the Base weights, the eight-
 and four-node checkpoints and the 2-, 3-, 4- and 5-bit expert banks, can be made from Z.AI's official BF16 checkpoint
 ([zai-org/GLM-5.3-BF16](https://huggingface.co/zai-org/GLM-5.3-BF16)) with the tools in
 [glm53/weights](glm53/weights/README.md), which give the steps, the hardware and the measured times. The files you make
@@ -193,10 +194,8 @@ have the same layout as Fiore-lab's and load the same way.
   every node: NVIDIA's `nvidia-nccl-cu13` wheel, unpacked by pip (`packaging/RUNTIME.md`).
 - With the archive, NCCL with an AArch64 fence, which NVIDIA's wheel lacks, is recommended on a switch and required on a
   ring ([RING](glm53/release/RING.md)). The image holds it.
-- Fiore-lab's EXL3 checkpoint for the number of nodes, on Hugging Face, at the same path on every node:
-  [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) (390 GB) for eight nodes, [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) (344.6 GB)
-  for four. The four-node checkpoint holds the routed experts of layers 3 to 77 at 3 bits for the least used half and
-  at 4 bits for the rest; everything else is as in the eight-node checkpoint.
+- Fiore-lab's EXL3 Base weights, on Hugging Face, at the same path on every node: [fiore-lab/GLM-5.3-EXL3-Base](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Base) (21.2 GB), on four nodes and on eight.
+  A full checkpoint works in their place, [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) (390 GB) or [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) (344.6 GB); a start does not read its routed experts.
 - Every weight file can also be made yourself from Z.AI's official BF16 checkpoint, without any of Fiore-lab's files:
   [glm53/weights](glm53/weights/README.md).
 - The 3-bit bank (277.9 GB), at the same path on every node: every start needs it. The other banks only for the
@@ -232,7 +231,7 @@ first node).
 
 ## Drafters
 
-- `mtp` (default): the checkpoint's own MTP layer, part of the GLM-5.3 weights. About twice the decode speed of no
+- `mtp` (default): the MTP layer in the weights, part of the GLM-5.3 weights. About twice the decode speed of no
   drafts, with the same prefill speed.
 - `dflash2`: incoai/GLM-5.3-DFlash2. **Not included in this repository or the archive, because of its license**: its
   model card states CC BY-NC-ND 4.0 (non-commercial use, no derivatives), for research and evaluation, with
@@ -242,8 +241,8 @@ first node).
   4 bits in memory at the start and writes nothing to disk. Decode is faster still (Speed).
 - `none`: no drafts.
 
-`DRAFTER_KIND` in `glm53.conf` picks one; the launch screen, or `./tf-glm53 -d KIND start` (or `engine-up`), picks one
-for a single start.
+`DRAFTER_KIND` in `glm53.conf` picks one; the launch screen writes its choice there, and `./tf-glm53 -d KIND start` (or `engine-up`)
+picks one for a single start.
 
 ## Speed
 

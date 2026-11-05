@@ -6,7 +6,7 @@ With `docker run ... IMAGE up`, the keys of the engine settings can be given as 
 with `not an option`, so write them in `~/expertatlas/glm53.conf`: `GID_INDEX`, `RUNTIME`, `NCCL_LIB`, `EXPERT_LIVE`, `LOG_LISTEN`, `CONTEXT`, `STORE`, `THINKING_FOLD_KEEP`, `NEED_GB`, `LAUNCHER_HOST`, `ATLAS_DIR`, `LAUNCH_SNAPSHOTS`. The node check decides `TOPOLOGY`, `SOCKET_IFNAME` and `IB_HCA`.
 
 The defaults below are `tf-glm53`'s. `docker run ... IMAGE up` writes `glm53.conf` from `glm53.t4.conf.example` on any node count, so it begins
-with `CONTEXT_LENGTH` 737280, `KV_SIZE` 837280, `KV` fp4 and `NEED_GB` 133, and the start's KV size is `max`.
+with `CONTEXT_LENGTH` 737280, `KV_SIZE` 837280, `KV` fp4 and `NEED_GB` 115, and the start's KV size is `max`.
 
 `glm53.conf` holds a lane's settings: the nodes, the network, the weights, the drafter, the server, the memory and
 the control panel. It is a plain shell file that you write and edit by hand, next to `tf-glm53` on the first node.
@@ -32,23 +32,21 @@ fill in the nodes, the network devices and the paths. The examples carry the mea
   - The engine settings screen (switched to from the header) writes the settings that need a restart:
     `NAME`, `CONTEXT_LENGTH`, `KV_SIZE`, `KV`, `MAX_TOKENS`, `THINKING_*`, `MULTI*`, `DRAFTER_KIND`, `MTP_K`, `DRAFT_SAVES`, `DCP`, `MASTER_PORT`, `RESERVE_GB`, `READY_TIMEOUT`, `LAUNCH_DROP_CACHES`, `HOST`, `PORT`, `METRICS_LISTEN`, `LOG_KEEP_MB`, `LAUNCHER_PORT`, `ROWS`, `SP_PARTS`, `ROCE_PROXY_CORES`, `ATLAS_GENERIC`, `EXTRA_ENV` (the engine's `TF_GLM53_CANON_CLOSE` and `TF_GLM53_CANON_NEAR` as tokens of it); `TOPOLOGY`,
     `SOCKET_IFNAME` and `IB_HCA` too until the node check has registered the nodes. Each value is checked first as
-    `tf-glm53` checks it; `PORT` only while the engine is stopped. Save: used from the next start (a running engine
+    `tf-glm53` checks it; `PORT` only while the engine is stopped. A change is written as it is made and used from the next start (a running engine
     keeps its settings); the thinking's live keys (`THINKING_SHARE`, `THINKING_FOLD`, `THINKING_FOLD_AT_CLOSE_SHARE`,
     `THINKING_FOLD_SHARE`, `THINKING_FOLD_MAX`) also go to a running engine at once, and the inference screen's [ REASONING CONTROL ] writes its
-    changes here, so both screens show one value. Save and restart, while the engine runs: the stop first asks whether to keep this run's
-    usage, as Stop does, then the engine starts again with the same experts and the saved settings. On the inference
-    screen, the GPU split's option for the next start writes `MULTI_DECODE_SHARE`, `MULTI_SHORT_PROMPT` and
-    `MULTI_SHORT_PREEMPT` the same way.
+    changes here, so both screens show one value. Restart to apply, while the engine runs: the stop first asks whether to keep this run's
+    usage, as Stop does, then the engine starts again with the same experts and the saved settings.
 - The nodes the control panel's node check registers go to their own file, `glm53.nodes.conf` beside this one
   (`TOPOLOGY`, `NODES`, `SOCKET_IFNAME`, `IB_HCA`, as the check judged the cabling; the previous file stays beside it
   as `glm53.nodes.conf.bak-<time>`). `tf-glm53` and the launcher read it after `glm53.conf`, so its lines win over
   those four here. While it is missing, the panel opens on the node check; once it is there, on the launch settings.
   `NODES_CONF=FILE` reads another file, `NODES_CONF=` none. `tf-glm53 deploy` does not copy it.
-- What the launch screen chooses for a start (the experts' widths, the KV format, the context length, the
-  drafter, what each node keeps for the OS) holds for that start only and is not written into `glm53.conf`. The
-  launcher hands those choices to `tf-glm53` in its environment (`LAUNCH_*`); they are not settings of this file.
-  Their defaults are this file's (`KV`, `CONTEXT_LENGTH`, `DRAFTER_KIND`, `MULTI`, `RESERVE_GB`), which the engine settings
-  screen sets.
+- What the launch screen chooses (the KV format, the context length, the drafter, the concurrent inferences, what each node
+  keeps for the OS) is written into this file as it is chosen (`KV`, `CONTEXT_LENGTH`, `DRAFTER_KIND`, `MULTI`, `RESERVE_GB`), and a
+  start writes the context length its plan took, so the next page opens on it. `KV_SIZE` only rises to what the context
+  length needs. The experts' widths and the KV the plan takes are that start's: the launcher hands them to `tf-glm53` in
+  its environment (`LAUNCH_*`); they are not settings of this file.
 - The page's own settings (colours, the circle's order and the rest) are kept in `launch/panel-settings.json`.
 - `glm53.conf` is not one of the release's files: `SHA256SUMS` does not list it, so `tf-glm53 check` and
   `tf-glm53 deploy` never compare it. Keep a copy of a working file before a large change.
@@ -58,8 +56,8 @@ fill in the nodes, the network devices and the paths. The examples carry the mea
 ## The settings
 
 "Default" is what `tf-glm53` uses when a setting is missing or empty; "(needed)" has none. Settings marked
-**panel** can be chosen again on the launch screen for one start; the file's value is what a start takes when none is
-chosen (`tf-glm53 start`, `engine-up`).
+**panel** can also be chosen on the launch screen, which writes it here; a start without that screen (`tf-glm53 start`,
+`engine-up`) takes the file's value.
 
 ### Nodes and network
 
@@ -84,8 +82,8 @@ chosen (`tf-glm53 start`, `engine-up`).
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `WEIGHTS` | (needed) | The checkpoint's directory, the same path on every node: `GLM-5.3-EXL3-4x-DGX-Sparks` for four nodes, `GLM-5.3-EXL3-8x-DGX-Sparks` for eight. The launch settings can set it, and the expert banks' directories (`expert-plan/banks.json`), once every node has them. |
-| `DRAFTER_KIND` | `mtp` | **panel.** What drafts the tokens the model then checks: `mtp` (the checkpoint's MTP layer), `dflash2` (the model in `DRAFTER`) or `none`. `./tf-glm53 -d KIND start` (or `engine-up`) picks another for one start. |
+| `WEIGHTS` | (needed) | The directory of the Base weights (`GLM-5.3-EXL3-Base`), the same path on every node, on four nodes and on eight. A full checkpoint (`GLM-5.3-EXL3-4x-DGX-Sparks`, `GLM-5.3-EXL3-8x-DGX-Sparks`) works in their place. The launch settings can set it, and the expert banks' directories (`expert-plan/banks.json`), once every node has them. |
+| `DRAFTER_KIND` | `mtp` | **panel.** What drafts the tokens the model then checks: `mtp` (the MTP layer in `WEIGHTS`), `dflash2` (the model in `DRAFTER`) or `none`. `./tf-glm53 -d KIND start` (or `engine-up`) picks another for one start. |
 | `MTP_K` | `3` | Drafts a round with MTP, 1 to 7. |
 | `DRAFTER` | empty | The DFlash2 model's directory, the same path on every node. `DRAFTER_KIND=dflash2` needs it, and the launch screen offers DFlash2 only when it is set and every node has the model. Not part of the release (RUNTIME.md, "Using DFlash2"). The launch settings can set it. |
 | `DRAFT_SAVES` | `8` | With DFlash2: the conversations whose drafter state is kept between requests. |
@@ -140,7 +138,7 @@ chosen (`tf-glm53 start`, `engine-up`).
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `NEED_GB` | `112` | The GiB a node must have available before a start (`tf-glm53 check`): 3 more with DFlash2, and 2.7 fewer for each 100,000 positions `KV_SIZE` is below 1,638,400. The four-node example sets 133, which comes to 112 with its `KV_SIZE`. A start from the panel uses its plan's figure instead. |
+| `NEED_GB` | `112` | The GiB a node must have available before a start (`tf-glm53 check`): 3 more with DFlash2, and for each 100,000 positions `KV_SIZE` is below 1,638,400, 2.55 fewer with `KV=fp8` and 1.73 fewer with `KV=fp4`. The four-node example sets 115, which comes to 101 with its `KV_SIZE`. A start from the panel uses its plan's figure instead. |
 | `READY_TIMEOUT` | `900` | Seconds a start (`tf-glm53 engine-up`, which the panel's start runs) waits for the server. |
 
 ### The control panel

@@ -39,8 +39,9 @@ NCCL_LIB=~/nccl-2.30.7/nvidia/nccl/lib/libnccl.so.2
 #RUNTIME=docker
 #IMAGE=glm53-tensorfold:r3.3-102
 
-# The checkpoint for eight ranks, the same path on every node (RUNTIME.md: fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks).
-WEIGHTS=~/models/GLM-5.3-EXL3-8x-DGX-Sparks
+# What a start reads besides the banks, fiore-lab/GLM-5.3-EXL3-Base on Hugging Face, the same path on every node. A
+# full checkpoint (fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) serves as well: its routed experts are not read.
+WEIGHTS=~/models/GLM-5.3-EXL3-Base
 
 # What drafts the tokens the model then checks (the reply is the model's own choice in every case):
 #   mtp      the checkpoint's own MTP layer, part of the GLM-5.3 weights and under their license; needs a

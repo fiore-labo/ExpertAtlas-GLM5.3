@@ -3,7 +3,7 @@
 # 重みを自分で作る
 
 このレシピが読み込む重みのファイルは、どれも Z.AI の公式の GLM-5.3 チェックポイントから、このディレクトリの道具で作れます。
-8 台用と 4 台用のチェックポイント、Expert Atlas の 2・3・4・5 bit の expert バンクのすべてです。Fiore-lab が Hugging Face に
+Base の重み、8 台用と 4 台用のチェックポイント、Expert Atlas の 2・3・4・5 bit の expert バンクのすべてです。Fiore-lab が Hugging Face に
 公開したファイルは一つも要りません。
 
 なぜ大事か: 重みはコードのようには読めません。ある場面だけ違うふるまいをするように手を加えた重みも、見た目はほかの重みと
@@ -29,13 +29,14 @@
 | もの | ファイル | 大きさ | 使い道 |
 |---|---|---|---|
 | 4 bit のバンク | `experts-layer-003` … `077.safetensors` | 368.5 GB | 8 台用チェックポイントの routed expert。Expert Atlas の 4 bit |
-| 8 台用チェックポイント | 4 bit バンクのファイル、`nonexperts-5bit.safetensors`、`unquantized-bf16.safetensors`、`mtp-layer-78-*` の 3 ファイル、公式の小さなファイル、`config.json`、インデックス、`SHA256SUMS` | 389.9 GB | 8 台でのすべての起動 (4 台なら 4 台用チェックポイントの代わりにもなります): routed expert 以外の重み |
+| 8 台用チェックポイント | 4 bit バンクのファイル、`nonexperts-5bit.safetensors`、`unquantized-bf16.safetensors`、`mtp-layer-78-*` の 3 ファイル、公式の小さなファイル、`config.json`、インデックス、`SHA256SUMS` | 389.9 GB | Base の重みの元になります。起動には要りません。`WEIGHTS` に指定すればそのまま使えます |
+| Base の重み | そのチェックポイントから層 3〜77 の routed expert を除いたもの: その他の重み、公式の小さなファイル、`config.json`、インデックス、`SHA256SUMS` | 21.2 GB | すべての起動: routed expert 以外の重み |
 | 3 bit のバンク | `experts-layer-*.safetensors` | 277.9 GB | すべての起動: Expert Atlas の 3 bit、既定の幅。4 台用チェックポイント |
 | 2 bit / 5 bit のバンク | `experts-layer-*.safetensors` | 187.3 / 459.1 GB | Expert Atlas の 2 bit と 5 bit (任意) |
-| 4 台用チェックポイント | 8 台用チェックポイントの routed expert の半分を 3 bit にしたもの | 344.6 GB | 4 台でのすべての起動: routed expert 以外の重み |
+| 4 台用チェックポイント | 8 台用チェックポイントの routed expert の半分を 3 bit にしたもの | 344.6 GB | 任意: 起動には要りません。`WEIGHTS` に指定すればそのまま使えます |
 
-どの起動にも、チェックポイントと 3 bit のバンクが要ります。8 台なら 8 台用チェックポイント、4 台なら 4 台用チェックポイント
-(8 台用と 3 bit バンクから作ります) か 8 台用チェックポイントです。ほかのバンクは使いたい幅の分だけです (8 台用チェックポイントの
+どの起動にも、Base の重みと 3 bit のバンクが要ります (4 台でも 8 台でも)。4 台用チェックポイント
+(8 台用と 3 bit バンクから作ります) は任意です。ほかのバンクは使いたい幅の分だけです (8 台用チェックポイントの
 ディレクトリを 4 bit バンクとして使えます)。
 
 ## Fiore-lab のファイルとの違い
@@ -157,7 +158,16 @@ expert のファイルは 4 bit バンクのファイルへのハードリンク
 あるときも)。量子化しないテンソル (埋め込み、`lm_head`、norm、ルーター、`kv_b_proj`、indexer の一部、MTP 層の `eh_proj`) は
 公式のファイルからそのまま写します。最後にインデックスとファイルの照合をして、`SHA256SUMS` を書きます。
 
-### 6. 4 台用チェックポイントを組み立てる (4 台で動かす場合だけ)
+続けて、起動がバンクと一緒に読む Base の重みを作ります:
+
+```sh
+$P assemble.py base --checkpoint /data/GLM-5.3-8x --out /data/GLM-5.3-Base
+```
+
+これもハードリンクです (写すなら `--copy`)。層 3〜77 の routed expert 以外を取り、routed expert はバンクにあると書いた `config.json` と、それを除いたインデックス、`SHA256SUMS` を書きます。
+Fiore-lab のチェックポイントからでも自分で作ったものからでも、同じコマンドで同じ形になります。
+
+### 6. 4 台用チェックポイントを組み立てる (任意)
 
 4 台用チェックポイントは routed expert の半分を 3 bit で持ちます。どの半分かは `q3-selection.json` という一覧
 (層 3〜77 について `{"層": [expert, ...]}`) で決まります。Fiore-lab の一覧を使う (入っているのは expert の番号だけで、日本語と
@@ -187,7 +197,7 @@ $P bank_manifest.py banks banks.json /data/banks/3bit /data/banks/4bit      # �
 
 ### 8. 使う
 
-チェックポイントをどのノードにも同じパスで写して `glm53.conf` の `WEIGHTS` をそこに向け、バンクを `banks.json` のディレクトリに
+Base の重みをどのノードにも同じパスで写して `glm53.conf` の `WEIGHTS` をそこに向け、バンクを `banks.json` のディレクトリに
 写してから:
 
 ```sh
@@ -206,7 +216,7 @@ $P bank_manifest.py banks banks.json /data/banks/3bit /data/banks/4bit      # �
 | `patch_experts.py` | ExLlamaV3 の変換を routed expert だけを量子化するように変え、ほかの線形層は `full4` から取る |
 | `patch_nonexperts.py` | それ以外の線形層だけを量子化するように変え、routed expert は `full4` から取る |
 | `convert_mtp_linears.py` | MTP 層の線形層を校正データなしで 5 bit (mul1) にする |
-| `assemble.py` | バンク、8 台用と 4 台用のチェックポイントを組み立てる。`check` でチェックポイントのディレクトリを確かめる |
+| `assemble.py` | バンク、8 台用と 4 台用のチェックポイント、Base の重みを組み立てる。`check` でチェックポイントのディレクトリを確かめる |
 | `bank_manifest.py` | バンクのマニフェスト (`make`、`check`) とバンクの一覧 (`banks`) |
 
 自分で作った重みは GLM-5.3 から派生したもので、GLM-5.3 License に従います (チェックポイントに入る公式の `LICENSE`)。

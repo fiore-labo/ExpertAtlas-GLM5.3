@@ -18,7 +18,7 @@
 | [PANEL-GUIDE](glm53/release/PANEL-GUIDE.ja.md) | コントロールパネルの画面を項目ごとに |
 | [CONFIG](glm53/release/CONFIG.ja.md) | `glm53.conf` の全設定: 既定値、読む側、変更が効く時期 |
 | [RUNTIME](packaging/RUNTIME.ja.md) | アーカイブや手作業で動かす方法: 全コマンド、キャッシュ、Claude Code、障害 |
-| [T4](glm53/release/T4.ja.md) | 4 台: チェックポイント、設定、測定 |
+| [T4](glm53/release/T4.ja.md) | 4 台: 重み、設定、測定 |
 | [RING](glm53/release/RING.ja.md) | スイッチなしのリング 4 台: 配線、fence 入りの NCCL、測定 |
 | [AGENT-API](glm53/release/AGENT-API.ja.md) | AI エージェント向けの操作 API（ダッシュボードなし） |
 | [AI-GUIDE](glm53/release/AI-GUIDE.ja.md) | システム全体を 1 ページで。理解や運用を手伝う AI アシスタント向け |
@@ -31,14 +31,14 @@
 - 長いプロンプトはシーケンス並列で分割して読み込みます。decode ステップの集団通信は RoCE 上で行います。
 - すべての会話で 1 つの会話キャッシュを使い、256 トークンのブロック単位で保持します。リクエストは、どの会話のものであってもキャッシュにある最も長い先頭部分から再開します。同じように始まる会話（エージェントのシステムプロンプト、そのサブエージェント）は、共通のブロックを 1 回だけ保持します。
 - ラウンドごとにドラフトをモデルが検証します。ドラフトを作るのは、既定では GLM-5.3 自身の MTP 層、またはオプションの DFlash2 drafter です。どの場合も、応答はモデル自身が選んだものです。
-- 思考が長くなりすぎないようにします。上限は応答の上限に対する割合で決め、長い思考は途中や終わりに整理できます。リクエストごとにも、エンジンの動作中にも設定できます。
+- 思考が長くなりすぎないようにします。上限は `max_tokens`（1 回の応答の上限）に対する割合で決め、長い思考は途中や終わりに整理できます。リクエストごとにも、エンジンの動作中にも設定できます。
 - `/metrics`（Prometheus のテキスト）と `/health` は実行中のリクエストの分も数えるので、モニタはリクエストの実行中にも prefill と decode の速さ、キャッシュのヒット、ドラフトの受理を読めます。`METRICS_LISTEN` を設定すると、別のホストのモニタ向けに、この 2 つを専用のアドレスで読み取り専用で開きます。
 
 ## r3.3-102 で変わったこと
 
 **対応が必要な変更:**
 
-- **3 ビットのバンクが必ず要ります。** チェックポイントと一緒に用意します。計画なしの起動は全エキスパートを 3 ビットで読みます。`BITS` や保存した割り当てで別の幅を選ぶと、その幅のバンクも要ります。
+- **ダウンロードする重みが変わりました。** `fiore-lab/GLM-5.3-EXL3-Base` (21.2 GB) と 3 ビットのバンク (277.9 GB) です (4 台でも 8 台でも)。起動は routed expert をすべてバンクから読むので、完全なチェックポイントは要らなくなりました。持っていれば `WEIGHTS` に指定して使えます。計画なしの起動は全エキスパートを 3 ビットで読みます。`BITS` や保存した割り当てで別の幅を選ぶと、その幅のバンクも要ります。
 - **設定の名前が変わりました。** `CONTEXT` と `STORE` に代わって `CONTEXT_LENGTH`（1 リクエストの最長）と `KV_SIZE`（KV キャッシュ全体）を使います。古い `glm53.conf` もそのまま読めます。
 - **応答の既定の上限**は、4,096 トークンから context length の 70 %（`MAX_TOKENS_SHARE`）に変わりました。クライアントの `max_tokens` が優先します。
 - **設定の選択肢を整理しました。** `CACHE` は `pool`、`DCP` は 2、`ROCE_PROXY_CORES` は `a725` か `os` です。
@@ -50,7 +50,7 @@
 - **スイッチなし、リングの 4 台**（[RING](glm53/release/RING.ja.md)）。
 - **AArch64 の fence を入れた NCCL をイメージに:** スイッチでもリングでも使います。NVIDIA/nccl#2393 の修正で、NCCL のリリースにはまだ入っていません。これがないと、Arm の通信スレッドがエラーなしで止まることがあります（[RING](glm53/release/RING.ja.md)「fence 入りの NCCL」）。
 - **ノード確認:** 配線からリングまたはスイッチのノードを見つけ、確認して登録します（`glm53.nodes.conf`）。`TOPOLOGY`、`SOCKET_IFNAME`、`IB_HCA` を書く必要はありません。
-- **Reasoning Control:** 応答の上限に対する割合で決める思考の上限、中間整理、思考完了時整理を、エンジンの動作中にパネルや `POST /v1/thinking` で変えられます（[CONFIG](glm53/release/CONFIG.ja.md)）。
+- **Reasoning Control:** `max_tokens` に対する割合で決める思考の上限、中間整理、思考完了時整理を、エンジンの動作中にパネルや `POST /v1/thinking` で変えられます（[CONFIG](glm53/release/CONFIG.ja.md)）。
 - **複数の会話を同時に:** `MULTI`（1〜4）が MTP 層でも動くようになりました。動作中はパネルや `POST /v1/schedule` で prefill と decode の GPU 配分を決められ、短いプロンプトを先に通せます。
 - **Byte Resume**（既定でオン）: モデルがトークナイザーと違う位置で文字列を切ると、次のターンのプロンプトでは同じバイトが別のトークン ID になります。キャッシュは、残りを計算し直さず、その先から再開するようになりました。
 - **パネル:** エンジン設定画面、重みの場所とその確認（[ WEIGHTS ]）、起動の流れの画面、円の上の KV プール、各ノードの温度。
@@ -84,21 +84,22 @@ GLM-5.3 はトークンごとに、1 層 256 個の routed expert から 8 個�
 
 | 何 | リポジトリ | 大きさ | 使う場面 |
 |---|---|---|---|
-| 8 台用チェックポイント：すべての重み（routed expert は 4 bit） | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | **8 台で必須**。4 台でも 4 台用チェックポイントの代わりに使え、4 bit のバンクも兼ねます |
-| 4 台用チェックポイント：使われ方の少ない半分の routed expert を 3 bit に | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | **4 台で必須**（8 台用チェックポイントを使うときは不要） |
+| Base の重み：routed expert 以外の全部 | [fiore-lab/GLM-5.3-EXL3-Base](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Base) | 21.2 GB | **どの起動にも必須**（4 台でも 8 台でも） |
 | エキスパートのバンク 2 bit | [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit) | 187.3 GB | 任意: 2 bit のエキスパートを使うとき |
 | エキスパートのバンク 3 bit | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | **どの起動にも必須** |
 | エキスパートのバンク 4 bit | [fiore-lab/GLM-5.3-EXL3-Experts-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) | 368.5 GB | 任意: 4 bit のエキスパートを使うとき（8 台用チェックポイントがあれば不要） |
 | エキスパートのバンク 5 bit | [fiore-lab/GLM-5.3-EXL3-Experts-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit) | 459.1 GB | 任意: 5 bit のエキスパートを使うとき |
+| 8 台用チェックポイント：すべての重み（routed expert は 4 bit） | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | 任意: 起動には要りません。`WEIGHTS` に指定すればそのまま使え、4 bit のバンクも兼ねます |
+| 4 台用チェックポイント：すべての重み（使われ方の少ない半分の routed expert は 3 bit） | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | 任意: 起動には要りません。`WEIGHTS` に指定すればそのまま使えます |
 
 バンクは、19,200 個の routed expert を 1 つの幅でそろえたものです。エンジンは、エキスパートごとに、計画で決めた幅の
-バンクから読み込みます。**どの起動にも、ノード数に合ったチェックポイントと 3 bit のバンクが要ります。ほかのバンクは、使いたい幅の分だけダウンロードすれば足ります**（パネルが選ばせるのは、全ノードにそろって
-いる幅です）。4 台なら、4 台用チェックポイントと 3 bit のバンクで、合わせて 622.5 GB です。
+バンクから読み込みます。**どの起動にも、Base の重みと 3 bit のバンクが要ります。4 台でも 8 台でも合わせて 299.1 GB です。ほかのバンクは、使いたい幅の分だけダウンロードすれば足ります**（パネルが選ばせるのは、全ノードにそろって
+いる幅です）。
 どのノードにも、同じファイルを同じパスに置きます。1 台でダウンロードして、ほかのノードに写します（`python3 -m venv` には `python3-venv` パッケージが要ります）。例:
 
 ```sh
 python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
-~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks --local-dir ~/models/GLM-5.3-EXL3-4x-DGX-Sparks
+~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-Base --local-dir ~/models/GLM-5.3-EXL3-Base
 ~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-Experts-3bit --local-dir ~/models/GLM-5.3-EXL3-Experts-3bit
 ```
 
@@ -108,7 +109,7 @@ python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
 ## 重みを自分で作る
 
 重みはコードのようには読めません。ある場面だけ違うふるまいをするように手を加えた重みも見た目はほかと変わらないので、作り方を
-確かめられない重みには頼りたくないこともあるでしょう。Fiore-lab の重みに頼る必要はありません。このレシピが読み込む重みのファイル（8 台用・4 台用のチェックポイントと、
+確かめられない重みには頼りたくないこともあるでしょう。Fiore-lab の重みに頼る必要はありません。このレシピが読み込む重みのファイル（Base の重み、8 台用・4 台用のチェックポイント、
 2・3・4・5 ビットの expert のバンク）はどれも、Z.AI の公式 BF16 チェックポイント（[zai-org/GLM-5.3-BF16](https://huggingface.co/zai-org/GLM-5.3-BF16)）
 から [glm53/weights](glm53/weights/README.ja.md) の道具で作れます。手順・機材・実測の時間はそこにあります。作ったファイルは
 Fiore-lab のものと形が同じで、同じように読み込まれます。
@@ -119,7 +120,7 @@ Fiore-lab のものと形が同じで、同じように読み込まれます。
 - イメージを使う場合: 各ノードに NVIDIA ドライバ 580 以降（イメージはホストのドライバを使います）、Docker と NVIDIA Container Toolkit（DGX OS には両方あります）と `python3`。起動の前に各ノードで約 115 GiB の空きメモリ。
 - アーカイブを使う場合: DGX OS（Ubuntu 24.04）、NVIDIA ドライバ 580 以降、cuBLAS 13。全ノードに NCCL 2.30.7（NVIDIA の `nvidia-nccl-cu13` wheel を pip で展開したもの。`packaging/RUNTIME.ja.md`）。
 - アーカイブでは、AArch64 の fence を入れた NCCL を、スイッチでは推奨、リングでは必須とします。NVIDIA の wheel にはありません（[RING](glm53/release/RING.ja.md)）。イメージには入っています。
-- ノード数に合った Fiore-lab の EXL3 チェックポイント（Hugging Face）。全ノードの同じパスに置きます。8 台では [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks)（390 GB）、4 台では [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks)（344.6 GB）です。4 台用のチェックポイントは、層 3〜77 の routed expert のうち使用頻度の低い半分を 3 ビット、残りを 4 ビットで持ち、それ以外は 8 台用のチェックポイントと同じです。
+- Fiore-lab の EXL3 の Base の重み（Hugging Face）。全ノードの同じパスに置きます。[fiore-lab/GLM-5.3-EXL3-Base](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Base)（21.2 GB）で、4 台でも 8 台でも同じです。完全なチェックポイント、[fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks)（390 GB）か [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks)（344.6 GB）でも代わりに使えますが、起動ではその routed expert を読みません。
 - 重みのファイルはどれも、Fiore-lab のファイルを使わずに、Z.AI の公式 BF16 チェックポイントから自分で作ることもできます（[glm53/weights](glm53/weights/README.ja.md)）。
 - 3 ビットのバンク（277.9 GB）。全ノードの同じパスに置きます。どの起動にも要ります。ほかのバンクは使う幅の分だけです（8 台用のチェックポイントを 4 ビットのバンクとして使えます。4 ビットだけでは context length が短くなります）。
 - ランチャーとログ係のために、各ノードの `python3`。
@@ -140,11 +141,11 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-la
 
 ## Drafter
 
-- `mtp`（既定）: チェックポイント自身の MTP 層で、GLM-5.3 の重みの一部です。decode 速度はドラフトなしの約 2 倍で、prefill 速度は変わりません。
+- `mtp`（既定）: 重みの中の MTP 層で、GLM-5.3 の重みの一部です。decode 速度はドラフトなしの約 2 倍で、prefill 速度は変わりません。
 - `dflash2`: incoai/GLM-5.3-DFlash2。**ライセンス上の理由で、このリポジトリにもアーカイブにも同梱していません**。モデルカードには CC BY-NC-ND 4.0（非営利利用のみ、改変禁止）、研究と評価のため、と記載されています。商用ライセンスは Inco AI が提供しています。その利用がこのライセンスの範囲内であれば、[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md#dflash2-を使う手順) の「DFlash2 を使う手順」に従ってください。固定した版で一度だけダウンロードし、全ノードの同じパスにコピーしてコピーを確認してから、`DRAFTER_KIND=dflash2` と `DRAFTER` を設定します。エンジンは起動時にメモリ上でこれを 4 ビットに量子化し、ディスクには何も書き出しません。decode はさらに速くなります（「速度」）。
 - `none`: ドラフトなし。
 
-`glm53.conf` の `DRAFTER_KIND` で選びます。起動画面か `./tf-glm53 -d KIND start`（または `engine-up`）なら、その起動だけ選べます。
+`glm53.conf` の `DRAFTER_KIND` で選びます。起動画面で選ぶとそこに書きます。`./tf-glm53 -d KIND start`（または `engine-up`）なら、その起動だけ選べます。
 
 ## 速度
 

@@ -17,7 +17,7 @@ GB10을 1개씩 탑재한 NVIDIA DGX Spark 4대 또는 8대에서 텐서 병렬 
 | [PANEL-GUIDE](glm53/release/PANEL-GUIDE.md) | 컨트롤 패널의 화면을 항목별로 |
 | [CONFIG](glm53/release/CONFIG.md) | `glm53.conf`의 모든 설정: 기본값, 읽는 쪽, 변경이 적용되는 시점 |
 | [RUNTIME](packaging/RUNTIME.md) | 아카이브나 수동으로 실행하는 방법: 모든 명령, 캐시, Claude Code, 장애 |
-| [T4](glm53/release/T4.md) | 4대: 체크포인트, 설정, 측정 |
+| [T4](glm53/release/T4.md) | 4대: 가중치, 설정, 측정 |
 | [RING](glm53/release/RING.md) | 스위치 없이 링으로 연결한 4대: 배선, fence가 들어간 NCCL, 측정 |
 | [AGENT-API](glm53/release/AGENT-API.md) | AI 에이전트를 위한 제어 API(대시보드 없음) |
 | [AI-GUIDE](glm53/release/AI-GUIDE.md) | 시스템 전체를 한 페이지로. 이해나 실행을 돕는 AI 어시스턴트용 |
@@ -30,14 +30,14 @@ GB10을 1개씩 탑재한 NVIDIA DGX Spark 4대 또는 8대에서 텐서 병렬 
 - 긴 프롬프트는 시퀀스 병렬로 나누어 읽고, decode 단계의 집합 통신은 RoCE로 수행합니다.
 - 모든 대화가 하나의 대화 캐시를 256개 위치 단위의 블록으로 함께 씁니다. 요청은 어느 대화의 것이든 캐시에 있는 가장 긴 앞부분부터 이어서 처리하며, 같은 내용으로 시작하는 대화(에이전트의 시스템 프롬프트, 그 서브에이전트)는 공통 블록을 한 번만 보유합니다.
 - 매 라운드 드래프트를 모델이 검증합니다. 드래프트는 기본적으로 GLM-5.3 자체의 MTP 레이어가 만들며, 선택 사항인 DFlash2 drafter를 쓸 수도 있습니다. 어느 경우든 응답은 모델 자신이 선택한 것입니다.
-- 사고(thinking)가 지나치게 길어지지 않게 합니다. 상한은 응답 상한에 대한 비율로 정하고, 긴 사고는 중간이나 끝에서 정리할 수 있습니다. 요청마다 설정할 수도, 엔진 실행 중에 설정할 수도 있습니다.
+- 사고(thinking)가 지나치게 길어지지 않게 합니다. 상한은 `max_tokens`(1회 응답의 상한)에 대한 비율로 정하고, 긴 사고는 중간이나 끝에서 정리할 수 있습니다. 요청마다 설정할 수도, 엔진 실행 중에 설정할 수도 있습니다.
 - `/metrics`(Prometheus 텍스트)와 `/health`는 실행 중인 요청도 집계하므로, 모니터는 요청이 실행되는 동안에도 prefill과 decode 속도, 캐시 적중, 드래프트 채택을 읽을 수 있습니다. `METRICS_LISTEN`을 설정하면 다른 호스트의 모니터를 위해 이 두 가지를 별도의 주소에서 읽기 전용으로 제공합니다.
 
 ## r3.3-102에서 바뀐 점
 
 **조치가 필요한 변경:**
 
-- **3비트 뱅크는 항상 필요합니다.** 체크포인트와 함께 준비하며, 계획 없이 시작하면 모든 expert를 3비트로 불러옵니다. `BITS`나 저장한 할당으로 다른 폭을 고르면 그 폭의 뱅크도 필요합니다.
+- **내려받을 가중치가 바뀌었습니다.** `fiore-lab/GLM-5.3-EXL3-Base`(21.2 GB)와 3비트 뱅크(277.9 GB)입니다(4대든 8대든 같습니다). 시작할 때 routed expert를 모두 뱅크에서 읽으므로 전체 체크포인트는 더 이상 필요하지 않습니다. 이미 있다면 `WEIGHTS`로 지정해 쓸 수 있습니다. 계획 없이 시작하면 모든 expert를 3비트로 불러옵니다. `BITS`나 저장한 할당으로 다른 폭을 고르면 그 폭의 뱅크도 필요합니다.
 - **설정 이름이 바뀌었습니다.** `CONTEXT`와 `STORE` 대신 `CONTEXT_LENGTH`(요청 하나의 최대 길이)와 `KV_SIZE`(KV 캐시 전체)를 씁니다. 예전 `glm53.conf`도 그대로 읽습니다.
 - **응답의 기본 상한**이 4,096 토큰에서 context length의 70 %(`MAX_TOKENS_SHARE`)로 바뀌었습니다. 클라이언트의 `max_tokens`가 우선합니다.
 - **설정의 선택지를 정리했습니다.** `CACHE`는 `pool`, `DCP`는 2, `ROCE_PROXY_CORES`는 `a725` 또는 `os`입니다.
@@ -49,7 +49,7 @@ GB10을 1개씩 탑재한 NVIDIA DGX Spark 4대 또는 8대에서 텐서 병렬 
 - **4대를 링으로 연결**할 수 있으며 스위치가 필요 없습니다([RING](glm53/release/RING.md), 영어).
 - **이미지에 AArch64 fence가 들어간 NCCL:** 스위치와 링 모두에서 사용합니다. NVIDIA/nccl#2393의 수정으로, NCCL 릴리스에는 아직 들어 있지 않습니다. 이것이 없으면 Arm의 프록시 스레드가 오류 없이 멈출 수 있습니다([RING](glm53/release/RING.md), 영어).
 - **노드 확인**은 배선에서 링이나 스위치의 노드를 찾아 확인하고 등록하므로(`glm53.nodes.conf`), `TOPOLOGY`, `SOCKET_IFNAME`, `IB_HCA`를 쓸 필요가 없습니다.
-- **Reasoning Control:** 사고 상한(응답 상한에 대한 비율), 중간 정리, 사고 종료 시 정리를 엔진 실행 중에 패널이나 `POST /v1/thinking`으로 바꿉니다([CONFIG](glm53/release/CONFIG.md), 영어).
+- **Reasoning Control:** 사고 상한(`max_tokens`에 대한 비율), 중간 정리, 사고 종료 시 정리를 엔진 실행 중에 패널이나 `POST /v1/thinking`으로 바꿉니다([CONFIG](glm53/release/CONFIG.md), 영어).
 - **여러 대화를 동시에:** `MULTI`(1–4)가 이제 MTP 레이어에서도 동작합니다. 실행 중에 패널이나 `POST /v1/schedule`로 prefill과 decode의 GPU 배분을 정할 수 있고, 짧은 프롬프트를 먼저 처리할 수 있습니다.
 - **Byte Resume**(기본값 켜짐): 모델이 토크나이저와 다른 위치에서 텍스트를 자르면, 다음 턴의 프롬프트에서 같은 바이트가 다른 토큰 ID가 됩니다. 이제 캐시는 나머지를 다시 계산하지 않고 그 위치를 넘어 이어 갑니다.
 - **패널:** 엔진 설정 화면, 가중치 위치와 그 확인([ WEIGHTS ]), 시작 흐름, 원 위의 KV 풀, 각 노드의 온도.
@@ -83,21 +83,22 @@ GLM-5.3은 토큰마다 레이어당 256개의 routed expert 가운데 8개를 �
 
 | 항목 | 저장소 | 크기 | 용도 |
 |---|---|---|---|
-| 8대용 체크포인트: 모든 가중치(routed expert는 4비트) | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | **8대에서 필수**. 4대에서도 4대용 체크포인트 대신 쓸 수 있으며 4비트 뱅크도 겸합니다 |
-| 4대용 체크포인트: 사용 빈도가 낮은 절반의 routed expert를 3비트로 | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | **4대에서 필수**(8대용 체크포인트를 쓸 때는 불필요) |
+| Base 가중치: routed expert를 뺀 전부 | [fiore-lab/GLM-5.3-EXL3-Base](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Base) | 21.2 GB | **모든 시작에 필수**(4대든 8대든 같습니다) |
 | 전문가 뱅크 2비트 | [fiore-lab/GLM-5.3-EXL3-Experts-2bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-2bit) | 187.3 GB | 선택: 2비트 expert를 쓸 때 |
 | 전문가 뱅크 3비트 | [fiore-lab/GLM-5.3-EXL3-Experts-3bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-3bit) | 277.9 GB | **모든 시작에 필수** |
 | 전문가 뱅크 4비트 | [fiore-lab/GLM-5.3-EXL3-Experts-4bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-4bit) | 368.5 GB | 선택: 4비트 expert를 쓸 때(8대용 체크포인트가 있으면 불필요) |
 | 전문가 뱅크 5비트 | [fiore-lab/GLM-5.3-EXL3-Experts-5bit](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Experts-5bit) | 459.1 GB | 선택: 5비트 expert를 쓸 때 |
+| 8대용 체크포인트: 모든 가중치(routed expert는 4비트) | [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) | 390 GB | 선택: 시작에는 필요 없습니다. `WEIGHTS`로 지정하면 그대로 쓸 수 있고 4비트 뱅크도 겸합니다 |
+| 4대용 체크포인트: 모든 가중치(사용 빈도가 낮은 절반의 routed expert는 3비트) | [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks) | 344.6 GB | 선택: 시작에는 필요 없습니다. `WEIGHTS`로 지정하면 그대로 쓸 수 있습니다 |
 
 뱅크는 19,200개의 routed expert를 하나의 폭으로 모은 것입니다. 엔진은 expert마다 계획에서 정한 폭의 뱅크에서
-불러옵니다. **모든 시작에는 노드 수에 맞는 체크포인트와 3비트 뱅크가 필요하며, 다른 뱅크는 사용하려는 폭만 내려받으면 됩니다**(패널은 모든 노드에 갖춰진 폭만 고르게 합니다).
-4대라면 4대용 체크포인트와 3비트 뱅크로, 합계 622.5 GB입니다. 모든 노드에 같은 파일을 같은 경로에 둡니다. 한 대에서
+불러옵니다. **모든 시작에는 Base 가중치와 3비트 뱅크가 필요하며(4대든 8대든 합계 299.1 GB), 다른 뱅크는 사용하려는 폭만 내려받으면 됩니다**(패널은 모든 노드에 갖춰진 폭만 고르게 합니다).
+모든 노드에 같은 파일을 같은 경로에 둡니다. 한 대에서
 내려받아 다른 노드로 복사합니다(`python3 -m venv`에는 `python3-venv` 패키지가 필요합니다). 예:
 
 ```sh
 python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
-~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks --local-dir ~/models/GLM-5.3-EXL3-4x-DGX-Sparks
+~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-Base --local-dir ~/models/GLM-5.3-EXL3-Base
 ~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-Experts-3bit --local-dir ~/models/GLM-5.3-EXL3-Experts-3bit
 ```
 
@@ -107,7 +108,7 @@ python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
 ## 가중치 직접 만들기
 
 가중치는 코드처럼 읽을 수 없습니다. 특정 상황에서만 다르게 동작하도록 손댄 가중치도 겉보기에는 다른 가중치와 같으므로, 만들어진
-과정을 확인할 수 없는 가중치에 의존하고 싶지 않을 수 있습니다. Fiore-lab의 가중치에 의존할 필요는 없습니다. 이 레시피가 읽는 모든 가중치 파일(8대용·4대용 체크포인트와
+과정을 확인할 수 없는 가중치에 의존하고 싶지 않을 수 있습니다. Fiore-lab의 가중치에 의존할 필요는 없습니다. 이 레시피가 읽는 모든 가중치 파일(Base 가중치, 8대용·4대용 체크포인트와
 2·3·4·5비트 expert 뱅크)은 Z.AI의 공식 BF16 체크포인트([zai-org/GLM-5.3-BF16](https://huggingface.co/zai-org/GLM-5.3-BF16))에서
 [glm53/weights](glm53/weights/README.md)(영어)의 도구로 만들 수 있으며, 절차·하드웨어·실측 시간이 그곳에 있습니다. 직접 만든 파일은
 Fiore-lab의 것과 구조가 같고 같은 방식으로 로드됩니다.
@@ -118,7 +119,7 @@ Fiore-lab의 것과 구조가 같고 같은 방식으로 로드됩니다.
 - 이미지를 쓰는 경우: 각 노드에 NVIDIA 드라이버 580 이상(이미지는 호스트의 드라이버를 씁니다), Docker와 NVIDIA Container Toolkit(DGX OS에는 둘 다 있습니다), `python3`. 시작 전에 각 노드에 약 115 GiB의 여유 메모리.
 - 대신 아카이브를 쓰는 경우: DGX OS(Ubuntu 24.04), NVIDIA 드라이버 580 이상, cuBLAS 13. 모든 노드에 NCCL 2.30.7. NVIDIA의 `nvidia-nccl-cu13` wheel을 pip으로 풀어 놓은 것입니다(`packaging/RUNTIME.md`).
 - 아카이브에서는 AArch64 fence가 들어간 NCCL을 스위치에서는 권장하고 링에서는 필수로 합니다. NVIDIA의 wheel에는 없습니다([RING](glm53/release/RING.md), 영어). 이미지에는 들어 있습니다.
-- 노드 수에 맞는 Fiore-lab의 EXL3 체크포인트(Hugging Face). 모든 노드의 같은 경로에 둡니다. 8대는 [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks)(390 GB), 4대는 [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks)(344.6 GB)입니다. 4대용 체크포인트는 레이어 3부터 77까지의 routed expert 가운데 사용 빈도가 낮은 절반을 3비트, 나머지를 4비트로 담고 있으며, 그 밖에는 8대용 체크포인트와 같습니다.
+- Fiore-lab의 EXL3 Base 가중치(Hugging Face). 모든 노드의 같은 경로에 둡니다. [fiore-lab/GLM-5.3-EXL3-Base](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-Base)(21.2 GB)이며 4대든 8대든 같습니다. 전체 체크포인트, [fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks)(390 GB)나 [fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks](https://huggingface.co/fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks)(344.6 GB)를 대신 쓸 수도 있지만, 시작할 때 그 routed expert는 읽지 않습니다.
 - 모든 가중치 파일은 Fiore-lab의 파일 없이 Z.AI의 공식 BF16 체크포인트에서 직접 만들 수도 있습니다([glm53/weights](glm53/weights/README.md), 영어).
 - 3비트 뱅크(277.9 GB). 모든 노드의 같은 경로에 둡니다. 모든 시작에 필요합니다. 다른 뱅크는 사용하는 폭만 있으면 됩니다(8대용 체크포인트를 4비트 뱅크로 쓸 수 있습니다. 4비트만으로는 컨텍스트 길이가 짧아집니다).
 - 런처와 로그 보관 프로세스를 위한 각 노드의 `python3`.
@@ -139,11 +140,11 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-la
 
 ## Drafter
 
-- `mtp`(기본값): 체크포인트 자체의 MTP 레이어로, GLM-5.3 가중치의 일부입니다. decode 속도는 드래프트를 쓰지 않을 때의 약 2배이며, prefill 속도는 같습니다.
+- `mtp`(기본값): 가중치 안의 MTP 레이어로, GLM-5.3 가중치의 일부입니다. decode 속도는 드래프트를 쓰지 않을 때의 약 2배이며, prefill 속도는 같습니다.
 - `dflash2`: incoai/GLM-5.3-DFlash2. **라이선스 때문에 이 저장소에도 아카이브에도 포함하지 않았습니다**. 모델 카드에는 CC BY-NC-ND 4.0(비상업적 이용, 변경 금지), 연구 및 평가용이라고 적혀 있으며, 상업용 라이선스는 Inco AI가 제공합니다. 그 라이선스의 범위 안에서 사용한다면 [packaging/RUNTIME.md](packaging/RUNTIME.md#using-dflash2)의 "Using DFlash2"(영어)를 따르세요. 고정한 리비전으로 한 번만 내려받아 모든 노드의 같은 경로에 복사하고, 복사본을 확인한 다음 `DRAFTER_KIND=dflash2`와 `DRAFTER`를 설정합니다. 엔진은 시작할 때 이를 메모리에서 4비트로 양자화하며, 디스크에는 아무것도 쓰지 않습니다. decode는 더 빨라집니다("속도" 참고).
 - `none`: 드래프트를 쓰지 않습니다.
 
-`glm53.conf`의 `DRAFTER_KIND`로 하나를 고릅니다. 시작 화면이나 `./tf-glm53 -d KIND start`(또는 `engine-up`)로 그 한 번의 시작에만 다른 것을 고를 수도 있습니다.
+`glm53.conf`의 `DRAFTER_KIND`로 하나를 고릅니다. 시작 화면에서 고르면 거기에 기록합니다. `./tf-glm53 -d KIND start`(또는 `engine-up`)는 그 한 번의 시작에만 고릅니다.
 
 ## 속도
 

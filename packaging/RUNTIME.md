@@ -2,7 +2,7 @@ English | [日本語](RUNTIME.ja.md) | [简体中文](RUNTIME.zh-CN.md)
 
 # Running full GLM-5.3 from this archive
 
-First time? `QUICKSTART.md` takes you from the image to a running engine in one line. The checkpoint and the 3-bit bank
+First time? `QUICKSTART.md` takes you from the image to a running engine in one line. The Base weights and the 3-bit bank
 are always needed, and a start loads every expert at 3 bits unless you choose otherwise.
 
 This archive serves full GLM-5.3 (`glm_moe_dsa`, 755B) on four or eight NVIDIA DGX Spark systems, one rank per GB10,
@@ -44,13 +44,13 @@ containers").
 - `libibverbs.so.1` and one RoCE v2 network between the systems (for four nodes, one 100 Gb/s port a node is enough), or
   four nodes cabled as a ring (`RING.md`); every node, the first included, reachable from the first over ssh without a
   password at its address in `NODES`, its host key already known (`QUICKSTART.md`, section 1).
-- Disk, at the same path on every node (below): the checkpoint, 390 GB (363 GiB) for eight nodes, 344.6 GB (321 GiB)
-  for four; and the 3-bit expert bank, 277.9 GB, which every start needs.
+- Disk, at the same path on every node (below): the Base weights, 21.2 GB (19.8 GiB), and the 3-bit expert bank, 277.9 GB:
+  299.1 GB on four nodes and on eight, which every start needs.
 - Eight nodes: 112 GiB of memory available on every node before the start (115 with DFlash2), as `free -g` shows it:
   the ranks use about 108 GiB (111 with DFlash2) with `CONTEXT_LENGTH` 819,200 and `KV_SIZE` 1,638,400. Each
-  100,000 positions of `KV_SIZE` fewer need 2.7 GiB less. `tf-glm53 check` refuses a node with less. With the 4-bit KV
+  100,000 positions of `KV_SIZE` fewer need 2.55 GiB less (1.73 with the 4-bit KV cache). `tf-glm53 check` refuses a node with less. With the 4-bit KV
   cache (`KV=fp4`) eight nodes take `CONTEXT_LENGTH` 1,048,576 and `KV_SIZE` 2,097,152: the ranks used about 94 GiB
-  (measured, with a prompt of 1,018,993 tokens); check's estimate is for the 8-bit cache, so set `NEED_GB=100` there.
+  (measured, with a prompt of 1,018,993 tokens); the default `NEED_GB` is for the 8-bit cache, so set `NEED_GB=100` there.
 - Four nodes: memory sized for this server alone (`T4.md`); with DFlash2 the lowest free memory measured was about
   3.2 GiB a node, at 512K (at `ROWS` 16,384; the default is now 8,192).
 - `python3` on every node, for the log keeper (DGX OS has it), with the archive and with the image alike.
@@ -72,28 +72,31 @@ source (NVIDIA's DGX Spark playbook "NCCL for Two Sparks", https://build.nvidia.
 `NCCL_LIB` to it. On a switch the wheel runs, but the build with the AArch64 fence is recommended: without the fence a
 proxy thread on Arm can hang with no error (`RING.md`, "The fenced NCCL"). A ring requires that build.
 
-The checkpoint and the 3-bit bank are both needed; the bank is under "The control panel", below. The checkpoint: Fiore-lab's EXL3 checkpoint for the number of nodes on Hugging Face,
-`fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks` for eight nodes or `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks` for four. Download it
-once with the Hugging Face CLI (`python3 -m venv` needs the `python3-venv` package), then copy it to the other nodes
+The Base weights and the 3-bit bank are both needed; the bank is under "The control panel", below. The Base weights: `fiore-lab/GLM-5.3-EXL3-Base` on Hugging Face, the same on four nodes and on eight:
+everything but the routed experts, which a start reads from the banks. Download them
+once with the Hugging Face CLI (`python3 -m venv` needs the `python3-venv` package), then copy them to the other nodes
 over the RoCE network. For eight nodes:
 
 ```sh
 python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
-D=~/models/GLM-5.3-EXL3-8x-DGX-Sparks
-~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks --local-dir $D
+D=~/models/GLM-5.3-EXL3-Base
+~/hf-cli/bin/hf download fiore-lab/GLM-5.3-EXL3-Base --local-dir $D
 for n in NODE2 NODE3 NODE4 NODE5 NODE6 NODE7 NODE8; do    # the other seven addresses in NODES
   rsync -a --mkpath -e "ssh -c aes128-gcm@openssh.com" $D/ $n:$D/ &
 done; wait
 ```
 
-For four nodes, `T4.md` gives the same commands with the four-node checkpoint and the other three nodes.
+For four nodes, the same commands with the other three nodes (`T4.md`).
 
-To check the copies, run `cd ~/models/GLM-5.3-EXL3-8x-DGX-Sparks && sha256sum -c --quiet SHA256SUMS` on every
+To check the copies, run `cd ~/models/GLM-5.3-EXL3-Base && sha256sum -c --quiet SHA256SUMS` on every
 node: a few minutes each, silent when every file matches (or, once this directory is deployed, `./tf-glm53 verify`
 does it on every node at once). `WEIGHTS` in `glm53.conf` names the directory
-(`~/models/GLM-5.3-EXL3-8x-DGX-Sparks` here).
+(`~/models/GLM-5.3-EXL3-Base` here).
 
-Every weight file, the checkpoints and the expert banks, can also be made from Z.AI's official BF16 checkpoint
+The full checkpoints, `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks` (390 GB, 363 GiB) and `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks` (344.6 GB, 321 GiB), hold the routed experts as well, and a start does
+not read those. If you have one, name it with `WEIGHTS` and it works as it is.
+
+Every weight file, the Base weights, the checkpoints and the expert banks, can also be made from Z.AI's official BF16 checkpoint
 without any of Fiore-lab's files, on GPU hosts: `glm53/weights/README.md` in the source repository
 (<https://github.com/fiore-labo/ExpertAtlas-GLM5.3/tree/main/glm53/weights>; the archive does not carry that directory).
 
@@ -131,7 +134,7 @@ these lines; the network names, NCCL, the drafter and the server are set the sam
 | Setting | `glm53.conf.example` (eight nodes) | `glm53.t4.conf.example` (four nodes) |
 |---|---|---|
 | `NODES` | eight addresses, rank 0 first | four addresses, rank 0 first |
-| `WEIGHTS` | `~/models/GLM-5.3-EXL3-8x-DGX-Sparks` | `~/models/GLM-5.3-EXL3-4x-DGX-Sparks` |
+| `WEIGHTS` | `~/models/GLM-5.3-EXL3-Base` | `~/models/GLM-5.3-EXL3-Base` |
 | `KV` | `fp8` (the default) | `fp4` |
 | `CONTEXT_LENGTH` | 819200 | 737280 |
 | `KV_SIZE` | 1638400 | 837280 |
@@ -165,12 +168,12 @@ counts both. From another machine, send the request to `http://FIRST-NODE:PORT` 
 ## Drafters
 
 The engine drafts a few tokens a round and the model checks them; the reply is the model's own choice in every case.
-`DRAFTER_KIND` in `glm53.conf` picks what drafts. The panel's launch screen picks it for each start, and `-d KIND`
+`DRAFTER_KIND` in `glm53.conf` picks what drafts. The panel's launch screen picks it too and writes it there, and `-d KIND`
 before `start` or `engine-up` for one start without editing the file (`./tf-glm53 -d dflash2 start`,
 `./tf-glm53 -d mtp engine-up`); `./tf-glm53 status` shows what the last start used:
 
-- `mtp` (default): the checkpoint's own MTP layer, part of the GLM-5.3 weights and under their license. It needs a
-  checkpoint that has the layer; `tf-glm53 check` refuses one without it. At most `MTP_K` drafts a round, 3 by default
+- `mtp` (default): the MTP layer in `WEIGHTS`, part of the GLM-5.3 weights and under their license. It needs
+  weights that have the layer; `tf-glm53 check` refuses one without it. At most `MTP_K` drafts a round, 3 by default
   (four were no faster than three); a round's drafts stop where the product of their probabilities falls under
   `TF_GLM53_MTP_CONF` (0.7 by default, 0 turns it off).
 - `dflash2`: incoai/GLM-5.3-DFlash2, in the directory `DRAFTER`. **It is not included in this archive or the
@@ -186,7 +189,7 @@ before `start` or `engine-up` for one start without editing the file (`./tf-glm5
    drafter's weights and quantizes it to 4 bits in memory. Nothing is converted beforehand and nothing is written to
    disk.
 2. Download it once on the first node, at the revision checked for this archive, with the Hugging Face CLI set up for
-   the checkpoint. The repository needs no account or token; its weights are one file, `model.safetensors`
+   the weights. The repository needs no account or token; its weights are one file, `model.safetensors`
    (4,918,859,112 bytes). Use a directory of its own (`--local-dir`), not the Hugging Face cache: the directory in
    `DRAFTER` must hold `config.json` and `model.safetensors` themselves.
 
@@ -223,7 +226,7 @@ before `start` or `engine-up` for one start without editing the file (`./tf-glm5
    DRAFTER=~/models/GLM-5.3-DFlash2
    ```
 
-   With `DRAFTER` set and `DRAFTER_KIND` left at `mtp`, DFlash2 is picked for one start on the launch screen or with
+   With `DRAFTER` set and `DRAFTER_KIND` left at `mtp`, DFlash2 is picked on the launch screen, which writes it to `DRAFTER_KIND`, or for one start with
    `./tf-glm53 -d dflash2 start`. While the engine is stopped the launcher reads the edit by itself.
    `MTP_K` is not used with DFlash2. On eight nodes every node needs 115 GiB available before the start instead of
    112 (What each node needs); `tf-glm53 check` counts it. The drafter's state of recent conversations
@@ -236,8 +239,8 @@ before `start` or `engine-up` for one start without editing the file (`./tf-glm5
    the request kept a round: 1 means no draft was kept. For coding prompts like those under Speed, DFlash2 kept 4.3
    to 5.0.
 
-To go back to the MTP layer, set `DRAFTER_KIND=mtp`, then `./tf-glm53 down` and start again; for one start, pick MTP
-on the launch screen or `./tf-glm53 -d mtp start`.
+To go back to the MTP layer, pick MTP on the launch screen, or set `DRAFTER_KIND=mtp`, then `./tf-glm53 down` and start again; for one
+start, `./tf-glm53 -d mtp start`.
 
 ## Conversations kept between requests
 
@@ -366,14 +369,15 @@ language, or Display > Language).
 - **A start** from the panel: the launcher checks every node (reachable, no engine or other GPU process, the plan
   fits its memory), writes the widths as an expert plan (`launch/plan-<time>.json`), copies it to every node and runs
   `tf-glm53 engine-up` with it (`tf-glm53 start` makes the same start with the last start's plan); the page shows
-  each layer as it loads. Every routed expert then comes from the banks; the checkpoint gives the other weights.
-- **The drafter** is chosen on the launch screen for each start, beside the KV format: MTP (the checkpoint's layer),
+  each layer as it loads. Every routed expert then comes from the banks; `WEIGHTS` gives the other weights.
+- **The drafter** is chosen on the launch screen, beside the KV format: MTP (the layer in `WEIGHTS`),
   DFlash2 (offered only when `DRAFTER` in `glm53.conf` holds its model on every node, "Using DFlash2" above) or none;
-  `DRAFTER_KIND` is the default. Each has its own memory: DFlash2 leaves about 4 GiB less a node than MTP, so the
+  the choice is written to `DRAFTER_KIND`. Each has its own memory: DFlash2 leaves about 4 GiB less a node than MTP, so the
   plan is made again for the drafter picked.
 - **The context length** of a start (Context length on the launch screen) is chosen there too: 128K, 256K, 512K,
   `CONTEXT_LENGTH` or the longest that fits (at most 1,048,576 tokens); a length the plan's memory cannot hold is cut
-  to what fits.
+  to what fits. The choice goes into `glm53.conf`, the number the plan took at the start, and the next page opens on it;
+  until the panel has written one it opens on the longest.
 - **What each node keeps for the OS** (`RESERVE_GB`, 4 GiB by default, 2 to 32) is chosen there too. The panel does not
   ask for a KV size: the KV cache takes all the room the plan leaves (the context length for one request, the rest for
   earlier conversations), and the launch screen's KV rows (KV FP4 / KV FP8) show it in tokens. `tf-glm53 start` takes
@@ -383,11 +387,11 @@ language, or Display > Language).
 - **The nodes.** While the engine is stopped the workers' addresses can be changed on the launch screen; the first
   node stays. Check copies this directory to them (`tf-glm53 deploy`) and runs `tf-glm53 check` on the list; Save writes
   `glm53.nodes.conf` once that list passed, keeping the previous file beside it. `glm53.conf` is not touched.
-- **The weights.** The launch screen's [ WEIGHTS ] names the checkpoint, the banks and DFlash2's model; Check and save
+- **The weights.** The launch screen's [ WEIGHTS ] names the weights (`WEIGHTS`), the banks and DFlash2's model; Check and save
   writes them once every node has what they name (`WEIGHTS` and `DRAFTER` in `glm53.conf`, the banks' directories in
   `expert-plan/banks.json`).
-- **The engine settings screen** (the switch at the top right) changes the settings that need a restart, and offers
-  Save and restart (`PANEL-GUIDE.md`).
+- **The engine settings screen** (the switch at the top right) changes the settings that need a restart, each written as it is changed, and offers
+  Restart to apply (`PANEL-GUIDE.md`).
 - **Allocations and usage records.** The engine counts the experts each prompt row and each decoded token picks
   (`EXPERT_LIVE=1` in `glm53.conf`, the default; a start from the panel always counts). An engine started without the
   counts (`EXPERT_LIVE=0`) still shows the live panel with Stop, but no picks and no expert optimisation. A
@@ -587,7 +591,7 @@ node for every address in `NODES`.
 | `NG:` | What to do |
 |---|---|
 | `files` | `tf-glm53 deploy` again |
-| `weights` | the checkpoint is missing at `WEIGHTS`, or its file names, sizes or `config.json` differ from the first's; `tf-glm53 verify` checks the contents |
+| `weights` | the weights are missing at `WEIGHTS`, or their file names, sizes or `config.json` differ from the first's; `tf-glm53 verify` checks the contents |
 | `NCCL(...)` | NCCL is not at `NCCL_LIB` on that node (Before the first start) |
 | `cuBLAS-13` | install CUDA 13's cuBLAS (`libcublas-13-0`) |
 | `libibverbs` | install `libibverbs1` and `ibverbs-providers` |
@@ -615,7 +619,7 @@ When a start fails it stops every rank and says why (a start from the panel or `
   names on every node, and the nodes must reach each other there on any port (a ring: `RING.md`). `cannot listen on`: `PORT` is in use on that
   node. `PoolValuesDiffer`: the ranks were started with different pool settings and refuse to start; start them all
   with `tf-glm53` from one `glm53.conf`.
-- `not ready after N s`: a start takes about two and a half minutes with the checkpoint on a local NVMe drive; slower
+- `not ready after N s`: a start takes about two and a half minutes with the weights on a local NVMe drive; slower
   disks or network storage take longer: raise `READY_TIMEOUT`. A rendezvous that never completes waits too: check
   that `MASTER_PORT` is free on the first node.
 - `the smoke test failed`: the failed question shows the reply it got; rank 0's log shows the request.

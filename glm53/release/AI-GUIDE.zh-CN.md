@@ -10,12 +10,12 @@
 
 | 项目 | 内容 |
 |---|---|
-| 模型 | 完整大小的 GLM-5.3，由 Fiore-lab 在 Hugging Face 上发布的 EXL3 量化检查点 |
+| 模型 | 完整大小的 GLM-5.3，由 Fiore-lab 在 Hugging Face 上发布的 EXL3 量化权重 |
 | 节点 | 同一个 RoCE v2 网络上的 4 台或 8 台 DGX Spark（GB10），或不用交换机连成环的 4 台；2 台和 3 台的配置正在测试中，不支持其他配置 |
 | 上下文长度 | 两种节点数都最多 1,048,576 个 token。八节点：在 4 bit KV 缓存上（`KV=fp4`、`NEED_GB=100`）`KV_SIZE` 为 2,097,152，在 8 bit 上为 1,638,400。四节点：通过控制面板，70 % 的路由专家为 3 bit、30 % 为 4 bit（4 bit KV，`KV_SIZE` 1,049,088）；默认启动（所有路由专家为 3 bit）为 737,280。八个节点的 4 bit KV 缓存和四个节点通过控制面板的启动，各用一个约 1,019,000 个 token 的 prompt 测量。4 bit KV 缓存会损失一些精度（KL 0.0190 对 0.0156，`T4.zh-CN.md`）。示例附带的值是 819,200 和 737,280 |
 | API | OpenAI 兼容的聊天 API（`/v1/chat/completions`）和 Anthropic 的 Messages API（`/v1/messages`），默认在所有地址上（`0.0.0.0:8000`） |
 | 请求 | 默认一次运行一个，另有最多 32 个在队列中等待；`MULTI` 最多同时解码 4 个对话 |
-| 草稿模型 | MTP（检查点自身的层，默认）、DFlash2（可选，不包含，另有许可证）或不使用 |
+| 草稿模型 | MTP（权重中的层，默认）、DFlash2（可选，不包含，另有许可证）或不使用 |
 | 控制面板 | “Expert Atlas”：逐个专家的位宽（2/3/4/5 bit），一个网页；四个或八个节点 |
 | 分发 | 容器镜像（推荐）和包含相同文件的归档；都用于 Linux aarch64 |
 | 许可证 | 代码为 Apache-2.0；权重保留 GLM-5.3 License；DFlash2 保留其自身的许可证（CC BY-NC-ND 4.0） |
@@ -51,7 +51,7 @@
 - **prefill 与解码。** prompt 分块读取（prefill），然后逐个 token 生成回复（解码）。prefill 速度受计算限制，解码速度受内存带宽限制。
 - **草稿。** 每轮解码时，草稿模型提出几个 token，模型一步核对它们；只保留模型自己也会选择的 token，因此无论如何回复都是模型自己的。
 - **对话缓存。** KV 缓存是一个有 `KV_SIZE` 个位置（KV 大小）的池，以 256 个为一块，由所有对话共享：一个请求最多达到 `CONTEXT_LENGTH` 个位置（上下文长度），先前的对话保留在任何空闲的块中。请求从任一对话中已缓存的最长前缀处继续，开头相同的对话（同一个系统提示词）只持有一份共同的块。已缓存的块在复用前会与请求的 token 核对；只要有疑问，所有对话都会被丢弃，请求从头计算（“cold”），因此块绝不会被错误复用。
-- **专家。** GLM-5.3 在第 3 至 77 层每层有 256 个路由专家（共 19,200 个），每个 token 每层选 8 个。检查点以量化形式存放它们：八节点检查点全部为 4 bit，四节点检查点一半为 3 bit（使用最少的）、一半为 4 bit。启动时可以从专家 bank 以各自的位宽载入每个专家；没有计划时以 3 bit 载入所有专家。
+- **专家。** GLM-5.3 在第 3 至 77 层每层有 256 个路由专家（共 19,200 个），每个 token 每层选 8 个。启动时从专家 bank 以各自的位宽载入每个专家；没有计划时以 3 bit 载入所有专家。其他权重在 `fiore-lab/GLM-5.3-EXL3-Base` 中。完整检查点也以量化形式存放专家（八节点检查点全部为 4 bit，四节点检查点一半为 3 bit（使用最少的）、一半为 4 bit），但启动时不读取它们。
 - **Byte Resume。** 模型切分文本的方式可能与分词器不同，因此下一轮的 prompt 以不同的 token id 持有相同的字节。从第一个不同的 id 起，prompt 与保留的对话按字节比较，缓存越过该处继续（`TF_GLM53_BYTE_RESUME`，默认开启）。
 - **思考。** `max_tokens` 把它计算在内。默认情况下，思考最多可保留 prompt 在上下文长度中剩余部分的 90 %（`THINKING_SHARE`），`max_tokens` 较小时则以它为基准；接近该上限时，模型改写自己的思考，改写的内容在上下文中取代原来的思考，达到上限时引擎结束思考。该上限针对的是上下文中保留的内容，因此一次回复写出的思考可以更多。这些设置可在引擎运行时更改（`POST /v1/thinking`，面板的 [ REASONING CONTROL ]）。
 - **多个对话。** 设置 `MULTI` 后，最多这么多个对话（不超过 4 个）一起解码。它们运行期间，`POST /v1/schedule` 或面板设置 GPU 在 prefill 和解码之间的分配，短 prompt 可以优先。
@@ -62,7 +62,7 @@
 |---|---|---|
 | 节点 | 4 个或 8 个，由节点检查找到 | 4 个或 8 个，由节点检查登记（`glm53.nodes.conf`） |
 | 专家位宽 | 所有专家 3 bit（其他位宽用 `BITS`；`start`：上一次启动的计划） | 从 bank 中逐个专家选择（2、3、4、5 bit） |
-| 需要 | 始终需要检查点和 3 bit bank | 检查点（其非专家权重）、3 bit bank，以及所用位宽的 bank |
+| 需要 | 始终需要 Base 权重和 3 bit bank | Base 权重、3 bit bank，以及所用位宽的 bank |
 | 启动位置 | 命令行 | 网页（启动、停止、计划、实时视图、专家优化）；`./tf-glm53 start` 重复上一次启动的计划 |
 
 两者使用相同的 `glm53.conf`、相同的服务器和相同的 API。`./tf-glm53 up` 启动面板的启动器并输出面板的地址；引擎在那里启动。`./tf-glm53 down` 在两种方式下都停止引擎。
@@ -87,7 +87,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 
 1. 每个节点：DGX OS（Ubuntu 24.04）、NVIDIA 驱动 580 或更高版本、cuBLAS 13（`libcublas-13-0`）、`libibverbs`，节点在同一个 RoCE v2 网络上，第一个节点能通过无密码 ssh 访问每个节点，并已登记它们的 host key（`QUICKSTART.zh-CN.md` 第 1 节）。
 2. 每个节点上的 NCCL 2.30.7：`pip3 install --no-deps --target ~/nccl-2.30.7 nvidia-nccl-cu13==2.30.7`（pip 只解压库；不运行任何 Python）。在交换机上这样可以运行，但推荐使用带 AArch64 fence 的构建；环必须使用该构建（`RING.zh-CN.md`）。
-3. 检查点，在每个节点上放在相同路径下：`fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`（390 GB，八节点）或 `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`（344.6 GB，四节点）。用 Hugging Face CLI 下载一次，用 `rsync` 复制到其他节点，用 `./tf-glm53 verify` 校验。检查点也可以从官方 BF16 检查点制作（第 2 节，`glm53/weights/`）。
+3. Base 权重和 3 bit bank，在每个节点上放在相同路径下：`fiore-lab/GLM-5.3-EXL3-Base`（21.2 GB）和 `fiore-lab/GLM-5.3-EXL3-Experts-3bit`（277.9 GB），四节点和八节点都一样。用 Hugging Face CLI 下载一次，用 `rsync` 复制到其他节点，用 `./tf-glm53 verify` 校验。也可以用完整检查点（`fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`，390 GB，或 `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`，344.6 GB）代替 Base 权重。它们都可以从官方 BF16 检查点制作（第 2 节，`glm53/weights/`）。
 4. 在第一个节点上解压归档，运行 `sha256sum -c SHA256SUMS`，把对应的示例复制为 `glm53.conf`，设置 `NODES`、`SOCKET_IFNAME`、`IB_HCA`、`NCCL_LIB`、`WEIGHTS`。
 5. `./tf-glm53 deploy`（把目录复制到其他节点），然后，不用页面时运行 `./tf-glm53 start`（所有专家 3 bit：检查每个节点，启动各 rank，等待服务器，运行冒烟测试）；使用页面时运行 `./tf-glm53 up`（见下文）。从本地 NVMe 驱动器启动约需两分半钟。
 6. `./tf-glm53 down` 停止引擎（启动器运行时经由启动器）和每个 rank。
@@ -106,7 +106,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 | `TOPOLOGY` | `full`（交换机）、`ring4` 或 `auto`（每次 `check` 和 `./tf-glm53 up` 时根据连线判定；已知缺陷见 `CONFIG.zh-CN.md`） | `full` |
 | `SOCKET_IFNAME`、`IB_HCA`、`GID_INDEX` | 每个节点上该网络的接口和 RDMA 设备；GID 索引（空：自动选择） | 相同 |
 | `NCCL_LIB` | NCCL 2.30.7 的 `libnccl.so.2`，每个节点上路径相同 | 相同 |
-| `WEIGHTS` | 检查点的目录，每个节点上路径相同 | 8x / 4x 检查点 |
+| `WEIGHTS` | Base 权重或完整检查点的目录，每个节点上路径相同 | `~/models/GLM-5.3-EXL3-Base` |
 | `DRAFTER_KIND`、`MTP_K`、`DRAFTER` | 草稿模型（`mtp`、`dflash2`、`none`）、MTP 每轮的草稿数（3）、DFlash2 的目录 | `mtp`、3、空 |
 | `NAME`、`HOST`、`PORT` | API 中的模型名称、监听地址和端口 | `glm-5.3`、`0.0.0.0`、8000 |
 | `METRICS_LISTEN` | 额外的只读地址，只响应 `/metrics`、`/health` 和 `/v1/experts/usage` | 关闭 |
@@ -115,7 +115,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 | `KV_SIZE` | KV 大小：整个 KV 缓存的位置数，所有对话共享一个池；请求未使用的部分保留先前的对话（至少为 `CONTEXT_LENGTH` + 512） | 1,638,400 / 837,280 |
 | `KV` | KV 缓存的格式，`fp8` 或 `fp4` | `fp8` / `fp4` |
 | `DCP`、`ROWS`、`SP_PARTS` | 解码上下文并行、prompt 分块的行数、每块的序列并行部分数 | 2、8,192、4 |
-| `NEED_GB` | 启动前节点必须可用的内存（随 KV 大小变化，使用 DFlash2 时多 3；计算方法见 `CONFIG.zh-CN.md`） | 112（默认）/ 133（要求 112 GiB） |
+| `NEED_GB` | 启动前节点必须可用的内存（随 KV 大小变化，使用 DFlash2 时多 3；计算方法见 `CONFIG.zh-CN.md`） | 112（默认）/ 115（要求 101 GiB） |
 | `MASTER_PORT`、`READY_TIMEOUT` | 各 rank 的 rendezvous 端口；等待服务器的秒数 | 29551、900 |
 | `RUNTIME`、`IMAGE` | rank 的运行方式：`host`（默认，从本目录）或 `docker`（各在 `IMAGE` 的容器中） | `host`、空 |
 | `MULTI`、`MULTI_WAIT` | 一起解码的对话数（1 .. 4）；请求可等待在它们旁边腾出空间的秒数 | `0`（逐个处理）、600 |
@@ -226,7 +226,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 
 | 症状 | 可能的原因 | 要做什么 |
 |---|---|---|
-| `check` 输出 `NG: files` / `weights` | 某个节点上的目录或检查点不同 | `./tf-glm53 deploy`；`./tf-glm53 verify` |
+| `check` 输出 `NG: files` / `weights` | 某个节点上的目录或权重不同 | `./tf-glm53 deploy`；`./tf-glm53 verify` |
 | `NG: NCCL(...)`、`cuBLAS-13`、`libibverbs` | 该节点上缺少某个库 | 安装它（`RUNTIME.zh-CN.md` 的“出现问题时”） |
 | `NG: RoCE-v2-GID` 或 RDMA 设备 | 该端口没有 RoCE v2 IPv4 条目，或 `IB_HCA` 错误 | 为端口配置地址或设置 `GID_INDEX`；`rdma link`、`ibdev2netdev` |
 | `NG: GPU-busy` | 其他进程占用 GPU | 停止它（`nvidia-smi`） |
@@ -248,7 +248,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 
 - `max_tokens` 也计入思考 token。未指定的请求得到 `CONTEXT_LENGTH` 的 70 %。思考的上限为回答保留其余部分，因此 `max_tokens` 较小时回答较短；`THINKING_SHARE=0` 时，回复可能在思考中结束。
 - 无论使用哪种草稿模型，引擎的启动行都显示 `drafts: on`；`tf-glm53 status` 给出正在使用的草稿模型。
-- 每次启动都需要一个检查点和 3 bit bank；控制面板可以把任一检查点与 bank 一起使用。
+- 每次启动都需要 Base 权重（或完整检查点）和 3 bit bank。
 - 重排的测量相对于全 4 bit 模型，而不是 BF16 模型；`ATLAS-TESTS.zh-CN.md` 有具体说明。
 - 在聊天模板的用户轮次内部，模型对用户自己文本的预测很差。这涉及对用户文本的预测（如 prompt 上的 KL 散度），与回复无关。`ATLAS-TESTS.zh-CN.md` 中的测量对 prompt 的 token 评分时不含模板的开头（“测量方法”）。
 - 池缓存要求 `KV_SIZE` 至少为 `CONTEXT_LENGTH` + 512。

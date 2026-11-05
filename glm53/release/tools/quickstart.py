@@ -18,7 +18,7 @@ import argparse, base64, difflib, json, os, re, socket, subprocess, sys, time, u
 LAYERS, EXPERTS = 75, 256
 DEFAULT_BITS = 3
 GUIDE = ("QUICKSTART.md", "AGENT-API.md", "AI-GUIDE.md")
-CHECKPOINT_REPO = {4: "fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks", 8: "fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks"}
+CHECKPOINT_REPO = "fiore-lab/GLM-5.3-EXL3-Base"  # what a start reads from a checkpoint, on any node count: the routed experts come from the banks
 BANK_OPTIONS = {f"BANK_{w}": w for w in (2, 3, 4, 5)}
 # this script's own options; the rest are the settings' keys
 OWN_OPTIONS = ("WEIGHTS", "DRAFTER", "BITS", "ALLOC", "NODES", *BANK_OPTIONS)
@@ -317,7 +317,7 @@ class Quick:
         asked_bits = int(self.opts["BITS"]) if "BITS" in self.opts else None
         problems, optional = [], []
         if rows.get("weights", {}).get("state") == "fail":
-            problems.append(("checkpoint (always needed)", self.home(ck), CHECKPOINT_REPO.get(self.world, "the checkpoint"), lacking("weights")))
+            problems.append(("checkpoint (always needed)", self.home(ck), CHECKPOINT_REPO, lacking("weights")))
         for b in w["banks"]:
             state = rows.get("bank:" + b["id"], {}).get("state")
             if b["bits"] == DEFAULT_BITS and state != "ok":

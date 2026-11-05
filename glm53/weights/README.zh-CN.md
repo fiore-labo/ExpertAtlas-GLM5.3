@@ -2,7 +2,7 @@
 
 # 自己制作权重
 
-本方案加载的每一个权重文件，都可以用本目录中的工具，从 Z.AI 官方的 GLM-5.3 检查点自行制作：八节点和四节点检查点，以及
+本方案加载的每一个权重文件，都可以用本目录中的工具，从 Z.AI 官方的 GLM-5.3 检查点自行制作：Base 权重、八节点和四节点检查点，以及
 Expert Atlas 的 2、3、4、5 位专家库。你不需要 Fiore-lab 在 Hugging Face 上发布的任何文件。
 
 为什么这很重要：权重不能像代码那样阅读。被改动过、在某些情况下表现不同的权重，看起来和其他权重没有区别。Fiore-lab 制作权重时
@@ -27,12 +27,13 @@ Expert Atlas 的 2、3、4、5 位专家库。你不需要 Fiore-lab 在 Hugging
 | 内容 | 文件 | 大小 | 用途 |
 |---|---|---|---|
 | 4 位专家库 | `experts-layer-003` … `077.safetensors` | 368.5 GB | 八节点检查点的路由专家；Expert Atlas 的 4 位 |
-| 八节点检查点 | 4 位专家库的文件、`nonexperts-5bit.safetensors`、`unquantized-bf16.safetensors`、三个 `mtp-layer-78-*` 文件、官方小文件、`config.json`、索引、`SHA256SUMS` | 389.9 GB | 八节点上的每次启动（四节点上也可代替四节点检查点）：路由专家以外的权重 |
+| 八节点检查点 | 4 位专家库的文件、`nonexperts-5bit.safetensors`、`unquantized-bf16.safetensors`、三个 `mtp-layer-78-*` 文件、官方小文件、`config.json`、索引、`SHA256SUMS` | 389.9 GB | Base 权重由它制作。启动不需要它；用 `WEIGHTS` 指定即可直接使用 |
+| Base 权重 | 该检查点去掉第 3 到 77 层的路由专家：其他权重、官方小文件、`config.json`、索引、`SHA256SUMS` | 21.2 GB | 每次启动：路由专家以外的权重 |
 | 3 位专家库 | `experts-layer-*.safetensors` | 277.9 GB | 每次启动：Expert Atlas 的 3 位，默认位宽；四节点检查点 |
 | 2 位 / 5 位专家库 | `experts-layer-*.safetensors` | 187.3 / 459.1 GB | Expert Atlas 的 2 位和 5 位（可选） |
-| 四节点检查点 | 把一半路由专家换成 3 位的八节点检查点 | 344.6 GB | 四节点上的每次启动：路由专家以外的权重 |
+| 四节点检查点 | 把一半路由专家换成 3 位的八节点检查点 | 344.6 GB | 可选：启动不需要它；用 `WEIGHTS` 指定即可直接使用 |
 
-每次启动都需要一个检查点和 3 位专家库：八节点用八节点检查点，四节点用四节点检查点（由八节点检查点和 3 位专家库制作）或八节点检查点。其他专家库只在使用相应位宽时才需要（八节点检查点的目录可以直接作为 4 位专家库）。
+每次启动都需要 Base 权重和 3 位专家库（四节点和八节点都一样）。四节点检查点（由八节点检查点和 3 位专家库制作）是可选的。其他专家库只在使用相应位宽时才需要（八节点检查点的目录可以直接作为 4 位专家库）。
 
 ## 与 Fiore-lab 文件的比较
 
@@ -145,7 +146,16 @@ $P assemble.py checkpoint --official $BF16 --experts /data/banks/4bit --mtp-qten
 `lm_head`、norm、路由器、`kv_b_proj`、indexer 的一部分、MTP 层的 `eh_proj`）按原样从官方文件复制。命令最后会核对索引与文件，并写出
 `SHA256SUMS`。
 
-### 6. 组装四节点检查点（仅四节点运行时需要）
+接着组装启动时与专家库一起读取的 Base 权重：
+
+```sh
+$P assemble.py base --checkpoint /data/GLM-5.3-8x --out /data/GLM-5.3-Base
+```
+
+同样是硬链接（加 `--copy` 改为复制）。它取第 3 到 77 层路由专家以外的全部文件，写出说明专家在专家库中的 `config.json`、不含这些专家的索引和 `SHA256SUMS`。
+无论来自 Fiore-lab 的检查点还是你自己制作的检查点，同一条命令都得到相同的布局。
+
+### 6. 组装四节点检查点（可选）
 
 四节点检查点把一半的路由专家存为 3 位。哪一半由一个清单 `q3-selection.json` 决定（对第 3 到 77 层为 `{"层号": [专家, ...]}`）。
 可以使用 Fiore-lab 的清单（只包含专家编号：在日语和英语的智能体工作、编程、Linux 操作和服务器安全中使用最少的一半；它不能改变
@@ -173,7 +183,7 @@ $P bank_manifest.py banks banks.json /data/banks/3bit /data/banks/4bit      # �
 
 ### 8. 使用
 
-把检查点复制到每个节点的同一路径，并把 `glm53.conf` 的 `WEIGHTS` 指向它，把专家库复制到 `banks.json` 中的目录，然后：
+把 Base 权重复制到每个节点的同一路径，并把 `glm53.conf` 的 `WEIGHTS` 指向它，把专家库复制到 `banks.json` 中的目录，然后：
 
 ```sh
 ./tf-glm53 deploy
@@ -191,7 +201,7 @@ $P bank_manifest.py banks banks.json /data/banks/3bit /data/banks/4bit      # �
 | `patch_experts.py` | 修改 ExLlamaV3 的转换器，只量化路由专家，其他线性层取自 `full4` |
 | `patch_nonexperts.py` | 修改它只量化其他线性层，路由专家取自 `full4` |
 | `convert_mtp_linears.py` | 不使用校准数据，把 MTP 层的线性层量化为 5 位（mul1） |
-| `assemble.py` | 组装专家库、八节点和四节点检查点，`check` 检查一个检查点目录 |
+| `assemble.py` | 组装专家库、八节点和四节点检查点、Base 权重，`check` 检查一个检查点目录 |
 | `bank_manifest.py` | 专家库清单（`make`、`check`）和专家库列表（`banks`） |
 
 你制作的权重派生自 GLM-5.3，适用 GLM-5.3 License（检查点中附带的官方 `LICENSE`）。

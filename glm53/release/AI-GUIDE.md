@@ -20,12 +20,12 @@ server needs no Python at run time.
 
 | Fact | Value |
 |---|---|
-| Model | GLM-5.3, full size, EXL3-quantized checkpoints published by Fiore-lab on Hugging Face |
+| Model | GLM-5.3, full size, EXL3-quantized weights published by Fiore-lab on Hugging Face |
 | Nodes | 4 or 8 DGX Spark (GB10) on one RoCE v2 network, or 4 cabled as a ring without a switch; 2- and 3-node forms are being tested, and nothing else is supported |
 | Context length | up to 1,048,576 tokens on both node counts. Eight nodes: `KV_SIZE` 2,097,152 with it on the 4-bit KV cache (`KV=fp4`, `NEED_GB=100`), 1,638,400 on the 8-bit one. Four nodes: from the control panel with 70 % of the routed experts at 3 bits and 30 % at 4 (4-bit KV, `KV_SIZE` 1,049,088); a default start, every routed expert at 3 bits, 737,280. Eight nodes on the 4-bit KV cache and four nodes from the control panel were each measured with one prompt of about 1,019,000 tokens. The 4-bit KV cache costs some accuracy (KL 0.0190 against 0.0156, `T4.md`). The examples ship 819,200 and 737,280 |
 | API | OpenAI-compatible chat API (`/v1/chat/completions`) and Anthropic's Messages API (`/v1/messages`) on every address (`0.0.0.0:8000`) by default |
 | Requests | one runs at a time by default, up to 32 more waiting in a queue; `MULTI` decodes up to 4 conversations together |
-| Drafters | MTP (the checkpoint's own layer, default), DFlash2 (optional, not included, separate licence), or none |
+| Drafters | MTP (the layer in the weights, default), DFlash2 (optional, not included, separate licence), or none |
 | Control panel | "Expert Atlas": per-expert bit widths (2/3/4/5 bits), a web page; four or eight nodes |
 | Distribution | a container image (recommended) and an archive with the same files; both for Linux aarch64 |
 | Licence | code Apache-2.0; the weights keep the GLM-5.3 License; DFlash2 keeps its own (CC BY-NC-ND 4.0) |
@@ -75,9 +75,9 @@ GPU hosts: `glm53/weights/README.md` in the source repository
   Cached blocks are checked against the request's tokens before reuse; on any doubt every conversation is dropped and
   the request is computed from the start ("cold"), so a block is never reused wrongly.
 - **Experts.** GLM-5.3 has 256 routed experts in each of layers 3 to 77 (19,200 in all) and picks 8 per layer for
-  every token. The checkpoints store them quantized: the eight-node checkpoint all at 4 bits, the four-node checkpoint
-  half at 3 bits (the least used) and half at 4 bits. A start can load each expert at its own width from the expert
-  banks, and with no plan loads every expert at 3 bits.
+  every token. A start loads each expert at its own width from the expert banks, and with no plan every expert at 3 bits;
+  `fiore-lab/GLM-5.3-EXL3-Base` holds the other weights. The full checkpoints store the experts as well, the eight-node one all at 4 bits,
+  the four-node one half at 3 bits (the least used) and half at 4 bits; a start does not read those.
 - **Byte Resume.** A model may cut a text differently from the tokenizer, so the next turn's prompt holds the same bytes
   under other token ids. Past the first id that differs, the prompt is compared with the kept conversations in bytes,
   and the cache resumes past the place (`TF_GLM53_BYTE_RESUME`, on by default).
@@ -95,7 +95,7 @@ GPU hosts: `glm53/weights/README.md` in the source repository
 |---|---|---|
 | Nodes | 4 or 8, found by the node check | 4 or 8, registered by the node check (`glm53.nodes.conf`) |
 | Expert widths | every expert at 3 bits (`BITS` for another; `start`: the last start's plan) | chosen per expert from the banks (2, 3, 4, 5 bits) |
-| Needs | the checkpoint and the 3-bit bank, always | the checkpoint (its non-expert weights), the 3-bit bank, and the banks of the widths used |
+| Needs | the Base weights and the 3-bit bank, always | the Base weights, the 3-bit bank, and the banks of the widths used |
 | Started from | the command line | a web page (start, stop, plan, live view, expert optimisation); `./tf-glm53 start` repeats the last start's plan |
 
 Both use the same `glm53.conf`, the same server and the same API. `./tf-glm53 up` starts the panel's launcher and
@@ -144,10 +144,10 @@ details; the image can also be built from the archive with the fenced NCCL (`doc
 2. NCCL 2.30.7 on every node: `pip3 install --no-deps --target ~/nccl-2.30.7 nvidia-nccl-cu13==2.30.7` (pip only
    unpacks the library; nothing runs Python). On a switch this runs, and the build with the AArch64 fence
    is recommended; a ring requires that build (`RING.md`).
-3. The checkpoint, at the same path on every node: `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks` (390 GB, eight nodes) or
-   `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks` (344.6 GB, four nodes). Download once with the Hugging Face CLI, copy with
-   `rsync` to the other nodes, check with `./tf-glm53 verify`.
-   The checkpoint can also be made from the official BF16 checkpoint (section 2, `glm53/weights/`).
+3. The Base weights and the 3-bit bank, at the same path on every node: `fiore-lab/GLM-5.3-EXL3-Base` (21.2 GB) and
+   `fiore-lab/GLM-5.3-EXL3-Experts-3bit` (277.9 GB), on four nodes and on eight. Download once with the Hugging Face CLI, copy with
+   `rsync` to the other nodes, check with `./tf-glm53 verify`. A full checkpoint (`fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks`, 390 GB, or `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks`, 344.6 GB) works
+   in place of the Base weights. All of them can also be made from the official BF16 checkpoint (section 2, `glm53/weights/`).
 4. Unpack the archive on the first node, `sha256sum -c SHA256SUMS`, copy the right example to `glm53.conf`, set
    `NODES`, `SOCKET_IFNAME`, `IB_HCA`, `NCCL_LIB`, `WEIGHTS`.
 5. `./tf-glm53 deploy` (copies the directory to the other nodes), then, without the page, `./tf-glm53 start`
@@ -184,7 +184,7 @@ details; the image can also be built from the archive with the fenced NCCL (`doc
 | `TOPOLOGY` | `full` (a switch), `ring4` or `auto` (judged from the cabling at each check and `./tf-glm53 up`; a known bug in `CONFIG.md`) | `full` |
 | `SOCKET_IFNAME`, `IB_HCA`, `GID_INDEX` | that network's interface and RDMA device on every node; the GID index (empty: chosen) | the same |
 | `NCCL_LIB` | NCCL 2.30.7's `libnccl.so.2`, the same path on every node | the same |
-| `WEIGHTS` | the checkpoint's directory, the same path on every node | the 8x / 4x checkpoint |
+| `WEIGHTS` | the directory of the Base weights or a full checkpoint, the same path on every node | `~/models/GLM-5.3-EXL3-Base` |
 | `DRAFTER_KIND`, `MTP_K`, `DRAFTER` | the drafter (`mtp`, `dflash2`, `none`), MTP's drafts a round (3), DFlash2's directory | `mtp`, 3, empty |
 | `NAME`, `HOST`, `PORT` | the model name in the API, the listen address and port | `glm-5.3`, `0.0.0.0`, 8000 |
 | `METRICS_LISTEN` | an extra read-only address answering `/metrics`, `/health` and `/v1/experts/usage` only | off |
@@ -193,7 +193,7 @@ details; the image can also be built from the archive with the fenced NCCL (`doc
 | `KV_SIZE` | the KV size: the whole KV cache in positions, one pool every conversation shares; what a request does not use keeps earlier conversations (`CONTEXT_LENGTH` + 512 at least) | 1,638,400 / 837,280 |
 | `KV` | the KV cache format, `fp8` or `fp4` | `fp8` / `fp4` |
 | `DCP`, `ROWS`, `SP_PARTS` | decode context parallelism, prompt chunk rows, sequence-parallel parts a chunk | 2, 8,192, 4 |
-| `NEED_GB` | the memory a node must have available before a start (it follows the KV size, plus 3 with DFlash2; `CONFIG.md` gives how) | 112 (default) / 133 (asks 112 GiB) |
+| `NEED_GB` | the memory a node must have available before a start (it follows the KV size, plus 3 with DFlash2; `CONFIG.md` gives how) | 112 (default) / 115 (asks 101 GiB) |
 | `MASTER_PORT`, `READY_TIMEOUT` | the ranks' rendezvous port; seconds to wait for the server | 29551, 900 |
 | `RUNTIME`, `IMAGE` | how the ranks run: `host` (default, from this directory) or `docker` (each in a container of `IMAGE`) | `host`, empty |
 | `MULTI`, `MULTI_WAIT` | conversations decoded together (1 .. 4); seconds a request may wait for room beside them | `0` (one at a time), 600 |
@@ -360,7 +360,7 @@ allocs/delete). `AGENT-API.md` gives what an agent needs of it; its fields may c
 
 | Symptom | Likely cause | What to do |
 |---|---|---|
-| `check` prints `NG: files` / `weights` | the directory or the checkpoint differs on a node | `./tf-glm53 deploy`; `./tf-glm53 verify` |
+| `check` prints `NG: files` / `weights` | the directory or the weights differ on a node | `./tf-glm53 deploy`; `./tf-glm53 verify` |
 | `NG: NCCL(...)`, `cuBLAS-13`, `libibverbs` | a library is missing on that node | install it (`RUNTIME.md`, "When something goes wrong") |
 | `NG: RoCE-v2-GID` or the RDMA device | the port has no RoCE v2 IPv4 entry, or `IB_HCA` is wrong | give the port its address or set `GID_INDEX`; `rdma link`, `ibdev2netdev` |
 | `NG: GPU-busy` | another process holds the GPU | stop it (`nvidia-smi`) |
@@ -386,7 +386,7 @@ Logs: in memory, in a log keeper on each node (`tools/logkeep.py`), nothing on d
   keeps the rest for the answer, so a small `max_tokens` gives a short answer; with `THINKING_SHARE=0` a reply can end in
   its reasoning.
 - The engine's start-up line says `drafts: on` whatever the drafter; `tf-glm53 status` names the drafter in use.
-- Every start needs a checkpoint and the 3-bit bank; the control panel can use either checkpoint with the banks.
+- Every start needs the Base weights (or a full checkpoint) and the 3-bit bank.
 - The re-sort's measurements are against the all-4-bit model, not the BF16 model; `ATLAS-TESTS.md` says which.
 - Inside a chat template's user turn the model predicts the user's own text poorly. This is about predicting the
   user's text, as a KL divergence over a prompt does, not about the replies. The measurements in `ATLAS-TESTS.md`

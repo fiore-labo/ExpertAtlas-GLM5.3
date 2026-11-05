@@ -23,7 +23,7 @@
 | ssh | 1 台目から全ノードへ、自分自身へも。パスフレーズのない鍵で、host key を登録しておきます (下記) |
 | Docker の権限 | そのユーザーが全ノードで `docker` を実行できること (`docker` グループ) |
 | メモリ | 起動前に各ノードで約 115 GiB の空き。GPU で他のものが動いていないこと |
-| ディスク | 必須のダウンロード 2 つに、各ノードで、4 台なら 622.5 GB 以上、8 台なら 667.8 GB 以上 |
+| ディスク | 必須のダウンロード 2 つに、各ノードで 299.1 GB 以上（4 台でも 8 台でも） |
 
 リリースのイメージには AArch64 の fence を入れた NCCL が入っていて、スイッチでもリングでもそれを読みます (`RING.ja.md`「fence 入りの NCCL」)。
 
@@ -72,23 +72,26 @@ done
 
 ## 2. ウェイトをダウンロードする
 
-**必須は、チェックポイントと 3 ビットのバンクの 2 つです。** 別の幅を使う予定でも、この 2 つがないとエンジンは起動しません。パスは全ノードで同じにします。
+**必須は、Base の重みと 3 ビットのバンクの 2 つです。** 別の幅を使う予定でも、この 2 つがないとエンジンは起動しません。パスは全ノードで同じにします。
 
 | 種類 | Hugging Face のリポジトリ | 大きさ | 既定のディレクトリ | オプション |
 |---|---|---|---|---|
-| チェックポイント、4 台 (**必須**) | `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks` | 344.6 GB | `~/models/GLM-5.3-EXL3-4x-DGX-Sparks` | `WEIGHTS` |
-| チェックポイント、8 台 (**必須**) | `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks` | 389.9 GB | `~/models/GLM-5.3-EXL3-8x-DGX-Sparks` | `WEIGHTS` |
+| Base の重み (**必須**) | `fiore-lab/GLM-5.3-EXL3-Base` | 21.2 GB | `~/models/GLM-5.3-EXL3-Base` | `WEIGHTS` |
 | 3 ビットのバンク (**必須**) | `fiore-lab/GLM-5.3-EXL3-Experts-3bit` | 277.9 GB | `~/models/GLM-5.3-EXL3-Experts-3bit` | `BANK_3` |
 | 2 ビットのバンク (任意) | `fiore-lab/GLM-5.3-EXL3-Experts-2bit` | 187.3 GB | `~/models/GLM-5.3-EXL3-Experts-2bit` | `BANK_2` |
 | 4 ビットのバンク (任意) | `fiore-lab/GLM-5.3-EXL3-Experts-4bit` | 368.5 GB | `~/models/GLM-5.3-EXL3-Experts-4bit` | `BANK_4` |
 | 5 ビットのバンク (任意) | `fiore-lab/GLM-5.3-EXL3-Experts-5bit` | 459.1 GB | `~/models/GLM-5.3-EXL3-Experts-5bit` | `BANK_5` |
+| 完全なチェックポイント、4 台 (任意) | `fiore-lab/GLM-5.3-EXL3-4x-DGX-Sparks` | 344.6 GB | なし | `WEIGHTS` |
+| 完全なチェックポイント、8 台 (任意) | `fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks` | 389.9 GB | なし | `WEIGHTS` |
 | DFlash2 (任意、別ライセンス) | `incoai/GLM-5.3-DFlash2` (`RUNTIME.ja.md` の DFlash2 の節) | | なし | `DRAFTER` |
+
+Base の重みは routed expert 以外の全部で、routed expert は起動のときにバンクから読みます。完全なチェックポイントには routed expert も入っていますが、起動には要りません。すでに持っていれば `WEIGHTS` に指定すると、そのまま使えます。8 台用は 4 ビットのバンクも兼ねられます（`RUNTIME.ja.md`「コントロールパネル」）。
 
 1 回ダウンロードして、他のノードにコピーします。`python3 -m venv` が失敗するときは、`python3-venv` パッケージを入れます。4 台の場合:
 
 ```sh
 python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
-for r in EXL3-4x-DGX-Sparks EXL3-Experts-3bit; do
+for r in EXL3-Base EXL3-Experts-3bit; do
   D=~/models/GLM-5.3-$r
   ~/hf-cli/bin/hf download fiore-lab/GLM-5.3-$r --local-dir $D
   for n in NODE2 NODE3 NODE4; do    # 他の 3 台
@@ -143,7 +146,7 @@ THEN: docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 
 ```sh
 docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
-  -e WEIGHTS=/data/models/checkpoint \
+  -e WEIGHTS=/data/models/base \
   -e BANK_3=/data/models/3bit \
   -e BANK_4=/data/models/4bit \
   -e BITS=4 -e CONTEXT_LENGTH=131072 \
@@ -154,7 +157,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
 
 | オプション | 既定 | 意味 |
 |---|---|---|
-| `WEIGHTS` | `~/models/GLM-5.3-EXL3-4x-DGX-Sparks` (8 台は `-8x-`) | チェックポイント。必須 |
+| `WEIGHTS` | `~/models/GLM-5.3-EXL3-Base` | Base の重み、または完全なチェックポイント。必須 |
 | `BANK_3` | `~/models/GLM-5.3-EXL3-Experts-3bit` | 3 ビットのバンク。必須 |
 | `BANK_2`、`BANK_4`、`BANK_5` | `~/models/GLM-5.3-EXL3-Experts-<N>bit` | 他のバンク。任意 |
 | `DRAFTER` | 空 | DFlash2 のモデル。`DRAFTER_KIND=dflash2` と一緒に使います |

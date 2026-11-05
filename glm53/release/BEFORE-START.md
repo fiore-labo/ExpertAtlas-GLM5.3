@@ -12,7 +12,7 @@ Decide the nodes and the weights' location first. The weights use the same path 
 | Decision | Choices | Default | Option |
 |---|---|---|---|
 | The nodes | 4 or 8 on a switch, or 4 in a ring (2 or 3 are being tested) | Found automatically. Choose only when a switch has more free nodes than a lane uses | `NODES` |
-| Where the checkpoint is (required) | 4 nodes 344.6 GB, or 8 nodes 389.9 GB | `~/models/GLM-5.3-EXL3-4x-DGX-Sparks` (8 nodes: `-8x-`) | `WEIGHTS` |
+| Where the Base weights are (required) | 21.2 GB. A full checkpoint (4x or 8x) works in their place | `~/models/GLM-5.3-EXL3-Base` | `WEIGHTS` |
 | Where the 3-bit bank is (required) | 277.9 GB | `~/models/GLM-5.3-EXL3-Experts-3bit` | `BANK_3` |
 | Banks of other widths | 2 bit 187.3 GB, 4 bit 368.5 GB, 5 bit 459.1 GB. Only the widths you use | `~/models/GLM-5.3-EXL3-Experts-<N>bit` | `BANK_2`, `BANK_4`, `BANK_5` |
 | DFlash2's model | Only if you use it. It has a separate licence | None | `DRAFTER` |
@@ -40,7 +40,7 @@ Changing these settings needs a restart of the engine. If you are unsure, the de
 | Conversations decoded together | `MULTI` | 0 to 4 | 0 (one at a time) | How many use it at once |
 | How long a request waits | `MULTI_WAIT` | Seconds | 600 s | With `MULTI`, a request past this is refused as busy |
 | Memory left for the OS | `RESERVE_GB` | 2 to 32 GiB | 4 GiB | Raise it if other programs run on the nodes |
-| The default reply limit | `MAX_TOKENS_SHARE` | 1 to 100% of `CONTEXT_LENGTH` | 70% | Used when a request names no `max_tokens`. A client's value comes first |
+| The default `max_tokens` (one reply's limit) | `MAX_TOKENS_SHARE` | 1 to 100% of `CONTEXT_LENGTH` | 70% | Used when a request names no `max_tokens`. A client's value comes first |
 | Byte Resume | `TF_GLM53_BYTE_RESUME` | `on`, `log`, `off` | `on` | Keeps the cache when a text is cut differently. Usually `on` |
 | The model's name in the API | `NAME` | Text | `glm-5.3` | Match your client's setting |
 
@@ -80,7 +80,7 @@ On the `docker run` line, add `-e NAME=VALUE` before `IMAGE`. The start screen o
 
 ```sh
 docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
-  -e WEIGHTS=/data/models/checkpoint \
+  -e WEIGHTS=/data/models/base \
   -e BANK_3=/data/models/3bit \
   -e CONTEXT_LENGTH=131072 \
   IMAGE up
@@ -89,7 +89,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
 - **On the `docker run` line:** values are saved in `~/expertatlas/glm53.conf` and used by later starts. `KV_SIZE` and `BITS`
   count for that start only. The line does not keep the widths chosen on the start screen: without `BITS` or `ALLOC` it starts every
   expert at 3 bits. `./tf-glm53 start` starts with the last start's plan.
-- **On the start screen:** choices count for that start only and are not saved. The engine settings screen changes the defaults.
+- **On the start screen:** The KV format, context length, drafter, concurrent inferences and memory kept for the OS are saved in `glm53.conf` as you choose them, and later starts use them. The experts' widths are not saved there.
 - **A running engine:** options do not change it. Stop it, then run the line again.
 - **A wrong name:** a name it does not know gives a `STOP`, which suggests the nearest name.
 
