@@ -210,7 +210,8 @@ settings you can change while it runs. Below the circle are the bpw chart, the s
 - **Health check**: sends the engine one request of about 1,000 tokens and judges the reply (below).
 - **Stop**: stops the engine (below).
 - **The servers**: each node with head or worker, its free memory, and its GPU and CPU temperatures, read every 5
-  seconds. RDMA shows the CPUs of each node's two RoCE proxy threads (for example 0·10).
+  seconds. RDMA shows the CPUs of each node's two RoCE proxy threads (for example 0·10). While the engine rests with
+  nothing to do, they are stopped and it reads idle.
 - **RDMA proxy threads** and **Engine cores**: where the proxy threads run (A725, X925, or left to the OS) and where
   the engine runs (A725, or left to the OS).
 - **Concurrent**: the conversations the engine decodes together, and how many requests are in flight.

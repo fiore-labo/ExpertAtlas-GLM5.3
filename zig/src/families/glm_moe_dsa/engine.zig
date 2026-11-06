@@ -606,6 +606,10 @@ pub const Engine = struct {
     roce_mode: roce.Mode = .os,
     roce_kinds: [roce.max_cpus]roce.Kind = @splat(.unknown),
     roce_pins: [roce_ranks][2]i16 = @splat(.{ -2, -2 }),
+    // Fiore-lab (idle park): the CPUs the start kept this rank's two proxies on (null: the scheduler's), kept on again
+    // after each park
+    // Fiore-lab (idle park): 起動時にこのランクの 2 つの proxy を留めた CPU (null はスケジューラ任せ)。休んだ後も同じ所に留める
+    roce_cpus: [2]?u16 = .{ null, null },
     dfast: ?roce.Runtime = null,
     // TF_GLM53_SPLIT_QA: the split q_a / kv_a front's send area (split_cap bytes), then world x split_cap received
     // TF_GLM53_SPLIT_QA: q_a / kv_a の分担の送る領域 (split_cap バイト)、続いて受ける world x split_cap
@@ -1083,7 +1087,8 @@ pub const Engine = struct {
             return error.RoceProxyCores;
         };
         e.roce_kinds = roce.coreKinds(e.io);
-        const mine = roce.pinProxies(e.rank, e.roce_mode, .{ if (e.fast) |*r| r else null, if (e.dfast) |*r| r else null }, roce.proxyCpus(&e.roce_kinds, e.roce_mode));
+        e.roce_cpus = roce.proxyCpus(&e.roce_kinds, e.roce_mode);
+        const mine = roce.pinProxies(e.rank, e.roce_mode, .{ if (e.fast) |*r| r else null, if (e.dfast) |*r| r else null }, e.roce_cpus);
         const all = try roce.Runtime.exchange(e.gpa, e.d, e.group, std.mem.asBytes(&mine), e.stream);
         defer e.gpa.free(all);
         for (0..@min(e.world, roce_ranks)) |r| @memcpy(std.mem.asBytes(&e.roce_pins[r]), all[r * 4 ..][0..4]);
@@ -2293,6 +2298,29 @@ pub const Engine = struct {
             };
         };
         return v;
+    }
+
+    /// Fiore-lab (idle park): this rank's proxies (the world's, the DCP group's; those it has) stopped while the
+    /// replica is parked. Call only after the park's NCCL share, on every rank. False when one failed (the rank must
+    /// stop: the host's fatal).
+    /// Fiore-lab (idle park): レプリカが休むあいだ、このランクの proxy (world のもの、DCP グループのもの。あるものだけ) を
+    /// 止める。休む合図の NCCL の共有の後に、全ランクで呼ぶ。どれかが失敗したら false (そのランクは止まること)。
+    pub fn parkProxies(e: *Engine) bool {
+        var ok = true;
+        if (e.fast) |*r| ok = r.park() and ok;
+        if (e.dfast) |*r| ok = r.park() and ok;
+        return ok;
+    }
+
+    /// Fiore-lab (idle park): this rank's proxies running again on the start's CPUs, before the replica's next
+    /// collective. False when one did not start or is not healthy.
+    /// Fiore-lab (idle park): このランクの proxy を起動時の CPU で再び動かす。レプリカの次の集団通信より前に。
+    /// どれかが動かないか健全でなければ false。
+    pub fn wakeProxies(e: *Engine) bool {
+        var ok = true;
+        if (e.fast) |*r| ok = r.wake(e.roce_cpus[0]) and ok;
+        if (e.dfast) |*r| ok = r.wake(e.roce_cpus[1]) and ok;
+        return ok;
     }
 
     pub fn multiSetup(e: *Engine, n: usize) !void {

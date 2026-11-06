@@ -114,7 +114,7 @@ done
 docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 ```
 
-`IMAGE` 是发布的镜像 `ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3-102`。这一行把发布内容写到 `~/expertatlas`，找到节点（环或交换机）并检查，查找权重，启动引擎并发送一次请求。首次启动需要几分钟。
+`IMAGE` 是发布的镜像 `ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.1-102`。这一行把发布内容写到 `~/expertatlas`，找到节点（环或交换机）并检查，查找权重，启动引擎并发送一次请求。首次启动需要几分钟。
 
 最后有两种结果。
 

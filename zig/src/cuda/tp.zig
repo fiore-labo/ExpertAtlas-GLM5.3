@@ -7,7 +7,7 @@ const Threaded = std.Io.Threaded;
 const nccl = @import("nccl.zig");
 const abi = @import("abi.zig");
 
-pub const Error = error{ BadMaster, BadRank, SocketFailed, BindFailed, ListenFailed, ConnectTimeout, AcceptTimeout, ShortTransfer, BadPeer, Ring4NeedsRelay, Ring4RelaySpace, Ring4Unsupported } || nccl.Error;
+pub const Error = error{ BadMaster, BadRank, SocketFailed, BindFailed, ListenFailed, ConnectTimeout, AcceptTimeout, ShortTransfer, BadPeer, Ring4NeedsRelay, Ring4RelaySpace, Ring4Unsupported, LinkClosed, BadWake, WakeTimeout } || nccl.Error;
 
 /// How the ranks' links are wired. ring4: four nodes cabled as a ring, ranks in ring order (rank r's neighbours are
 /// r ^ 1 and r ^ 3, its opposite r ^ 2, which no link reaches: glm53/R3RT-102.md).
@@ -218,7 +218,102 @@ pub const Group = struct {
         g.comm = null;
         g.closeLinks();
     }
+
+    // Fiore-lab (idle park): a parked replica's ranks wait on the rendezvous links, not in a collective. Rank 0 wakes
+    // the others with one 'W' on each link and waits for each one's 'R' (it is running again); a rank woken reads the
+    // 'W', gets ready, writes the 'R', then waits for rank 0's 'G', which comes only once every rank is ready. So no
+    // rank enters a collective while another failed to wake: they see rank 0 end on their links instead (and a rank
+    // killed inside a collective can leave its GPU busy). Only the world's group holds the links.
+    // Fiore-lab (idle park): 休んでいるレプリカのランクは、集団通信ではなく待ち合わせの接続で待つ。rank 0 は各接続に
+    // 'W' を 1 バイト書いて起こし、各ランクの 'R' (また動いている) を待つ。起こされたランクは 'W' を読み、準備して
+    // 'R' を書く。接続を持つのは world の group だけ (split した group は持たない)。
+
+    /// Whether this group can park: its rendezvous links are open (rank 0: one to each other rank; others: to rank 0).
+    /// World 1 always can (nothing to wake).
+    pub fn parkable(g: *const Group) bool {
+        if (g.world <= 1) return true;
+        if (g.world > max_links) return false;
+        if (g.rank != 0) return g.links[0] >= 0;
+        for (g.links[1..g.world]) |fd| if (fd < 0) return false;
+        return true;
+    }
+
+    /// Rank 0: a 'W' to every other rank, then every one's 'R' within about `timeout_ms` (polls of 100 ms). A link
+    /// closed or failing: LinkClosed; another byte: BadWake; an 'R' missing at the end: WakeTimeout. A rank that died
+    /// while parked is seen before anything is written (its link reads as closed), so then no rank is woken: the
+    /// others see rank 0 end instead of waiting in a collective that cannot complete.
+    pub fn wakePeers(g: *const Group, timeout_ms: u32) Error!void {
+        if (g.rank != 0 or g.world <= 1) return;
+        if (!g.parkable()) return error.BadPeer;
+        const peers = g.world - 1;
+        var dead: [max_links]posix.pollfd = undefined;
+        for (g.links[1..g.world], dead[0..peers]) |fd, *f| f.* = .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 };
+        if ((posix.poll(dead[0..peers], 0) catch return error.SocketFailed) > 0) for (dead[0..peers]) |f| if (f.revents != 0) {
+            _ = (try readByte(f.fd)) orelse return error.LinkClosed;
+            return error.BadWake; // a parked rank sends nothing
+        };
+        for (g.links[1..g.world]) |fd| writeAll(fd, "W") catch return error.LinkClosed;
+        var got: [max_links]bool = @splat(false);
+        var left: u32 = g.world - 1;
+        var polls: u32 = (timeout_ms + 99) / 100;
+        while (left > 0) {
+            var fds: [max_links]posix.pollfd = undefined;
+            var who: [max_links]usize = undefined;
+            var n: usize = 0;
+            for (1..g.world) |r| if (!got[r]) {
+                fds[n] = .{ .fd = g.links[r], .events = posix.POLL.IN, .revents = 0 };
+                who[n] = r;
+                n += 1;
+            };
+            const seen = posix.poll(fds[0..n], 100) catch return error.SocketFailed;
+            if (seen == 0) {
+                if (polls == 0) return error.WakeTimeout;
+                polls -= 1;
+                continue;
+            }
+            for (fds[0..n], who[0..n]) |f, r| {
+                if (f.revents == 0) continue;
+                const b = (try readByte(f.fd)) orelse return error.LinkClosed;
+                if (b != 'R') return error.BadWake;
+                got[r] = true;
+                left -= 1;
+            }
+        }
+        for (g.links[1..g.world]) |fd| writeAll(fd, "G") catch return error.LinkClosed;
+    }
+
+    /// Ranks 1..: sleeps until rank 0's 'W' (no time limit: the replica may stay idle for days). The link closed or
+    /// failing: LinkClosed (rank 0 is gone); another byte: BadWake.
+    pub fn awaitWake(g: *const Group) Error!void {
+        if (g.rank == 0 or g.world <= 1) return;
+        if (g.links[0] < 0) return error.BadPeer;
+        const b = (try readByte(g.links[0])) orelse return error.LinkClosed;
+        if (b != 'W') return error.BadWake;
+    }
+
+    /// Ranks 1..: the 'R' rank 0 waits for in wakePeers, then rank 0's 'G' (every rank ready), before any collective.
+    /// The link closed or failing while waiting: LinkClosed (rank 0 gave up the wake); another byte: BadWake.
+    pub fn ready(g: *const Group) Error!void {
+        if (g.rank == 0 or g.world <= 1) return;
+        if (g.links[0] < 0) return error.BadPeer;
+        writeAll(g.links[0], "R") catch return error.LinkClosed;
+        const b = (try readByte(g.links[0])) orelse return error.LinkClosed;
+        if (b != 'G') return error.BadWake;
+    }
 };
+
+/// One byte from `fd` (a signal's interruption read again); null at the end of the stream; LinkClosed on an error.
+fn readByte(fd: posix.socket_t) Error!?u8 {
+    var b: [1]u8 = undefined;
+    while (true) {
+        const rc = posix.system.read(fd, &b, 1);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return if (rc == 0) null else b[0],
+            .INTR => continue,
+            else => return error.LinkClosed,
+        }
+    }
+}
 
 /// Rank 0: accept the other ranks on any address at ``port``; each sends its rank (u32 LE) and receives the id.
 fn serveId(id: *const nccl.UniqueId, world: u32, port: u16, keep: []posix.socket_t) Error!void {
@@ -310,6 +405,130 @@ fn writeAll(fd: posix.socket_t, buf: []const u8) Error!void {
         if (posix.errno(rc) != .SUCCESS or rc == 0) return error.ShortTransfer;
         put += @intCast(rc);
     }
+}
+
+/// Two connected stream sockets for the tests.
+fn testPair() ![2]posix.socket_t {
+    var fds: [2]posix.socket_t = undefined;
+    if (posix.errno(posix.system.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds)) != .SUCCESS) return error.SocketFailed;
+    return fds;
+}
+
+/// A group with only links (the park handshake uses nothing else).
+fn testGroup(rank: u32, world: u32) Group {
+    return .{ .lib = undefined, .comm = null, .rank = rank, .world = world };
+}
+
+test "park: rank 0 wakes every rank and gets each one's ready" {
+    var leader = testGroup(0, 3);
+    var followers = [2]Group{ testGroup(1, 3), testGroup(2, 3) };
+    for (&followers, 1..) |*f, r| {
+        const p = try testPair();
+        leader.links[r] = p[0];
+        f.links[0] = p[1];
+    }
+    defer for (&followers) |*f| f.closeLinks();
+    defer leader.closeLinks();
+    try std.testing.expect(leader.parkable() and followers[0].parkable());
+    const F = struct {
+        fn go(g: *const Group, out: *?Error) void {
+            g.awaitWake() catch |e| {
+                out.* = e;
+                return;
+            };
+            g.ready() catch |e| {
+                out.* = e;
+            };
+        }
+    };
+    var errs: [2]?Error = .{ null, null };
+    var threads: [2]std.Thread = undefined;
+    for (&threads, &followers, &errs) |*t, *f, *e| t.* = try std.Thread.spawn(.{}, F.go, .{ f, e });
+    try leader.wakePeers(5000);
+    for (threads) |t| t.join();
+    for (errs) |e| try std.testing.expectEqual(@as(?Error, null), e);
+}
+
+test "park: a closed link, a wrong byte and a missing ready" {
+    // rank 0 gone while a rank sleeps: LinkClosed
+    var a = testGroup(1, 2);
+    var p = try testPair();
+    a.links[0] = p[1];
+    _ = posix.system.close(p[0]);
+    try std.testing.expectError(error.LinkClosed, a.awaitWake());
+    a.closeLinks();
+    // a byte that is not 'W': BadWake
+    p = try testPair();
+    a.links[0] = p[1];
+    try writeAll(p[0], "X");
+    try std.testing.expectError(error.BadWake, a.awaitWake());
+    _ = posix.system.close(p[0]);
+    a.closeLinks();
+    // rank 0: no 'R' within the time: WakeTimeout
+    var leader = testGroup(0, 2);
+    p = try testPair();
+    leader.links[1] = p[0];
+    try std.testing.expectError(error.WakeTimeout, leader.wakePeers(200));
+    _ = posix.system.close(p[1]);
+    leader.closeLinks();
+    // rank 0: the rank takes the 'W' and its link closes (it died before its 'R'): LinkClosed. The close comes after
+    // the read, so rank 0's write never meets a closed socket (no SIGPIPE in the test)
+    p = try testPair();
+    leader.links[1] = p[0];
+    var b = testGroup(1, 2);
+    b.links[0] = p[1];
+    const D = struct {
+        fn go(g: *Group) void {
+            g.awaitWake() catch {};
+            g.closeLinks();
+        }
+    };
+    const t = try std.Thread.spawn(.{}, D.go, .{&b});
+    try std.testing.expectError(error.LinkClosed, leader.wakePeers(5000));
+    t.join();
+    leader.closeLinks();
+    // rank 0: one of two ranks died while parked: LinkClosed before any 'W', so the live rank is not woken
+    var two = testGroup(0, 3);
+    const p1 = try testPair();
+    const p2 = try testPair();
+    two.links[1] = p1[0];
+    two.links[2] = p2[0];
+    _ = posix.system.close(p1[1]);
+    try std.testing.expectError(error.LinkClosed, two.wakePeers(1000));
+    var none = [_]posix.pollfd{.{ .fd = p2[1], .events = posix.POLL.IN, .revents = 0 }};
+    try std.testing.expectEqual(@as(usize, 0), try posix.poll(&none, 0));
+    _ = posix.system.close(p2[1]);
+    two.closeLinks();
+    // rank 0 gives up the wake (a rank never answered) and ends: a rank that was ready reads the end, not a 'G'
+    var giveup = testGroup(0, 3);
+    const q1 = try testPair();
+    const q2 = try testPair();
+    giveup.links[1] = q1[0];
+    giveup.links[2] = q2[0];
+    var ok1 = testGroup(1, 3);
+    ok1.links[0] = q1[1];
+    const R = struct {
+        fn go(g: *const Group, out: *?Error) void {
+            g.awaitWake() catch |e| {
+                out.* = e;
+                return;
+            };
+            g.ready() catch |e| {
+                out.* = e;
+            };
+        }
+    };
+    var got: ?Error = null;
+    const th = try std.Thread.spawn(.{}, R.go, .{ &ok1, &got });
+    try std.testing.expectError(error.WakeTimeout, giveup.wakePeers(300));
+    giveup.closeLinks();
+    th.join();
+    try std.testing.expectEqual(@as(?Error, error.LinkClosed), got);
+    ok1.closeLinks();
+    _ = posix.system.close(q2[1]);
+    // world 1 has nothing to wake; a missing link is not parkable
+    try std.testing.expect(testGroup(0, 1).parkable());
+    try std.testing.expect(!testGroup(0, 2).parkable());
 }
 
 test "master addresses parse as IP:port and refuse the rest" {

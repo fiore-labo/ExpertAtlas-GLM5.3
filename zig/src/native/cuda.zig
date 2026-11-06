@@ -376,6 +376,10 @@ fn toGib(bytes: u64) f64 {
     return @as(f64, @floatFromInt(bytes)) / gib;
 }
 
+test {
+    _ = glm53; // Fiore-lab: its own tests (the think block, TF_GLM53_IDLE_PARK_MS)
+}
+
 test "this host's /proc/meminfo reads whole and parses (Linux)" {
     if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     const a = std.testing.allocator;

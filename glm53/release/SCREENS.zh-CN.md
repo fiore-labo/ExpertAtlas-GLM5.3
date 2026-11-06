@@ -179,7 +179,7 @@ checkpoint、drafter（DFlash2）以及 2、3、4、5 bit 的 bank 各占一行�
 
 - **Health check**：向引擎发送一个约 1,000 token 的请求并判定回复（见下文）。
 - **Stop**：停止引擎（见下文）。
-- **服务器列表**：每个节点标明 head 或 worker，以及空闲内存、GPU 和 CPU 温度，每 5 秒读取一次。RDMA 列显示每个节点两个 RoCE 代理线程所在的 CPU（例如 0·10）。
+- **服务器列表**：每个节点标明 head 或 worker，以及空闲内存、GPU 和 CPU 温度，每 5 秒读取一次。RDMA 列显示每个节点两个 RoCE 代理线程所在的 CPU（例如 0·10）。引擎无事可做而休眠时，这些线程停止，显示 idle。
 - **RDMA proxy threads** 和 **Engine cores**：代理线程运行的位置（A725、X925，或交由操作系统）和引擎运行的位置（A725，或交由操作系统）。
 - **Concurrent**：引擎一起 decode 的对话数，以及正在处理的请求数。
 - **GPU split**（Concurrent 为 2 或以上时）：在 decode 中的对话旁边计算 prompt 时，GPU 时间如何分配。从 prefill 100% 到 decode 100%，步长为 5。圆点是启动时的值。

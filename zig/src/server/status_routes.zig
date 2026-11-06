@@ -124,6 +124,17 @@ fn cudaHealth(srv: *Server, a: Allocator, o: *json.Object, status: *const api.St
             try o.put(a, "roce", .{ .object = ro });
         }
         if (p.engine_cores.len > 0) try o.put(a, "engine_cores", .{ .string = p.engine_cores });
+        // Fiore-lab (idle park): "idle": {"park_ms", "state" (awake, parking, parked, waking), "parks",
+        // "last_wake_us"}; left out when the engine never parks
+        // Fiore-lab (idle park): "idle": 休む設定と状態。休まないエンジンでは出さない
+        if (@hasField(@TypeOf(p), "idle")) if (p.idle.park_ms) |ms| {
+            const io_ = try json.newObject(a);
+            try io_.put(a, "park_ms", try json.intValue(a, ms));
+            try io_.put(a, "state", .{ .string = @tagName(p.idle.state) });
+            try io_.put(a, "parks", try json.intValue(a, p.idle.parks));
+            try io_.put(a, "last_wake_us", if (p.idle.last_wake_us) |us| try json.intValue(a, us) else .null);
+            try o.put(a, "idle", .{ .object = io_ });
+        };
         const r = try json.newObject(a);
         try r.put(a, "phase", .{ .string = @tagName(p.phase) });
         try r.put(a, "prompt_tokens", try json.intValue(a, p.prompt));
