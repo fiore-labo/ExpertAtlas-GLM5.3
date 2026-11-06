@@ -355,6 +355,55 @@ pub fn shutdown(ch: *Channel) !void {
 /// routed expert の bit の変更 (expert_swap) を示すヘッダの max_tokens。表がその後に続く。
 pub const swap_tokens: i32 = -2;
 
+// Fiore-lab (idle park): rank 0, idle for TF_GLM53_IDLE_PARK_MS, shares a park; every rank stops its RoCE proxies and
+// the followers sleep on the rendezvous link instead of in a collective (no NCCL op posted, no GPU kernel waiting);
+// rank 0 wakes them (tp.Group.wakePeers) before its next share. A failure on the way is the rank's end (the caller's
+// fatal): never a rank left serving while another sleeps.
+// Fiore-lab (idle park): TF_GLM53_IDLE_PARK_MS のあいだ何もない rank 0 は休む合図を配る。全ランクが RoCE の proxy を
+// 止め、フォロワーは集団通信ではなく待ち合わせの接続で眠る (NCCL の操作も GPU の待ちもない)。rank 0 は次の共有の前に
+// 起こす (tp.Group.wakePeers)。途中の失敗はそのランクの終わり (呼ぶ側の fatal): 1 つのランクが眠ったまま他が動くことはない。
+
+/// The header's max_tokens for a park (single requests); with TF_GLM53_MULTI the event ev_park.
+/// 休む合図を示すヘッダの max_tokens (単独の要求)。TF_GLM53_MULTI では出来事 ev_park。
+pub const park_tokens: i32 = -3;
+
+/// Rank 0, idle: every rank parks (followers of `follow`); then rank 0's own proxies stop.
+/// rank 0、何もないとき: 全ランクを休ませる (`follow` のフォロワー)。続いて rank 0 自身の proxy を止める。
+pub fn park(ch: *Channel, e: *engine.Engine) !void {
+    const hw = (Header{ .max_tokens = park_tokens }).encode();
+    ch.gpa.free(try ch.share(&hw));
+    if (!e.parkProxies()) return error.RoceParkFailed;
+}
+
+/// `park` with TF_GLM53_MULTI, nothing live or waiting: the followers hear of it as an event (followMulti).
+/// TF_GLM53_MULTI での `park`。使用中も待ちもないとき: フォロワーには出来事として伝える (followMulti)。
+pub fn parkMulti(ch: *Channel, e: *engine.Engine) !void {
+    const w = [1]i32{ev_park};
+    ch.gpa.free(try ch.share(&w));
+    if (!e.parkProxies()) return error.RoceParkFailed;
+}
+
+/// Rank 0, parked: its own proxies running again, then every other rank woken and ready (within `timeout_ms`),
+/// before any share.
+/// rank 0、休んでいるとき: 自分の proxy を再び動かし、続いてほかの全ランクを起こして準備を待つ (`timeout_ms` まで)。
+/// どの共有よりも前に。
+pub fn wake(ch: *Channel, e: *engine.Engine, timeout_ms: u32) !void {
+    if (!e.wakeProxies()) return error.RoceWakeFailed;
+    try ch.group.wakePeers(timeout_ms);
+}
+
+/// A follower told to park: its proxies stopped, asleep until rank 0's wake, its proxies running again, ready, and
+/// on once rank 0 says every rank is (tp.Group.ready waits for that).
+/// 休むよう告げられたフォロワー: proxy を止め、rank 0 に起こされるまで眠り、proxy を再び動かして準備を返し、全ランクの
+/// 準備がそろったと rank 0 が告げてから進む (tp.Group.ready がそれを待つ)。
+fn followPark(ch: *Channel, e: *engine.Engine) !void {
+    if (!e.parkProxies()) return error.RoceParkFailed;
+    std.log.info("glm53: rank {d}: parked (idle)", .{e.rank});
+    try ch.group.awaitWake();
+    if (!e.wakeProxies()) return error.RoceWakeFailed;
+    try ch.group.ready();
+}
+
 /// Rank 0, between requests: every rank's routed experts to `target` (one byte an expert, the MoE layers in order;
 /// expert_swap), then the cached prefixes dropped. A table any rank refuses changes nothing; a rank short of memory or
 /// failing stops every rank at the same layer (the layers before it changed on all; the error says why).
@@ -518,6 +567,10 @@ pub fn follow(ch: *Channel, e: *engine.Engine, seen: ?*std.ArrayList(Received), 
             try followSwap(ch, e);
             continue;
         }
+        if (h.max_tokens == park_tokens) {
+            try followPark(ch, e);
+            continue;
+        }
         if (h.max_tokens < 0) return;
         const words = try ch.share(null);
         defer ch.gpa.free(words);
@@ -550,6 +603,7 @@ pub const ev_release: i32 = 3;
 pub const ev_single: i32 = 4;
 pub const ev_mid_end: i32 = 5; // the end of a round inside a prefill (and its releases) / prefill の中のラウンド (と確定) の終わり
 pub const ev_swap: i32 = 6; // the routed experts' bits changed, nothing live or waiting / routed expert の bit の変更。使用中も待ちもない
+pub const ev_park: i32 = 7; // Fiore-lab (idle park): nothing live or waiting for TF_GLM53_IDLE_PARK_MS / 一定時間、使用中も待ちもない
 
 /// Rank 0's live conversations for a round inside another's prefill (the host fills `ks`, `stops`, `sinks`; returns
 /// how many): every one live and not done, the conversation being admitted left out.
@@ -841,6 +895,7 @@ pub fn followMulti(ch: *Channel, e: *engine.Engine) !void {
         switch (w[0]) {
             ev_shutdown => return,
             ev_swap => try followSwap(ch, e),
+            ev_park => try followPark(ch, e),
             ev_admit => {
                 const k: usize = @intCast(w[1]);
                 const h = try Header.decode(w[2..]);

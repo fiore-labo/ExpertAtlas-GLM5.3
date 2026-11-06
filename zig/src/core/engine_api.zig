@@ -338,6 +338,14 @@ pub const Roce = struct {
     proxies: [roce_ranks][2]RoceProxy = @splat(@splat(.{})),
 };
 pub const RoceMode = enum { a725, x925, os };
+
+/// Fiore-lab (idle park): the replica's rest while no request runs (TF_GLM53_IDLE_PARK_MS; /health "idle").
+/// `park_ms` null: never parks. `state`: awake; parking (the ranks being told); parked (every rank asleep on its
+/// rendezvous link, its RoCE proxies stopped, no collective posted); waking. `parks`: the times it parked;
+/// `last_wake_us`: the last wake, rank 0's proxies started and every rank's ready.
+/// Fiore-lab (idle park): 要求がないあいだのレプリカの休み (TF_GLM53_IDLE_PARK_MS、/health の "idle")。
+pub const Idle = struct { park_ms: ?u32 = null, state: IdleState = .awake, parks: u64 = 0, last_wake_us: ?u64 = null };
+pub const IdleState = enum { awake, parking, parked, waking };
 pub const CoreKind = enum { unknown, a725, x925 };
 pub const RoceProxy = struct { present: bool = false, cpu: ?u16 = null, core: CoreKind = .unknown, live: bool = false };
 pub const roce_ranks = 8;
@@ -472,6 +480,8 @@ pub const Progress = struct {
     roce: Roce = .{},
     /// Fiore-lab: where the engine itself may run: "a725" or "os" (empty: not said).
     engine_cores: []const u8 = "",
+    /// Fiore-lab (idle park): the replica's rest (park_ms null: never parks).
+    idle: Idle = .{},
     /// The requests running now, the oldest admitted first: every conversation admitted when several decode
     /// together, else the one running. Not the ones waiting for admission.
     requests: [max_requests]RequestProgress = @splat(.{}),
@@ -503,7 +513,16 @@ pub const Engine = struct {
         experts_control: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, c: ExpertsControl) ControlError![]u8 = null,
         /// Fiore-lab: TF_GLM53_MULTI's schedule, the fields of `set` given set first; the schedule in use after.
         schedule: ?*const fn (ctx: *anyopaque, set: ScheduleSet) ControlError!Schedule = null,
+        /// Fiore-lab: the server is stopping (SIGTERM): take no more work, stop the running requests at their next
+        /// step and end the waiting ones as cancelled; returns once that is done (or after a bound of the engine's), so
+        /// the open replies end and a replica's other ranks are told before the process may leave (null: the engine
+        /// needs nothing before close).
+        stop_all: ?*const fn (ctx: *anyopaque) void = null,
     };
+
+    pub fn stopAll(e: Engine) void {
+        if (e.vtable.stop_all) |f| f(e.ctx);
+    }
 
     pub fn schedule(e: Engine, set: ScheduleSet) ControlError!Schedule {
         const f = e.vtable.schedule orelse return error.Unsupported;

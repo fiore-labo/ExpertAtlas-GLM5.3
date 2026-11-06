@@ -22,6 +22,8 @@ sit together at the top level.
 | [QUICKSTART](glm53/release/QUICKSTART.md) | The first start: the weights, one `docker run` line, every option, the common `STOP` messages |
 | [BEFORE-START](glm53/release/BEFORE-START.md) | What to decide before the first start, and what can wait |
 | [PANEL-GUIDE](glm53/release/PANEL-GUIDE.md) | The control panel's screens, item by item |
+| [SCREENS](glm53/release/SCREENS.md) | Every screen of the control panel, with pictures |
+| [FEATURES](glm53/release/FEATURES.md) | Each feature: what it does, why it is there, how to use it |
 | [CONFIG](glm53/release/CONFIG.md) | Every setting of `glm53.conf`: its default, who reads it, when a change takes effect |
 | [RUNTIME](packaging/RUNTIME.md) | Running it from the archive or by hand: every command, the cache, Claude Code, failures |
 | [T4](glm53/release/T4.md) | Four nodes: the weights, the settings, the measurements |
@@ -56,6 +58,19 @@ sit together at the top level.
 - `/metrics` (Prometheus text) and `/health` count the running request too, so a monitor reads prefill and decode
   speed, cache hits and draft acceptance while a request runs. `METRICS_LISTEN` serves the two read-only on an address
   of their own, for a monitor on another host.
+
+## New in r3.3.1-102
+
+- **The engine rests while it has nothing to do.** After a second with nothing to do (`TF_GLM53_IDLE_PARK_MS` in
+  `EXTRA_ENV`), every rank parks: the other ranks sleep on their link to rank 0 and every RoCE proxy thread stops. A
+  request, a swap of the experts' bits or the stop wakes them in 0.6 to 2.0 ms, and a short request's first token comes
+  as soon as before. On the ring, parked, each node's engine used under 1 % of a core and the GPUs 0 %, where the other
+  ranks' GPUs read 96 % without parking; their SoC read 50 to 54 °C against 64 to 85 °C with `ENGINE_CORES=os`.
+  `/health` `idle` shows the state, and the panel's RDMA cells read idle ([CONFIG](glm53/release/CONFIG.md)).
+- **Fixed: a stop with requests queued or running** took 36 to 37 s in r3.3-102 and left the other ranks' GPUs
+  busy (P0, about 11 W) with no process. Now it ends the requests and tells every rank: 6 s under load as when idle,
+  and every GPU goes back to idle (P8).
+- Nothing to change from r3.3-102: the weights and the settings are the same.
 
 ## New in r3.3-102
 
@@ -208,7 +223,7 @@ The release comes as a container image and as an archive with the same files; th
 the weights in place, one line on the first node starts the engine:
 
 ```sh
-docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3-102 up
+docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.1-102 up
 ```
 
 It ends in `READY` with the addresses: the API at `http://FIRST-NODE:8000/v1` and the control panel at
@@ -218,7 +233,7 @@ It ends in `READY` with the addresses: the API at `http://FIRST-NODE:8000/v1` an
 To the same end by hand, with the image: `docker pull` it on every node, run
 `mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out`, and set
 `RUNTIME=docker` and `IMAGE` in `glm53.conf` ([packaging/RUNTIME.md](packaging/RUNTIME.md), "Running in containers").
-Without Docker: download the release archive `tensorfold-r3.3-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
+Without Docker: download the release archive `tensorfold-r3.3.1-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
 ([packaging/RUNTIME.md](packaging/RUNTIME.md) here). Either way, copy `glm53.conf.example` (eight nodes) or
 `glm53.t4.conf.example` (four nodes, see [glm53/release/T4.md](glm53/release/T4.md)) to `glm53.conf`, fill in what it
 asks for, then `./tf-glm53 deploy` and `./tf-glm53 up`, which starts the control panel, and start the engine there.
@@ -289,7 +304,7 @@ libibverbs headers (`libibverbs-dev`):
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so
-zig build dist -Dversion=r3.3-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.3.1-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 

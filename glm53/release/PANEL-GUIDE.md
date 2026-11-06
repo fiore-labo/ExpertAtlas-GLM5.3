@@ -136,7 +136,8 @@ ticks first, then press. For `docker run ... IMAGE up`, give your own to the sta
   and the DCP pair (e.g. 0·10), with their kind, A725 or X925, in the cell's title; the line under the table says the
   start setting (ROCE_PROXY_CORES: kept on A725, the default, or left to the OS), and the line below it where the engine
   itself runs (ENGINE_CORES: A725, or OS, the default), for an engine that says so. The head's are where they ran last; the
-  other nodes' where they were kept at the start, "—" when left to the OS. Without the launcher the same is a card of
+  other nodes' where they were kept at the start, "—" when left to the OS. While the engine rests with nothing to do (TF_GLM53_IDLE_PARK_MS), the threads are stopped
+  and every cell reads idle. Without the launcher the same is a card of
   its own, [ RDMA ].
   Concurrent: the engine's conversations at once and, at 2 or more, the requests in flight.
 - **GPU split** (an engine that runs several conversations at once and serves its schedule; otherwise not shown): how

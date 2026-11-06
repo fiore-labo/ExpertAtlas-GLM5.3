@@ -194,6 +194,10 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     if (metrics_lis) |ml| ml.close();
     lis.close();
     if (drawing) ticker.finish();
+    // Fiore-lab: the engine ends the work in flight first (the running requests stop at their next step, the waiting
+    // ones end as cancelled, a replica's other ranks are told to stop), so the replies close; before, the process
+    // could leave after the 2 s below with the work still running, and a replica's rank 0 never told the others.
+    s.engine.stopAll();
     var waited: u32 = 0;
     while (srv.open_connections.load(.acquire) > 0 and waited < 40) : (waited += 1) std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
     if (srv.open_connections.load(.acquire) > 0) std.process.exit(0); // replies still open: end without freeing what they read

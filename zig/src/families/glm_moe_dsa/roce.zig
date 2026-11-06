@@ -94,6 +94,7 @@ const Proxy = struct {
     local_blob: *const fn (*Ctx, ?*anyopaque, u64) callconv(.c) c_int,
     connect: *const fn (*Ctx, ?*const anyopaque, u64) callconv(.c) c_int,
     start: *const fn (*Ctx) callconv(.c) c_int,
+    stop: *const fn (*Ctx) callconv(.c) void,
     stripes: *const fn (*Ctx) callconv(.c) c_int,
     stripe_hca: *const fn (*Ctx, c_int, c_int) callconv(.c) c_int,
     set_ring4: *const fn (*Ctx, c_int) callconv(.c) c_int,
@@ -123,6 +124,7 @@ const Proxy = struct {
         p.local_blob = try L.get(&p.lib, @TypeOf(p.local_blob), "roce_local_blob");
         p.connect = try L.get(&p.lib, @TypeOf(p.connect), "roce_connect");
         p.start = try L.get(&p.lib, @TypeOf(p.start), "roce_start");
+        p.stop = try L.get(&p.lib, @TypeOf(p.stop), "roce_stop");
         p.stripes = try L.get(&p.lib, @TypeOf(p.stripes), "roce_stripes");
         p.stripe_hca = try L.get(&p.lib, @TypeOf(p.stripe_hca), "roce_stripe_hca");
         p.set_ring4 = try L.get(&p.lib, @TypeOf(p.set_ring4), "roce_set_ring4");
@@ -449,10 +451,39 @@ pub const Runtime = struct {
         return out;
     }
 
-    /// The proxy thread's id (0 before it runs).
-    /// proxy のスレッドの id (動く前は 0)。
+    /// The proxy thread's id (0 before it runs and after it ends).
+    /// proxy のスレッドの id (動く前と終わった後は 0)。
     pub fn proxyTid(r: *const Runtime) i32 {
         return r.proxy.tid(r.ctx);
+    }
+
+    /// Fiore-lab (idle park): the proxy thread stopped while every rank is parked (each rank's RoCE ops before the
+    /// park's NCCL share completed), then checked: false when the context failed, then or on the way out (a ring of
+    /// four's last relays; roce_proxy.c keeps that failure). The rank must not go on serving then.
+    /// Fiore-lab (idle park): 全ランクが休むあいだ proxy のスレッドを止め (休む合図の NCCL の共有より前の RoCE の通信は
+    /// 全ランクで済んでいる)、確かめる: その時か止まる途中 (リング 4 台の最後の中継) に失敗していれば false。そのランクは
+    /// 処理を続けてはいけない。
+    pub fn park(r: *const Runtime) bool {
+        r.proxy.stop(r.ctx);
+        return r.healthy();
+    }
+
+    /// Fiore-lab (idle park): the proxy thread started again (it goes on from its last sequence) and kept on `cpu`
+    /// when one is given, as at the start. False when it cannot start (a failed context is not started again) or is
+    /// not healthy; a failed pin is logged and left to the scheduler, as at the start.
+    /// Fiore-lab (idle park): proxy のスレッドを再び動かし (最後の seq から続ける)、`cpu` があれば起動時と同じく
+    /// そこに留める。動かせない (失敗した context は再び動かさない) か健全でなければ false。留められないときは、
+    /// 起動時と同じくログに出してスケジューラに任せる。
+    pub fn wake(r: *const Runtime, cpu: ?u16) bool {
+        if (r.proxy.start(r.ctx) != 0) {
+            std.log.err("roce (world {d}, rank {d}): proxy not started again: {s}", .{ r.reg.world, r.reg.rank, std.mem.span(r.proxy.err(r.ctx)) });
+            return false;
+        }
+        if (cpu) |c| {
+            const rc = r.proxy.pin(r.ctx, c);
+            if (rc != 0) std.log.warn("roce (world {d}, rank {d}): proxy not kept on CPU {d} again (error {d})", .{ r.reg.world, r.reg.rank, c, rc });
+        }
+        return r.healthy();
     }
 
     /// A power-of-two grid of about two 16-byte packs a thread, at most max_blocks, and its counters.

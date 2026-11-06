@@ -2,7 +2,8 @@
 // Copyright (c) 2025 by the b12x authors; modified by Fiore-lab: a GID index for each RDMA device (picked from the
 // device's GID table when the caller passes a negative index), the build note below, and the share mode of a doorbell
 // (top bit of its byte count: peer p gets share p of the payload, for the two-shot all-reduce; ABI 4), and the
-// stripes of each peer over the HCAs that reach it (up to four HCAs; ABI 5, below).
+// stripes of each peer over the HCAs that reach it (up to four HCAs; ABI 5, below), and a restart after an idle park
+// (a failure on the way out kept, a failed context not started again, the thread id cleared when the thread ends).
 //
 // Stripes (ABI 5): the ranks exchange each HCA's IPv4 address and prefix, and a peer's stripes are the pairs of
 // HCAs, one on each side, in the same subnet (matched in the lower rank's HCA order, each HCA of the higher rank
@@ -843,8 +844,7 @@ static int progress_relays(roce_ctx_t *c) {
     return due;
 }
 
-static void *proxy_main(void *arg) {
-    roce_ctx_t *c = (roce_ctx_t *)arg;
+static void *proxy_run(roce_ctx_t *c) {
     atomic_store(&c->tid, (int)syscall(SYS_gettid));
     volatile uint32_t *ctrl = (volatile uint32_t *)(c->region + c->ctrl_off);
     // Spin while ops are flowing.  After ROCE_IDLE_SPINS polls without a
@@ -914,12 +914,31 @@ static void *proxy_main(void *arg) {
             for (int h = 0; h < c->n_hca; h++) {
                 if (drain_cq(c, h) != 0) due = -1;
             }
-            if (due <= 0) break;
+            // changed from b12x (idle park): a failure here, or relays still due after the second, is kept as the
+            // context's failure (a parked rank checks it before it sleeps; roce_start refuses a failed context)
+            if (due < 0) {
+                if (!atomic_load(&c->failed)) snprintf(c->err, sizeof(c->err), "stopping: a relay or a completion failed");
+                atomic_store(&c->failed, 1);
+                break;
+            }
+            if (due == 0) break;
             clock_gettime(CLOCK_MONOTONIC, &t);
-            if ((t.tv_sec - t0.tv_sec) * 1000000000L + (t.tv_nsec - t0.tv_nsec) > 1000000000L) break;
+            if ((t.tv_sec - t0.tv_sec) * 1000000000L + (t.tv_nsec - t0.tv_nsec) > 1000000000L) {
+                if (!atomic_load(&c->failed)) snprintf(c->err, sizeof(c->err), "stopping: %d relays still due after 1 s", due);
+                atomic_store(&c->failed, 1);
+                break;
+            }
         }
     }
     return NULL;
+}
+
+// changed from b12x (idle park): the thread id back to 0 however the thread ends (the roce view reads it)
+static void *proxy_main(void *arg) {
+    roce_ctx_t *c = (roce_ctx_t *)arg;
+    void *r = proxy_run(c);
+    atomic_store(&c->tid, 0);
+    return r;
 }
 
 int roce_start(roce_ctx_t *c) {
@@ -933,7 +952,11 @@ int roce_start(roce_ctx_t *c) {
         c->last_seq = ctrl[0];
         c->started = 1;
     }
-    atomic_store(&c->failed, 0);
+    // changed from b12x (idle park): a failed context stays failed (its QPs, CQs and slots are not reset here), so
+    // it is not started again; the failure was set to 0 here before
+    if (atomic_load(&c->failed)) {
+        return -1;
+    }
     atomic_store(&c->running, 1);
     int rc = pthread_create(&c->thread, NULL, proxy_main, c);
     if (rc != 0) {

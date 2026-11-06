@@ -788,6 +788,18 @@ pub const Host = struct {
     // ターンの計算に任せる (closeCut)
     canon_close: enum { off, near, all } = .near,
     canon_near: usize = 4096,
+    // Fiore-lab (idle park): TF_GLM53_IDLE_PARK_MS (default 1000; 0: at once; off, or a replica that cannot: null,
+    // never) and TF_GLM53_IDLE_WAKE_TIMEOUT_S (default 30): rank 0 parks the replica after that long with nothing to
+    // do and waits that long for every rank's ready when it wakes it; `idle` (under the mutex) is the state /health shows
+    // Fiore-lab (idle park): TF_GLM53_IDLE_PARK_MS (既定 1000、0 はすぐ、off か休めないレプリカでは null で休まない) と
+    // TF_GLM53_IDLE_WAKE_TIMEOUT_S (既定 30): rank 0 は何もない時間がそれだけ続くとレプリカを休ませ、起こすときは全ランクの
+    // 準備をそれだけ待つ。`idle` (mutex の下) は /health が示す状態
+    park_ns: ?i96 = null,
+    wake_timeout_ms: u32 = 30_000,
+    idle: api.Idle = .{},
+    // Fiore-lab: rank 0's engine thread has ended (the other ranks told to stop); stopAllFn waits for it
+    // Fiore-lab: rank 0 のエンジンのスレッドが終わった (ほかのランクに停止を伝えた)。stopAllFn がこれを待つ
+    ended: std.atomic.Value(bool) = .init(false),
     // TF_GLM53_BYTE_RESUME: off: nothing; log: each reply's first admission logs how far the prompt's bytes agree with a
     // kept slot past the first id that differs; on (default): the same, and the prompt takes the slot's ids to there
     // TF_GLM53_BYTE_RESUME: off は何もしない。log は応答の最初の受け入れで、最初に違う id より先で prompt のバイトが
@@ -856,7 +868,7 @@ pub const Host = struct {
     const window_ns: i96 = 2 * std.time.ns_per_s;
 
     pub fn engine(h: *Host) api.Engine {
-        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .experts = expertsFn, .experts_control = controlFn, .schedule = scheduleFn } };
+        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .experts = expertsFn, .experts_control = controlFn, .schedule = scheduleFn, .stop_all = stopAllFn } };
     }
 
     fn self(ctx: *anyopaque) *Host {
@@ -965,6 +977,33 @@ pub const Host = struct {
     /// (the agreement points of every prompt chunk read the engine's stop_req).
     /// job の停止: 次のまとめたラウンドでのその会話のビット。prompt の実行中は prefill の停止も (各 prompt チャンクの
     /// 合意点がエンジンの stop_req を読む)。
+    /// Fiore-lab: the server's stop (SIGTERM), rank 0: no more requests (submit refuses once closing), the running ones
+    /// stopped at their next agreement point as a cancel does, the waiting ones ended as cancelled by the engine thread,
+    /// which then tells the other ranks to stop. Their replies end with it, so the server closes the engine instead of
+    /// leaving the process with the work in flight (the other ranks then waited in a collective until their KILL).
+    /// Fiore-lab: サーバーの停止 (SIGTERM)、rank 0: 新しい要求を受けず (closing なので submit は断る)、実行中のものは
+    /// cancel と同じく次の合意点で止め、待っているものはエンジンのスレッドが cancelled で終え、ほかのランクに停止を
+    /// 伝える。それで返信が閉じ、サーバーはエンジンを閉じられる (以前は処理が残ったままプロセスが終わり、ほかのランクは
+    /// KILL されるまで集団通信で待っていた)。
+    fn stopAllFn(ctx: *anyopaque) void {
+        const h = self(ctx);
+        if (h.group.rank != 0) return;
+        h.lock();
+        h.closing = true;
+        if (h.running) |job| h.stopJob(job);
+        if (h.prefilling) |job| h.stopJob(job);
+        for (h.act[0..h.multi_n]) |a| if (a) |job| h.stopJob(job);
+        h.wake.broadcast(h.io);
+        h.unlock();
+        // the engine thread ends once the work stopped and the other ranks are told: up to 20 s (a prompt chunk or a
+        // round to finish), inside the 30 s a launcher gives before its KILL
+        // エンジンのスレッドは、処理が止まりほかのランクに伝え終えると終わる: 20 秒まで (prompt のチャンクやラウンドの
+        // 終わりを待つ)。ランチャーが KILL するまでの 30 秒の内
+        var waited: u32 = 0;
+        while (!h.ended.load(.acquire) and waited < 400) : (waited += 1) std.Io.sleep(h.io, .fromMilliseconds(50), .awake) catch {};
+        if (!h.ended.load(.acquire)) std.log.warn("glm53: stop: the engine thread has not ended after 20 s", .{});
+    }
+
     fn stopJob(h: *Host, job: *Job) void {
         job.stop.store(true, .monotonic);
         if (h.multi_n == 0 or h.prefilling == job) h.eng.stop_req.store(true, .monotonic);
@@ -1050,6 +1089,7 @@ pub const Host = struct {
         // where the RoCE proxies poll (TF_GLM53_ROCE_PROXY_CORES): rank 0's from /proc now, the others' from the start
         // RoCE の proxy が待つ所 (TF_GLM53_ROCE_PROXY_CORES): rank 0 のものは今 /proc から、ほかは起動時から
         p.engine_cores = glm.roce.engineCores(h.io);
+        p.idle = h.idle;
         if (h.eng.roceView(h.io)) |v| {
             p.roce.mode = switch (v.mode) {
                 .a725 => .a725,
@@ -1493,13 +1533,77 @@ pub const Host = struct {
         h.decoded.append(h.gpa, .{ .at = t, .tokens = n }) catch {};
     }
 
+    /// Rank 0 has work for the single-request loop: a request queued, a change of the bits asked, or the close.
+    fn busySingle(h: *Host) bool {
+        return h.queued.items.len != 0 or h.swap_want != null or h.closing;
+    }
+
+    /// Rank 0 has work with TF_GLM53_MULTI: also a conversation live (a done one is live until it is released).
+    fn busyMulti(h: *Host) bool {
+        return busySingle(h) or h.liveCount() != 0;
+    }
+
+    /// Fiore-lab (idle park): rank 0's wait for work, the lock held on entry and on return, `busy(h)` true on return.
+    /// After TF_GLM53_IDLE_PARK_MS with nothing to do it parks the replica; with work again it wakes it before
+    /// returning (the caller's shares then find every rank awake). The lock is let go while the ranks are told, and
+    /// the work is looked at again after each (a request may have come or gone meanwhile). Only the engine thread.
+    /// Fiore-lab (idle park): rank 0 が仕事を待つ。入るときも戻るときも鍵を持ち、戻るときは `busy(h)` が真。
+    /// TF_GLM53_IDLE_PARK_MS のあいだ何もなければレプリカを休ませ、仕事が来たら戻る前に起こす (呼ぶ側の共有では全ランクが
+    /// 起きている)。ランクに伝えるあいだは鍵を外し、そのたびに仕事を見直す (その間に要求が来たり消えたりしうる)。
+    /// エンジンのスレッドだけが呼ぶ。
+    fn waitWork(h: *Host, busy: *const fn (*Host) bool) void {
+        while (true) {
+            var since: ?i96 = null;
+            while (!busy(h)) {
+                if (h.park_ns) |wait| if (h.idle.state == .awake) {
+                    const t = h.now();
+                    const from = since orelse t;
+                    since = from;
+                    if (t - from >= wait) {
+                        h.parkAll();
+                        since = null;
+                        continue;
+                    }
+                };
+                h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
+            }
+            if (h.idle.state != .parked) return;
+            h.wakeAll();
+        }
+    }
+
+    /// Fiore-lab (idle park): every rank told to park and rank 0's proxies stopped (the lock let go meanwhile). A
+    /// failure is fatal: a rank may already sleep.
+    fn parkAll(h: *Host) void {
+        h.idle.state = .parking;
+        h.unlock();
+        const r = if (h.multi_n > 0) glm.lockstep.parkMulti(&h.ch, h.eng) else glm.lockstep.park(&h.ch, h.eng);
+        r catch |err| fatal("parking the replica (idle)", err);
+        std.log.info("glm53: idle: every rank parked (RoCE proxies stopped, no collective posted)", .{});
+        h.lock();
+        h.idle.state = .parked;
+        h.idle.parks += 1;
+    }
+
+    /// Fiore-lab (idle park): rank 0's proxies started and every rank woken and ready (the lock let go meanwhile). A
+    /// failure is fatal: the ranks may be half awake.
+    fn wakeAll(h: *Host) void {
+        h.idle.state = .waking;
+        h.unlock();
+        const t0 = h.now();
+        glm.lockstep.wake(&h.ch, h.eng, h.wake_timeout_ms) catch |err| fatal("waking the replica", err);
+        const us: u64 = @intCast(@divTrunc(@max(0, h.now() - t0), std.time.ns_per_us));
+        std.log.info("glm53: idle: every rank awake in {d} us", .{us});
+        h.lock();
+        h.idle.state = .awake;
+        h.idle.last_wake_us = us;
+    }
+
     fn run(h: *Host) void {
         h.ctx.makeCurrent() catch |err| fatal("binding the CUDA context", err);
         while (true) {
             h.lock();
-            while (h.queued.items.len == 0 and h.swap_want == null and !h.closing) {
-                h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
-            }
+            h.waitWork(&busySingle);
             if (h.swap_want) |want| if (!h.closing) {
                 h.swap_want = null;
                 h.swap.state = .running;
@@ -1517,6 +1621,7 @@ pub const Host = struct {
                 for (left) |job| h.finish(job, .cancelled, .{}, "");
                 h.gpa.free(left);
                 glm.lockstep.shutdown(&h.ch) catch |err| std.log.err("glm53: telling the other ranks to stop failed: {s}", .{@errorName(err)});
+                h.ended.store(true, .release);
                 return;
             }
             const job = h.queued.orderedRemove(0);
@@ -2179,9 +2284,7 @@ pub const Host = struct {
             // TF_GLM53_MULTI_WAIT_S を過ぎた待ち。鍵を取る前に (expireWaits が自分で取る)
             h.expireWaits();
             h.lock();
-            while (h.queued.items.len == 0 and h.liveCount() == 0 and h.swap_want == null and !h.closing) {
-                h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
-            }
+            h.waitWork(&busyMulti);
             // a change of the bits goes before what came after it was asked (nothing was live or waiting then); the
             // pool is cold after it, so the queued jobs' estimates are made again
             // bit の変更は、求められた後に来たものより先 (そのとき使用中も待ちもなかった)。変更の後の
@@ -2208,6 +2311,7 @@ pub const Host = struct {
                 // 使用中の会話は止め (停止のラウンド 1 回)、確定する
                 h.roundOnce();
                 glm.lockstep.shutdownMulti(&h.ch) catch |err| std.log.err("glm53: telling the other ranks to stop failed: {s}", .{@errorName(err)});
+                h.ended.store(true, .release);
                 return;
             }
             // greedy and sampled requests alike (a sampled conversation draws its rows with its own keyed sampler)
@@ -2659,6 +2763,26 @@ fn envNum(name: [:0]const u8, default: usize) !usize {
     return std.fmt.parseInt(usize, std.mem.span(v), 10);
 }
 
+/// Fiore-lab (idle park): TF_GLM53_IDLE_PARK_MS in milliseconds (default 1000), null for off.
+fn idleParkMs() !?u32 {
+    const v = std.c.getenv("TF_GLM53_IDLE_PARK_MS") orelse return 1000;
+    return parkMs(std.mem.span(v));
+}
+
+fn parkMs(text: []const u8) !?u32 {
+    const t = std.mem.trim(u8, text, " ");
+    if (std.mem.eql(u8, t, "off")) return null;
+    return try std.fmt.parseInt(u32, t, 10);
+}
+
+test "TF_GLM53_IDLE_PARK_MS: milliseconds, 0 at once, off never" {
+    try std.testing.expectEqual(@as(?u32, 1000), try parkMs("1000"));
+    try std.testing.expectEqual(@as(?u32, 0), try parkMs(" 0 "));
+    try std.testing.expectEqual(@as(?u32, null), try parkMs("off"));
+    try std.testing.expectError(error.InvalidCharacter, parkMs("1s"));
+    try std.testing.expect(if (parkMs("-1")) |_| false else |_| true);
+}
+
 /// TF_GLM53_MULTI=n from the environment alone, before the load: the pool, DCP 2, DFlash2 with its saves, no index FP8
 /// and not on three ranks (DCP 1 and TP3 are not offered with it for now).
 /// TF_GLM53_MULTI=n を読み込みの前に環境だけで確かめる: pool、DCP 2、DFlash2 なら写し、index FP8 なし、3 ランクでない
@@ -2869,6 +2993,22 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: usize) !*Host {
             h.swap = .{ .seq = 1, .state = .waiting };
             std.log.info("glm53: expert bits from {s} (the first job)", .{std.mem.span(v)});
         }
+    }
+    // Fiore-lab (idle park): TF_GLM53_IDLE_PARK_MS and TF_GLM53_IDLE_WAKE_TIMEOUT_S (rank 0 uses them; every rank has
+    // the same, as the build identity checks); one rank never parks (nothing waits), nor a replica without its
+    // rendezvous links
+    // Fiore-lab (idle park): TF_GLM53_IDLE_PARK_MS と TF_GLM53_IDLE_WAKE_TIMEOUT_S (使うのは rank 0。全ランク同じ値で
+    // あることはビルド ID が確かめる)。1 ランクでは休まない (待つものがない)。待ち合わせの接続のないレプリカも休まない
+    if (idleParkMs() catch return error.IdleParkMs) |ms| {
+        if (world > 1 and h.group.parkable()) {
+            h.park_ns = @as(i96, ms) * std.time.ns_per_ms;
+            h.idle.park_ms = ms;
+        } else if (world > 1 and rank == 0) std.log.warn("glm53: TF_GLM53_IDLE_PARK_MS: the ranks' rendezvous links are not open; the replica does not park", .{});
+    }
+    const wake_s = envNum("TF_GLM53_IDLE_WAKE_TIMEOUT_S", 30) catch return error.IdleWakeTimeout;
+    h.wake_timeout_ms = @intCast(@min(wake_s, 4_000_000) * 1000);
+    if (rank == 0) {
+        if (h.idle.park_ms) |ms| std.log.info("glm53: idle: every rank parks after {d} ms with nothing to do (TF_GLM53_IDLE_PARK_MS)", .{ms}) else std.log.info("glm53: idle: the replica does not park", .{});
     }
     const spawn: std.Thread.SpawnConfig = .{ .stack_size = 16 << 20 };
     h.thread = if (rank == 0)

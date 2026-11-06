@@ -16,6 +16,8 @@
 | [QUICKSTART](glm53/release/QUICKSTART.ja.md) | 初めての起動: 重み、`docker run` 1 行、全オプション、よくある `STOP` |
 | [BEFORE-START](glm53/release/BEFORE-START.ja.md) | 初めての起動の前に決めること、後でよいこと |
 | [PANEL-GUIDE](glm53/release/PANEL-GUIDE.ja.md) | コントロールパネルの画面を項目ごとに |
+| [SCREENS](glm53/release/SCREENS.ja.md) | コントロールパネルの画面を、画像つきで 1 つずつ |
+| [FEATURES](glm53/release/FEATURES.ja.md) | 機能ごとに、何をするか、なぜあるか、どう使うか |
 | [CONFIG](glm53/release/CONFIG.ja.md) | `glm53.conf` の全設定: 既定値、読む側、変更が効く時期 |
 | [RUNTIME](packaging/RUNTIME.ja.md) | アーカイブや手作業で動かす方法: 全コマンド、キャッシュ、Claude Code、障害 |
 | [T4](glm53/release/T4.ja.md) | 4 台: 重み、設定、測定 |
@@ -33,6 +35,12 @@
 - ラウンドごとにドラフトをモデルが検証します。ドラフトを作るのは、既定では GLM-5.3 自身の MTP 層、またはオプションの DFlash2 drafter です。どの場合も、応答はモデル自身が選んだものです。
 - 思考が長くなりすぎないようにします。上限は `max_tokens`（1 回の応答の上限）に対する割合で決め、長い思考は途中や終わりに整理できます。リクエストごとにも、エンジンの動作中にも設定できます。
 - `/metrics`（Prometheus のテキスト）と `/health` は実行中のリクエストの分も数えるので、モニタはリクエストの実行中にも prefill と decode の速さ、キャッシュのヒット、ドラフトの受理を読めます。`METRICS_LISTEN` を設定すると、別のホストのモニタ向けに、この 2 つを専用のアドレスで読み取り専用で開きます。
+
+## r3.3.1-102 で変わったこと
+
+- **処理することがないあいだ、エンジンが休止します。** 処理することがない状態が 1 秒続くと (`EXTRA_ENV` の `TF_GLM53_IDLE_PARK_MS`)、全ランクが休止します。ほかのランクは rank 0 との接続で眠り、RoCE の通信スレッドはすべて止まります。リクエスト、エキスパートのビットの入れ替え、停止が来ると 0.6〜2.0 ms で起き、短いリクエストの最初のトークンは前と同じ速さで出ます。リングで測ると、休止中は各ノードのエンジンが 1 コアの 1 % 未満、GPU が 0 % でした。休止しないと、ほかのランクの GPU は 96 % です。そのノードの SoC は、`ENGINE_CORES=os` で 64〜85 °C から 50〜54 °C に下がりました。状態は `/health` の `idle` に出て、パネルの RDMA の欄は「休止」になります ([CONFIG](glm53/release/CONFIG.ja.md))。
+- **直した不具合: リクエストが待っているか動いているときの停止**は、r3.3-102 では 36〜37 秒かかり、ほかのランクの GPU がプロセスのないまま動作の状態 (P0、約 11 W) に残りました。今はリクエストを終わらせて全ランクに知らせ、負荷があってもなくても 6 秒で止まり、GPU はすべて待機の状態 (P8) に戻ります。
+- r3.3-102 からは変えることはありません。重みも設定も同じです。
 
 ## r3.3-102 で変わったこと
 
@@ -130,12 +138,12 @@ Fiore-lab のものと形が同じで、同じように読み込まれます。
 リリースは、コンテナイメージと、同じファイルを持つアーカイブの 2 つの形で配布します。おすすめはイメージです。重みを置いてあれば、1 台目のノードで次の 1 行を実行するとエンジンが起動します。
 
 ```sh
-docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3-102 up
+docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.1-102 up
 ```
 
 最後に `READY` とアドレスが出ます。API は `http://FIRST-NODE:8000/v1`、コントロールパネルは `http://FIRST-NODE:8010/panel` です。足りないものがあると `STOP` で止まり、することと次に実行する行を示します。手順と全オプションは [QUICKSTART](glm53/release/QUICKSTART.ja.md) にあります。
 
-同じことを手で行う場合、イメージなら、全ノードで `docker pull` し、`mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out` を実行して、`glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定します（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3.3-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。どちらも、`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーして必要な項目を記入し、`./tf-glm53 deploy` と `./tf-glm53 up`（コントロールパネルを起動します）を実行して、パネルでエンジンを起動します。`./tf-glm53 start` は直前の起動の計画で起動し、`./tf-glm53 down` で停止します。
+同じことを手で行う場合、イメージなら、全ノードで `docker pull` し、`mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out` を実行して、`glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定します（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3.3.1-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。どちらも、`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーして必要な項目を記入し、`./tf-glm53 deploy` と `./tf-glm53 up`（コントロールパネルを起動します）を実行して、パネルでエンジンを起動します。`./tf-glm53 start` は直前の起動の計画で起動し、`./tf-glm53 down` で停止します。
 
 サーバーは既定で全アドレス（`HOST=0.0.0.0`）で OpenAI chat API と、Claude Code 向けの Anthropic Messages API を提供します。API にもコントロールパネルにもキーはないので、届く人なら誰でも使えます。ノードを閉じたネットワーク内に留めるか、前段に TLS とアクセス制御を置いてください（`HOST=127.0.0.1` と `LAUNCHER_HOST=127.0.0.1` にすると 1 台目のノードからだけになります）。
 
@@ -178,7 +186,7 @@ Zig 0.17.0 が `PATH` 上にあり（または `build_libs.sh` には `ZIG=` で
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so
-zig build dist -Dversion=r3.3-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.3.1-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 
