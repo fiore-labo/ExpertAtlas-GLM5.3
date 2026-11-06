@@ -27,17 +27,16 @@ ticks first, then press. For `docker run ... IMAGE up`, give your own to the sta
   (before any run: all 3 bit); Open picks the last run's allocation as it was, or a saved one. The head of the card names the plan: the last run, a saved allocation's name, or
   New · unsaved.
   - **Shares**: type each width's share of the experts in the table (5, 4 and 3 bit; the narrowest width with data
-    takes the rest, so they add up to 100 %), or drag the knobs on the curve. The scale counts from the 5 bit end,
+    takes the rest, so they add up to 100 %). The scale counts from the 5 bit end,
     which is 0 %: 5 bit 10 % is the range 0–10 %. In a mix the most used experts get the widest bits, ranked by
     prefill 0.3 / decode 0.7 (an expert's decode share weighed 0.7, its prefill share 0.3; `ATLAS-TESTS.md`).
-  - **Count** (decode, prefill, prefill 0.3 / decode 0.7): for reading only. The curve, the knobs' readouts (what share
-    of the picks the experts up to a point carry), the circle's order and Use follow the counts picked; the plan's bits
-    do not change.
-  - **A new plan**: changing the shares (typed or with the knobs) makes a new plan (New · unsaved), the experts ranked by
+  - **Count** (decode, prefill, prefill 0.3 / decode 0.7): for reading only. The circle's order and Use follow the
+    counts picked; the plan's bits do not change.
+  - **A new plan**: changing the shares makes a new plan (New · unsaved), the experts ranked by
     the plan's usage record (below).
   - **Open**: the last run's allocation and the saved ones, with their shares, mean bits, when and how each was made.
     One opened becomes the plan bit for bit, and the start uses that allocation. Its usage record comes with it: Count
-    and the curve show it, a plan whose shares are changed from it is ranked by it, and a run started from either adds
+    shows it, a plan whose shares are changed from it is ranked by it, and a run started from either adds
     to it. Its bits stay as saved until the shares are changed. An allocation that needs a width without data, or a bank this
     lane does not have, cannot be opened; the reason is shown under it. Rename and Delete (press it again to confirm)
     work on each saved one; a deleted one goes to the launcher's trash.
@@ -84,7 +83,10 @@ ticks first, then press. For `docker run ... IMAGE up`, give your own to the sta
   the room left. Both go into glm53.conf as they change (RESERVE_GB, KV_SIZE).
 - **Drafter**: MTP, DFlash2 or None, chosen under the KV format; the memory is planned for it. DFlash2 is not shipped
   (its licence): download it and set DRAFTER in glm53.conf. Until every node has it, it is greyed with the reason.
-- **Nodes** (in the card's head, while the engine is stopped): the head (rank 0) is the node the launcher runs on.
+- **Concurrent**: 1 to 4, the conversations the engine decodes together (MULTI; 1 is one at a time). A number the lane or
+  the drafter refuses is greyed with why. The memory is planned for it.
+- **Nodes** (in the card's head, while the engine is stopped, from a launcher whose nodes are not registered by the node
+  check: a ring lane, or a lane with a node file, has none): the head (rank 0) is the node the launcher runs on.
   Workers are registered once, whatever the node count (an address, Add), and each count's workers are ticked from
   the list (Use 3 / 3 at 4 nodes, 7 / 7 at 8); the ranks follow the list's order. The list and each count's ticks are
   kept in the lane's panel settings, so they come back on any browser. Delete takes a worker off the list (and off
@@ -115,11 +117,18 @@ ticks first, then press. For `docker run ... IMAGE up`, give your own to the sta
   While a prompt is prefilled the experts are in number order; once decoding starts they turn to usage order, the
   most used first, from 9 o'clock.
 - **Rim**: the prefill's progress while a prompt is computed (real); while decoding, the reply's text runs round the
-  rim.
+  rim (on a ring lane it is off by default).
+- **Thinking or answering** (an engine that says what each reply writes): while the request the circle follows
+  decodes, the band round the rim takes one of the theme's colours while the reply thinks and the other while it
+  answers, with THINKING or ANSWER and their tokens above 12 o'clock. At the turn the new colour runs round from 12
+  o'clock.
 - **Centre and below**: in the centre, bpw (the mean bits of the experts picked) and each width's share of the picks;
   below the circle, prefill and decode tok/s (decode: every request's tokens together, decode total when several run at
   once; prefill when several run: the request the circle follows, over the time its prompt computed, the waits for the
   decode left out, — from an engine that does not give it), and bpw over the last 3 minutes.
+- **KV POOL** (under the circle, from an engine that gives its pool): the cache every conversation shares, its blocks on
+  a map (the shared start, the conversations kept, free; over them the cache the running request reads and the blocks it
+  added), the share in use, the conversations kept and how each request used the cache; `SCREENS.md` shows it.
 - **[ NODE ]**: Health check sends the running engine one request of about 1,000 tokens and judges the reply: Inference OK over the circle's centre, for a few seconds, or Inference error, which stays with its reason under the button until the next press or the engine stops (under the button too while the circle is hidden). Behind a long inference it waits its turn, up to 600 s. Stop, and the servers: each named with head or worker beside it, with its free memory and its GPU and CPU
   temperatures (the CPU's is the hottest of the node's thermal zones: on GB10 the CPU and GPU share one chip, which runs
   6-10 °C above the GPU's own reading under load), read by the launcher every 5 s; "—" where the launcher gives none.
@@ -222,10 +231,14 @@ The drawer at the bottom (Display):
 - **General**: Language (English or Japanese; by default the browser's), Data (Live or Simulation, and Pause), and the
   Memory bar's look.
 - **Circle**: Order (Auto by default, from 9 o'clock), Afterglow (Short by default), Unpicked and Picked brightness (6 and
-  19 of 24 by default), and Light colour (By bit, or One colour: blue by default).
-- **Text and centre**: the rim's Text (shown, still, by default), the Digits (7-segment by default), and the Centre's
-  cells.
-- **Colours**: the presets (Green · one hue by default; Random picks another).
+  19 of 24 by default), and Light colour (By bit, or One colour: One colour, blue, by default; By bit on a ring or
+  switch lane).
+- **Text and centre**: the rim's Text (shown, still, by default; off on a ring lane), the Digits (7-segment by default),
+  and the Centre's cells.
+- **Colours**: the presets (Green · one hue by default, Material · indigo on a ring or switch lane; Random picks
+  another).
+
+A lane's own settings come before these defaults.
 
 The settings are kept in one file, `launch/panel-settings.json` in the package's directory (`TF_PANEL_SETTINGS` in
 `EXTRA_ENV` moves it), so every browser opens the same panel. Back to defaults (press it twice) drops the display

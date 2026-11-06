@@ -314,7 +314,7 @@ allocs/delete). `AGENT-API.md` gives what an agent needs of it; its fields may c
 - **Memory, four nodes** (4-bit KV, plans asking for at most 737,280 with a KV size of the context length + 100,000, MTP, `ROWS` 16,384; the default of 8,192 leaves more): all 3 bits fits a context length
   of 737,280 tokens; half 3 / half 4 bits 737,280; a quarter 3 / three quarters 4 bits 622,592; all 4 bits 327,680; all
   5 bits does not fit. With `CONTEXT_LENGTH` 1,048,576 and `KV_SIZE` 1,049,088, 70 % at 3 bits and 30 % at 4 bits
-  fits with about 7.5 GiB a node to spare, enough for a live re-sort. DFlash2 needs about 4 GiB more a node. Mixes with 2-bit experts were 13 to 30 % further from the reference at the same memory.
+  fits with about 7.5 GiB a node to spare, enough for a live re-sort. With DFlash2 the launcher plans about 3 GiB more a node (about 4.3 on eight nodes). Mixes with 2-bit experts were 13 to 30 % further from the reference at the same memory.
 
 ## 9. What it can do (measured)
 
