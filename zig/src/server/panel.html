@@ -1337,37 +1337,42 @@ launcher: started (pid 2817): <u>http://FIRST-NODE:8010/panel</u>
 'use strict';
 const $ = (id) => document.getElementById(id);
 // innerHTML written only when it differs from what was written (the polls rebuilt the same tables every second), and
-// brought to it in place: a node of the same kind is kept and its attributes and text changed, only the nodes in
-// surplus are removed. Emptied and refilled, a block a poll wrote moved a page scrolled to its foot in Safari 18.6: it
-// laid the page out with the block empty and the page came up by the block's height every 5 s (11-06)
-// 前と違うときだけ、その場で書き換える: 同じ種類のノードは残して属性と文字だけ変え、余ったノードだけ消す。空にして
-// 書き直すと、Safari 18.6 では空の状態でページを組み、下までスクロールしたページが 5 秒ごとにその高さ分戻っていた
-const morphKids = (a, b) => {
-  const an = [...a.childNodes], bn = [...b.childNodes];
-  bn.forEach((y, k) => {
-    const x = an[k];
-    if (!x) a.appendChild(y);
-    else if (x.nodeType !== y.nodeType || x.nodeName !== y.nodeName) a.replaceChild(y, x);
-    else if (x.nodeType !== 1) { if (x.nodeValue !== y.nodeValue) x.nodeValue = y.nodeValue; }
-    else {
-      for (const n of [...x.getAttributeNames()]) if (!y.hasAttribute(n)) x.removeAttribute(n);
-      for (const n of y.getAttributeNames()) if (x.getAttribute(n) !== y.getAttribute(n)) x.setAttribute(n, y.getAttribute(n));
-      if (x._html !== undefined) x._html = undefined;   // its own setHTML writes it again / 中を自分の setHTML でも書く要素
-      morphKids(x, y);
-      // a field not being typed in shows what was written, as a new one would / 入力中でない欄は、新しく作ったときと同じ値に
-      if ((x.tagName === 'INPUT' || x.tagName === 'TEXTAREA' || x.tagName === 'SELECT') && x !== document.activeElement) {
-        if (x.value !== y.value) x.value = y.value;
-        if (x.checked !== y.checked) x.checked = y.checked;
-      }
-    }
-  });
-  for (let k = bn.length; k < an.length; k++) a.removeChild(an[k]);
+// brought to it in place: each child (a row) whose nodes are the same kinds in the same places is kept, its attributes
+// and text changed; a row of another shape is replaced whole, the new one put in and laid out before the old one goes;
+// rows in surplus removed, rows more appended. Safari 18.6 lays the page out as a node leaves, without the nodes just
+// put in: emptied and refilled, a block a poll wrote brought a page scrolled to its foot up by its height every 5 s, as
+// did a row replaced at once; and a node added inside a kept row left that row sized for what it had before (a note
+// one letter a line). Each checked in Safari 18.6 (11-06)
+// 前と違うときだけ、その場で書き換える: 中のノードの種類と並びが同じ子 (行) は残して属性と文字だけ変え、形の違う行は
+// 丸ごと置き換える (新しい行を入れて組んでから古い行を外す)。余った行は消し、足りない行は足す。Safari 18.6 はノードが
+// 外れるときに、入れたばかりのノードを除いてページを組む: 空にして書き直すと、下までスクロールしたページが 5 秒ごとに
+// その高さ分戻り、行をそのまま置き換えても同じだった。残した行の中にノードを足すと、行の幅が前の中身のままだった
+const shapeOf = (n) => n.nodeType !== 1 ? '#' + n.nodeType : n.nodeName + '(' + [...n.childNodes].map(shapeOf).join() + ')';
+const morphNode = (x, y) => {   // x and y of one shape / x と y は同じ形
+  if (x.nodeType !== 1) { if (x.nodeValue !== y.nodeValue) x.nodeValue = y.nodeValue; return; }
+  for (const n of x.getAttributeNames()) if (!y.hasAttribute(n)) x.removeAttribute(n);
+  for (const n of y.getAttributeNames()) if (x.getAttribute(n) !== y.getAttribute(n)) x.setAttribute(n, y.getAttribute(n));
+  if (x._html !== undefined) x._html = undefined;   // its own setHTML writes it again / 中を自分の setHTML でも書く要素
+  const xs = x.childNodes, ys = y.childNodes;
+  for (let k = 0; k < ys.length; k++) morphNode(xs[k], ys[k]);
+  // a field not being typed in shows what was written, as a new one would / 入力中でない欄は、新しく作ったときと同じ値に
+  if ((x.tagName === 'INPUT' || x.tagName === 'TEXTAREA' || x.tagName === 'SELECT') && x !== document.activeElement) {
+    if (x.value !== y.value) x.value = y.value;
+    if (x.checked !== y.checked) x.checked = y.checked;
+  }
 };
 const setHTML = (el, h) => {
   if (el._html === h) return;
   el._html = h;
   const t = document.createElement('template'); t.innerHTML = h;
-  morphKids(el, t.content);
+  const an = [...el.childNodes], bn = [...t.content.childNodes];
+  bn.forEach((y, k) => {
+    const x = an[k];
+    if (!x) el.appendChild(y);
+    else if (shapeOf(x) !== shapeOf(y)) { el.insertBefore(y, x); void el.offsetHeight; el.removeChild(x); }
+    else morphNode(x, y);
+  });
+  for (let k = bn.length; k < an.length; k++) el.removeChild(an[k]);
 };
 // the UI's language, English or Japanese: the page is written in English and data/i18n.json gives each string's
 // Japanese; the browser's language picks it, the settings' lang (表示設定 > Language) over it once they are read
@@ -8086,7 +8091,7 @@ async function load() {
 }
 // the checks' way in: check/flows.mjs sets window.__probe before the page's scripts; a page opened by a person has none
 // 試験の入口: check/flows.mjs がページのスクリプトより前に window.__probe を置く。人が開いたページには無い
-if (window.__probe) Object.assign(window.__probe, { liveQ: () => liveQ.length, livePicks, lnPoll, liveStart, rgShow, PH, MIM, PL, pfHeat, fxMimic, cfx, N, redraw: () => { rgSig = ''; RGO.sig = ''; } });
+if (window.__probe) Object.assign(window.__probe, { liveQ: () => liveQ.length, livePicks, lnPoll, liveStart, rgShow, PH, MIM, PL, pfHeat, fxMimic, cfx, N, setHTML, redraw: () => { rgSig = ''; RGO.sig = ''; } });
 $('doms').innerHTML = '<span class="cap">' + T("Loading the domains…") + '</span>';
 await load();
 } catch (error) {
