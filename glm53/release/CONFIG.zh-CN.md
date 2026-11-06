@@ -84,7 +84,7 @@
 | `ROWS` | `8192` | 提示分块的行数：256 至 65,536，步长 256。增大它会占用更多内存（每 1,024 行每个节点约 0.41 GiB，在四个节点上测得）。启动计划会从 KV 中扣除这部分，因此 KV 会变小。 |
 | `SP_PARTS` | `4` | 一个提示分块被拆分成的序列并行部分数：2 至 4。 |
 | `ROCE_PROXY_CORES` | `a725` | RoCE 代理线程（每个 rank 两个：节点间的和 DCP 对的）轮询所在的核。它们在 decode 期间一直自旋。`a725` 固定在 GB10 的 Cortex-A725 核 0 和 10（每个簇一个）；`os` 交给调度器（常落在 X925 上）。四节点上 A725 比调度器的选择使 SoC 低 5-16 °C，decode 速度相同。没有该类核的 CPU 上交给调度器。引擎日志会写出每个代理在哪里轮询；`/health` 的 `roce` 显示每个 rank 的（rank 0 的为当前值）。 |
-| `ENGINE_CORES` | `all` | 所有 rank 运行所用的核。`all`：节点的所有核。`a725`：仅每个节点的 Cortex-A725 核。`a725` 不能与 `ROCE_PROXY_CORES=x925` 同时使用，`tf-glm53` 会拒绝。仅用 A725 运行时的速度尚未测量。 |
+| `ENGINE_CORES` | `os` | 所有 rank 运行所用的核。`os`：交给调度器，即节点的所有核。`a725`：仅每个节点的 Cortex-A725 核。`a725` 不能与 `ROCE_PROXY_CORES=x925` 同时使用，`tf-glm53` 会拒绝。仅用 A725 运行时的速度尚未测量。 |
 | `MAX_TOKENS_SHARE` | `70` | 请求未指定 max_tokens 时回复的 max_tokens，以 `CONTEXT_LENGTH` 的百分比（1 至 100）指定。客户端的 `max_tokens` 优先。 |
 | `MAX_TOKENS` | （空） | 以 token 数指定同一项。有值时优先于 `MAX_TOKENS_SHARE`；在仪表板中保存 `MAX_TOKENS_SHARE` 时会清空。既无中途整理也无预算将尽时的整理时，请求超过上下文剩余量会被拒绝（400）。开启中途整理时，引擎会让间隔适应剩余空间；请求自行指定 `thinking_fold_window` 且放不下时会被拒绝（400）。 |
 | `THINKING_SHARE` | `90` | **运行中也可改**。 回复的 max_tokens 中思考可以使用的百分比（但最多为 prompt 在 `CONTEXT_LENGTH` 中剩余部分的该百分比；`0`：不限），其余部分属于回答。思考达到该 token 数后，在下一个换行处（最多 256 个 token 之后），引擎写入一句收尾的话和 `</think>`，其余部分用于回答。使用 `THINKING_FOLD` 时不收尾而继续：思考填满上下文的该百分比时折叠，预算为 max_tokens 减去回答部分。请求的 `thinking_budget`（Anthropic：`thinking.budget_tokens`）优先。 |

@@ -110,7 +110,7 @@ MULTI_DECODE_SHARE=${MULTI_DECODE_SHARE:-30}  # with MULTI: the decode's % of th
 MULTI_SHORT_PROMPT=${MULTI_SHORT_PROMPT:-8192}  # with MULTI: a prompt with at most this many tokens to compute past the cache goes first, not held by the share (0: none; POST /v1/schedule changes it)
 MULTI_SHORT_PREEMPT=${MULTI_SHORT_PREEMPT:-0}  # with MULTI: 1: a longer prefill running gives way to a short prompt too, resuming afterwards (POST /v1/schedule changes it)
 ROCE_PROXY_CORES=${ROCE_PROXY_CORES:-a725}  # the cores the RoCE proxy threads poll on: a725 (GB10's 0 and 10), x925 (5 and 15), os (the scheduler's)
-ENGINE_CORES=${ENGINE_CORES:-all}  # the cores every rank runs on: all, or a725 (each node's Cortex-A725 cores, none of the X925)
+ENGINE_CORES=${ENGINE_CORES:-os}  # the cores every rank runs on: os (the scheduler's: every core of the node), or a725 (each node's Cortex-A725 cores, none of the X925)
 MAX_TOKENS=${MAX_TOKENS:-}          # a reply's max_tokens when the request names none, as a count (empty: MAX_TOKENS_SHARE decides)
 MAX_TOKENS_SHARE=${MAX_TOKENS_SHARE:-70}  # the same as a percent of CONTEXT_LENGTH, 1 to 100
 THINKING_SHARE=${THINKING_SHARE:-90}   # the % of a reply's max_tokens (at most what the prompt leaves of CONTEXT_LENGTH) its thinking may use, the rest the answer's; there, at a line break, a closing sentence and </think> are written and the answer follows (0: no limit; a request's thinking_budget comes first). With THINKING_FOLD the thinking goes on past it (its budget max_tokens less the answer's part) and folds when it fills that % of the context
@@ -246,7 +246,7 @@ esac
 [[ $MULTI_SHORT_PROMPT =~ ^[0-9]+$ ]] && [ "$MULTI_SHORT_PROMPT" -le 1048576 ] || { echo "MULTI_SHORT_PROMPT must be 0 .. 1048576 (tokens; 0: none)"; exit 2; }
 [[ $MULTI_SHORT_PREEMPT =~ ^[01]$ ]] || { echo "MULTI_SHORT_PREEMPT must be 0 or 1"; exit 2; }
 [[ $ROCE_PROXY_CORES =~ ^(a725|x925|os)$ ]] || { echo "ROCE_PROXY_CORES must be a725, x925 or os"; exit 2; }
-[[ $ENGINE_CORES =~ ^(all|a725)$ ]] || { echo "ENGINE_CORES must be all or a725"; exit 2; }
+[[ $ENGINE_CORES =~ ^(os|a725)$ ]] || { echo "ENGINE_CORES must be os or a725"; exit 2; }
 if [ "$ENGINE_CORES" = a725 ] && [ "$ROCE_PROXY_CORES" = x925 ]; then echo "ENGINE_CORES=a725 keeps every thread off the X925 cores: ROCE_PROXY_CORES=x925 cannot go with it"; exit 2; fi
 [ -z "$MAX_TOKENS" ] || [[ $MAX_TOKENS =~ ^[1-9][0-9]*$ ]] || { echo "MAX_TOKENS must be a token count (or empty: MAX_TOKENS_SHARE decides)"; exit 2; }
 [[ $MAX_TOKENS_SHARE =~ ^[1-9][0-9]*$ ]] && [ "$MAX_TOKENS_SHARE" -le 100 ] || { echo "MAX_TOKENS_SHARE must be a percent from 1 to 100"; exit 2; }
