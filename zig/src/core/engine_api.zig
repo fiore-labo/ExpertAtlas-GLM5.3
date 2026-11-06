@@ -103,6 +103,9 @@ pub const Request = struct {
     think_budget: u32 = 0,
     think_close: []const u32 = &.{},
     think_end: ?u32 = null,
+    /// Fiore-lab: the think block's end token when the reply starts in its think block (thinking on): /health tells
+    /// whether each reply is still in it and its tokens there (R-027); null: thinking off.
+    think_mark: ?u32 = null,
     /// GLM-5.3: after every ``think_notice_every`` tokens of the think block (0: none), at the next line break,
     /// ``think_notices[k - 1]`` (the k-th) goes into the reply as the model's own text, telling it how much it used.
     think_notice_every: u32 = 0,
@@ -418,6 +421,11 @@ pub const RequestProgress = struct {
     /// Fiore-lab: the time its prefill chunks computed so far (ms), the waits left out (the decode's rounds inside it,
     /// a hold by the GPU split, the queue after it gave way); kept after its prefill. null before its first chunk.
     prefill_ms: ?u64 = null,
+    /// Fiore-lab (R-027): whether its reply is in the think block now (from the reply's start with thinking on, until
+    /// the block's end token; false with thinking off) and its reply tokens there so far (the end token not counted).
+    /// null: this engine does not say.
+    thinking: ?bool = null,
+    think_tokens: u64 = 0,
 };
 
 /// Totals since the engine started, the running requests' progress included, read under one lock so that each
@@ -430,6 +438,9 @@ pub const Progress = struct {
     cached: u64 = 0,
     prompt_done: u64 = 0,
     generated: u64 = 0,
+    /// Fiore-lab (R-027): the first running request's (RequestProgress.thinking, think_tokens).
+    thinking: ?bool = null,
+    think_tokens: u64 = 0,
     /// Prompt tokens of the requests waiting in the queue.
     queued_prompt: u64 = 0,
     /// The requests waiting in the queue (not admitted yet: under TF_GLM53_MULTI also those waiting for room in the

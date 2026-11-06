@@ -131,6 +131,10 @@ fn cudaHealth(srv: *Server, a: Allocator, o: *json.Object, status: *const api.St
         try r.put(a, "prompt_done", try json.intValue(a, p.prompt_done));
         try r.put(a, "prefill_tokens_remaining", try json.intValue(a, if (p.phase == .prefill) p.prompt -| @max(p.prompt_done, p.cached) else 0));
         try r.put(a, "generated_tokens", try json.intValue(a, p.generated));
+        if (p.thinking) |th| {
+            try r.put(a, "thinking", .{ .bool = th });
+            try r.put(a, "think_tokens", try json.intValue(a, p.think_tokens));
+        }
         try r.put(a, "queued_prompt_tokens", try json.intValue(a, p.queued_prompt));
         // Fiore-lab: the requests not admitted yet (TF_GLM53_MULTI: also those waiting for room in the pool) and the
         // oldest one's wait
@@ -154,6 +158,11 @@ fn cudaHealth(srv: *Server, a: Allocator, o: *json.Object, status: *const api.St
             try e.put(a, "generated_tokens", try json.intValue(a, q.generated));
             try e.put(a, "elapsed_ms", try json.intValue(a, q.elapsed_ms));
             if (q.prefill_ms) |v| try e.put(a, "prefill_ms", try json.intValue(a, v));
+            // R-027: in the think block now, and its tokens there so far / いま思考ブロックの中か、そこでのトークン数
+            if (q.thinking) |th| {
+                try e.put(a, "thinking", .{ .bool = th });
+                try e.put(a, "think_tokens", try json.intValue(a, q.think_tokens));
+            }
             slot.* = .{ .object = e };
         }
         try r.put(a, "requests", .{ .array = reqs });

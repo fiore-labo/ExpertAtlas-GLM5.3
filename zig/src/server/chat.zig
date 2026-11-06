@@ -213,6 +213,9 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .tools_json = if (input.tools.len > 0) try json.stringify(a, .{ .array = @constCast(input.tools) }, .{ .ascii = false }) else "",
     };
     try srv.checkFeatures(cx, f, input.tools.len > 0, thinking, rendered.ids, input.tools, &request);
+    // R-027: a reply that starts in its think block, for /health to tell when it leaves it
+    // R-027: 思考ブロックの中から始まる応答。/health がいつ抜けたかを言えるように
+    if (thinking) request.think_mark = srv.think_close_end;
     // the thinking's share and the answer's part: the share is of max_tokens, at most what the prompt leaves
     // of the context (`room`), and the rest of that is the answer's. Without folds the thinking's budget is the share;
     // with them the thinking goes on past the context (what is folded leaves it), its budget max_tokens less the

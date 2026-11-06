@@ -24,6 +24,37 @@ const Cut = struct {
     const Fold = enum { none, recent, checkpoint, canon, branch_open, branch_close };
 };
 
+/// R-027: where a reply stands in its think block, read from its tokens as they come (Request.think_mark): in it from
+/// the reply's start until the block's end token, and its tokens there so far (the end token not counted; notices and
+/// checkpoints written into the block counted, as they are reply tokens).
+/// R-027: 応答が思考ブロックのどこにいるか。来たトークンから読む (Request.think_mark): 応答の初めからブロックの終わりの
+/// トークンまでが中、そこまでのトークン数 (終わりのトークンは数えない。ブロックに書き込んだお知らせやチェックポイントは
+/// 応答のトークンなので数える)。
+const ThinkSeen = struct {
+    seen: usize = 0,
+    n: u64 = 0,
+    open: bool = true,
+
+    /// The reply's tokens `l` (all so far) past those already read.
+    /// 応答のトークン `l` (ここまでの全部) のうち、まだ読んでいないもの。
+    fn scan(st: *ThinkSeen, l: []const u32, mark: u32) void {
+        while (st.open and st.seen < l.len) : (st.seen += 1) {
+            if (l[st.seen] == mark) st.open = false else st.n += 1;
+        }
+        st.seen = @max(st.seen, l.len);
+    }
+};
+
+test "R-027: the think block's tokens, read as they come" {
+    var st: ThinkSeen = .{};
+    st.scan(&.{ 5, 6 }, 9);
+    try std.testing.expect(st.open and st.n == 2);
+    st.scan(&.{ 5, 6, 7, 9, 1, 2 }, 9);
+    try std.testing.expect(!st.open and st.n == 3);
+    st.scan(&.{ 5, 6, 7, 9, 1, 2, 9, 3 }, 9);
+    try std.testing.expect(!st.open and st.n == 3 and st.seen == 8);
+}
+
 const Job = struct {
     id: api.Id,
     request: *const api.Request,
@@ -103,6 +134,11 @@ const Job = struct {
     // `seg_prompt`
     think_n: u64 = 0,
     think_shut: bool = false,
+    // /health's progress.requests[].thinking and think_tokens (R-027): its reply read so far (written by the engine
+    // thread under the host's mutex, with `generated`)
+    // /health の progress.requests[].thinking と think_tokens (R-027): ここまで読んだ応答 (エンジンのスレッドが
+    // ホストの mutex の下で、`generated` と一緒に書く)
+    th: ThinkSeen = .{},
     notice_k: u32 = 1,
     want: ?[]const u32 = null,
     want_wrap: bool = false,
@@ -220,6 +256,12 @@ const Job = struct {
     /// 書いているチェックポイントは終わりの印で終わる (think_fold_cap を過ぎたらエンジンが終える)。予算の打ち切り。最後に畳んで
     /// から think_fold_window 個の思考トークンが文脈に入ったら畳む (recent はすぐ畳む。checkpoint はまずチェックポイントを
     /// 求める)。お知らせ。
+    /// R-027: the reply's tokens so far read for /health. Rank 0's engine thread, under the host's mutex.
+    /// R-027: ここまでの応答のトークンを /health 用に読む。rank 0 のエンジンのスレッド、ホストの mutex の下で。
+    fn noteThink(job: *Job) void {
+        if (job.request.think_mark) |m| job.th.scan(job.emitted.items, m);
+    }
+
     fn thinkCut(job: *Job, t: u32) ?Cut {
         const r = job.request;
         const end = r.think_end orelse return null;
@@ -992,6 +1034,8 @@ pub const Host = struct {
         p.cached = 0;
         p.prompt_done = 0;
         p.generated = 0;
+        p.thinking = null;
+        p.think_tokens = 0;
         p.queued_prompt = 0;
         p.n_requests = 0;
         for (h.queued.items) |q| p.queued_prompt += q.prompt0().len;
@@ -1052,6 +1096,8 @@ pub const Host = struct {
             p.cached = q.cached;
             p.prompt_done = q.prompt_done;
             p.generated = q.generated;
+            p.thinking = q.thinking;
+            p.think_tokens = q.think_tokens;
         }
         return p;
     }
@@ -1064,6 +1110,10 @@ pub const Host = struct {
         var q: api.RequestProgress = .{
             .conv = job.conv, .pool_id = job.pool_id, .phase = if (job.prefilled == null) .prefill else .decode,
             .prompt = job.prompt0().len, .elapsed_ms = @intCast(@divTrunc(@max(0, t - job.began), std.time.ns_per_ms)),
+            // R-027: in the think block (with thinking on, from the reply's start), its tokens there so far
+            // R-027: 思考ブロックの中か (思考ありなら応答の初めから)、そこでのトークン数
+            .thinking = if (job.request.think_mark != null) job.th.open else false,
+            .think_tokens = job.th.n,
         };
         // still planning: nothing counted yet / まだ計画中: 何も数えない
         if (job.prefill_at) |start| {
@@ -1654,6 +1704,7 @@ pub const Host = struct {
             h.lock();
             h.live_generated = @intCast(job.emitted.items.len);
             job.generated = job.emitted.items.len;
+            job.noteThink();
             h.unlock();
         }
 
@@ -1717,6 +1768,7 @@ pub const Host = struct {
             h.lock();
             h.live_generated = @intCast(job.emitted.items.len);
             job.generated = job.emitted.items.len;
+            job.noteThink();
             h.unlock();
         }
     };
@@ -2078,6 +2130,7 @@ pub const Host = struct {
         }
         h.lock();
         job.generated = job.emitted.items.len;
+        job.noteThink();
         // the stop bit was the cut's, not a cancel's / 停止ビットは打ち切りのもので、取り消しではない
         job.stop.store(false, .monotonic);
         if (k) |kk| {
