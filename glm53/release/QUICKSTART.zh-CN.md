@@ -207,6 +207,9 @@ curl -s http://NODE:8000/v1/chat/completions -H 'Content-Type: application/json'
 
 仪表板 `http://NODE:8010/panel` 显示引擎的状态，并可启动和停止它。AI 代理可以通过控制 API 做同样的事：步骤见 `AGENT-API.zh-CN.md`，整个系统的说明见 `AI-GUIDE.zh-CN.md`。
 
+- `SCREENS.zh-CN.md`：附截图逐一介绍仪表板的每个界面。
+- `FEATURES.zh-CN.md`：说明每个功能做什么、为什么需要它、如何使用。
+
 交换机上还有其他人的节点时，请在启动命令中指定自己的节点（`-e NODES=...`）。在仪表板的节点检查中，请先选择节点数和勾选，再按按钮（`PANEL-GUIDE.zh-CN.md` 的“节点检查”）。
 
 ## 6. 停止，再次启动

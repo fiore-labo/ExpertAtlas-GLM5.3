@@ -372,8 +372,8 @@ language, or Display > Language).
   each layer as it loads. Every routed expert then comes from the banks; `WEIGHTS` gives the other weights.
 - **The drafter** is chosen on the launch screen, beside the KV format: MTP (the layer in `WEIGHTS`),
   DFlash2 (offered only when `DRAFTER` in `glm53.conf` holds its model on every node, "Using DFlash2" above) or none;
-  the choice is written to `DRAFTER_KIND`. Each has its own memory: DFlash2 leaves about 4 GiB less a node than MTP, so the
-  plan is made again for the drafter picked.
+  the choice is written to `DRAFTER_KIND`. Each has its own memory: for DFlash2 the launcher plans about 3 GiB more a node than for
+  MTP (about 4.3 on eight nodes), so the plan is made again for the drafter picked.
 - **The context length** of a start (Context length on the launch screen) is chosen there too: 128K, 256K, 512K,
   `CONTEXT_LENGTH` or the longest that fits (at most 1,048,576 tokens); a length the plan's memory cannot hold is cut
   to what fits. The choice goes into `glm53.conf`, the number the plan took at the start, and the next page opens on it;
