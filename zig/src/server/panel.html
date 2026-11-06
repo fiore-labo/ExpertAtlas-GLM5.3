@@ -2164,7 +2164,7 @@ function allocTotals(ts) {
     // the launch screen: each node's memory is in [ NODE ]; below, the experts' size only (what the plan is ranked by,
     // the usage counts, the runs and since when are not shown)
     // 起動画面: 各ノードのメモリは [ NODE ] に。下は expert のサイズだけ (並べる元・使用回数・稼働の回数・集計の開始は出さない)
-    rows = [[T("Expert size"), LN.plan ? gib1(LN.plan.nodes[0].experts) : W.toFixed(1), 'GiB', ''], ...rgBitRows(drPick())];   // ring: the bits beside the experts (ring.js)
+    rows = [[T("Expert size"), LN.plan ? gib1(LN.plan.nodes[0].experts) : W.toFixed(1), 'GiB', ''], ...rgBitRows(drPick())];   // the bits beside the experts (ring.js)
   } else rows = [[T("Expert size"), W.toFixed(1), 'GiB', ''], ['KLD', kld.toFixed(4), '', sg(100 * (kld / KLD4 - 1), 0)], [T("Decode read"), rd.toFixed(2), 'GB', sg(100 * (rd / READ4 - 1), 1)],
     m.state === 'bad' ? [T("KV store"), '<span style="color:var(--bad-text)">' + T("Does not fit") + '</span>', '', ''] : [T("KV store"), kpos(m.store), 'token', '']];
   $('alloc-tot').innerHTML = akpis(rows);
@@ -4156,7 +4156,7 @@ const drView = () => LN.st && LN.st.drafter && Array.isArray(LN.st.drafter.avail
 const drPick = () => LN.drf || (LN.plan && LN.plan.drafter && LN.plan.drafter.kind) || (drView() && drView().conf) || null;
 $('ln-dr').addEventListener('click', (ev) => {
   const b = ev.target.closest('button[data-dr]'); if (!b || b.disabled || !LN.on) return;
-  LN.drf = b.dataset.dr; renderLaunch(); lnKeep({ DRAFTER_KIND: LN.drf }); lnPlanSoon(); if (RG.on) renderAlloc();   // ring: its drafter row (ring.js)
+  LN.drf = b.dataset.dr; renderLaunch(); lnKeep({ DRAFTER_KIND: LN.drf }); lnPlanSoon(); renderAlloc();   // its drafter row (ring.js rgBitRows)
 });
 // 同時推論 picked on the launch screen (10-31 「起動設定画面で同時推論数を指定できるように。現時点で1,2,3,4すべて出してよし」;
 // ring-mock's DESIGN-multi-start.md §3): 1 2 3 4, 1 = MULTI 0; LN.mu null = CONF's MULTI. status.multi says what the lane
@@ -5476,10 +5476,11 @@ function rgFlow() {
   for (const b of $('rg-flow').querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset.step === cur));
 }
 // the bits beside the experts as the launcher reads them from the checkpoint and the drafter (10-28: the
-// drafter's bits and the non-expert layers'); nothing when it does not say / expert 以外とドラフターのビット数
-// (ランチャーがチェックポイントとドラフターから読んだもの)。言わなければ出さない
+// drafter's bits and the non-expert layers'), on a ring and on a switch alike (11-06); nothing when it does not say
+// expert 以外とドラフターのビット数 (ランチャーがチェックポイントとドラフターから読んだもの)。リングでもスイッチでも
+// 同じ (11-06)。言わなければ出さない
 function rgBitRows(dk) {
-  const w = RG.on && LN.st && LN.st.weights; if (!w || !Number.isFinite(w.nonexpert_bits)) return [];
+  const w = LN.st && LN.st.weights; if (!w || !Number.isFinite(w.nonexpert_bits)) return [];
   const d = w.drafters || {}, k = dk || 'none';
   const dd = k === 'mtp' && d.mtp ? F("expert {0} bit · other {1} bit", d.mtp.expert_bits, d.mtp.other_bits) : k === 'dflash2' && d.dflash2 ? `${d.dflash2.bits} bit` : '';
   return [[T("Non-expert"), String(w.nonexpert_bits), 'bit', Array.isArray(w.bf16) && w.bf16.length ? T("embeddings etc. BF16") : ''], [T("Drafter"), drName(k), '', dd]];
@@ -5641,6 +5642,9 @@ $('rg-nom').addEventListener('click', (ev) => { if (ev.target.closest('[data-x]'
 // レーンはページの始めに、ノード確認がリングを見つけたらそこで)
 // a ring lane's colours unless its settings name their own (11-04): the light by bit, Material · indigo; a default, so
 // nothing is written / リングのレーンの色 (レーンの設定になければ): 光は bit ごと、Material · 藍。既定なので何も書かない
+// a lane from the node check, ring or switch (11-06: the switch as the ring), unless its settings say otherwise: the
+// experts coloured by their bits, in Material · indigo (blue accent, 4 bit blue, 3 bit yellow)
+// ノード確認のレーン (リングもスイッチも): 設定になければ expert を bit の色で、Material · indigo (青、4 bit 青・3 bit 黄)
 function rgColours() {
   if (!('glowcol' in CFG)) { st.glowcol = 'bit'; segMark('glowcol', 'bit'); $('onecol-g').hidden = true; if (off && g) { renderBase(); glowDirty = true; drawGlow(); } bcSync(); }
   const p = !('pal' in CFG) && PALS.find(x => x.id === 'matindigo');
@@ -5677,7 +5681,7 @@ async function ringInit() {
   RG.steps = 'registered' in RG.cfg;
   if (RG.cfg.topology !== 'ring4' && !RG.steps) return;   // an older launcher on a switch: ノード on the launch screen / 古いランチャーのスイッチは起動画面の ノード
   $('rg-flow').hidden = false; $('ln-cfgb').hidden = true;
-  if (RG.cfg.topology === 'ring4') rgRingOn();
+  if (RG.cfg.topology === 'ring4') rgRingOn(); else rgColours();
   const get = async (p) => { try { return await liveGet(p); } catch (e) { return null; } };
   const [sc, ri, ck, bw, dc] = await Promise.all([get('/v1/launch/scan'), get('/v1/launch/ring'), get('/v1/launch/check'), get('/v1/launch/bw'), RG.steps ? get('/v1/launch/discover') : null]);
   ndRestore(dc);   // the kind: the last node check's, else the registered topology's (nodes.js) / 種類: 最後のノード確認、無ければ登録の構成
