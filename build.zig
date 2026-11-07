@@ -145,6 +145,13 @@ pub fn build(b: *std.Build) void {
     // TF_GLM53_MULTI's pace alone: the decode's share of the GPU while a prompt waits or is computed
     const pace = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm_moe_dsa/pace.zig"), .target = b.graph.host, .optimize = .debug }) });
     b.step("test-glm53-pace", "The GLM-5.3 concurrent server's pace: the decode's share of the GPU beside a prefill").dependOn(&b.addRunArtifact(pace).step);
+    // the structured output's grammar engine on the host: the llguidance binding and the counterexample table through
+    // the server's schema check (TF_TEST_LLG_LIB and TF_TEST_GLM_VOCAB name the library and the vocabulary; skipped without)
+    const schema_check = b.createModule(.{ .root_source_file = b.path("zig/src/server/schema_check.zig"), .target = b.graph.host, .optimize = .debug });
+    const structure = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm_moe_dsa/structure/llg_table_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "schema_check", .module = schema_check }} }) });
+    const structure_run = b.addRunArtifact(structure);
+    structure_run.has_side_effects = true; // the environment decides what runs, and it is not in the run's cache key
+    b.step("test-glm53-structure", "The GLM-5.3 structured output: the llguidance binding and the counterexample table through the server's schema check").dependOn(&structure_run.step);
     const pool_trace = b.addExecutable(.{ .name = "tf-glm53-pool-trace", .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm_moe_dsa/pool/trace.zig"), .target = b.graph.host, .optimize = .debug }) });
     b.step("pool-trace", "tf-glm53-pool-trace: the KV pool planner over a JSON-lines trace (compared with glm53/tools/pool/pool_ref.py)").dependOn(&b.addInstallArtifact(pool_trace, .{}).step);
 }

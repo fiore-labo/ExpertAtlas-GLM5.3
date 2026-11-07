@@ -21,6 +21,7 @@
 10. [健康检查](#10-健康检查)
 11. [引擎核心与 RDMA 行](#11-引擎核心与-rdma-行)
 12. [显示设置](#12-显示设置)
+13. [结构化输出](#13-结构化输出)
 
 ## 1. 环与交换机，以及节点检查
 
@@ -226,3 +227,80 @@
 - 节点检查的节点列表和勾选也保存在同一文件中。
 - **Back to defaults**（按两次）为该通道的所有浏览器清除显示设置。语言和节点保持不变。
 - 环和交换机通道在其设置未指定其他配色时，以按位宽着色的光和 Material · indigo 配色打开。
+
+## 13. 结构化输出
+
+**做什么。** 把回复的答案限定为 JSON：一个 JSON 对象，或符合你发送的 JSON Schema 的 JSON。引擎在每个 token 处只让模型从能使答案保持该形式的
+token 中选择，因此答案可以解析并符合 schema（除非先被 `max_tokens` 截断）。语法由 llguidance 1.9.1 提供，在第一个节点上运行。默认开启（`STRUCTURED`）。
+
+**为什么。** 读取回复的程序（信息提取、表单、智能体的一步等）可以直接得到能解析、带有预期的键和类型的 JSON，无需再次询问模型。
+
+**如何使用。** 在请求中指定：
+
+- `/v1/chat/completions`（OpenAI 的 chat）：JSON 对象用 `"response_format": {"type": "json_object"}`，符合 schema 的 JSON 用
+  `{"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}}`。也读取 vLLM 的字段：`"guided_json": SCHEMA`，以及
+  `"structured_outputs"` 的 `{"json": SCHEMA}` 或 `{"json_object": true}`。`{"type": "text"}` 表示不加约束。
+- `/v1/responses`（OpenAI 的 Responses API）：`"text": {"format": {"type": "json_schema", "name": "...", "schema": {...}}}`，
+  或 `{"type": "json_object"}`。
+- `/v1/messages`（Anthropic 的 Messages API）：`"output_config": {"format": {"type": "json_schema", "schema": {...}}}`。
+
+在 chat API 上关闭思考的例子：
+
+```sh
+curl -s http://NODE:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "glm-5.3", "max_tokens": 300,
+  "chat_template_kwargs": {"enable_thinking": false},
+  "messages": [{"role": "user", "content": "A city in Japan and its prefecture."}],
+  "response_format": {"type": "json_schema", "json_schema": {"name": "city", "schema": {
+    "type": "object",
+    "properties": {"city": {"type": "string"}, "prefecture": {"type": "string"}},
+    "required": ["city", "prefecture"]}}}}'
+```
+
+使用 Python 的 `openai` 包并开启思考的例子：
+
+```python
+import json
+from openai import OpenAI
+
+client = OpenAI(base_url="http://NODE:8000/v1", api_key="none")
+r = client.chat.completions.create(
+    model="glm-5.3", max_tokens=4000,
+    messages=[{"role": "user", "content": "Three prime numbers above 100."}],
+    response_format={"type": "json_schema", "json_schema": {"name": "primes", "schema": {
+        "type": "object",
+        "properties": {"primes": {"type": "array", "items": {"type": "integer"},
+                                  "minItems": 3, "maxItems": 3}},
+        "required": ["primes"]}}})
+choice = r.choices[0]
+if choice.finish_reason == "length":
+    raise SystemExit("cut by max_tokens: the JSON is not finished")
+print(json.loads(choice.message.content)["primes"])
+```
+
+- **开启思考时。** 在 chat API 和 Responses API 上 GLM-5.3 默认会思考，在 Messages API 上则在 `thinking` 要求时思考。思考不受约束，约束从思考结束处
+  开始：思考在 `reasoning_content`（Messages API 中为 `thinking` 块），JSON 在答案中。引擎会及早结束思考，为答案至少留出 256 个 token，因此开启思考时
+  `max_tokens`（Responses API 中为 `max_output_tokens`）至少要 545，更小的会以 400 拒绝。简短的回复请像 curl 例子那样用
+  `"chat_template_kwargs": {"enable_thinking": false}` 关闭思考。
+- **以 400 拒绝的情况**，在回复的任何头部之前（流式也一样），每种都附带说明原因的消息：
+  - 与 `tools`（非空列表）一起，或 `tool_choice` 为 `required` 或指定函数：尚不支持；
+  - 与 `stop` 字符串（可能截断 JSON）或 `ignore_eos` 一起；
+  - 以 `MULTI` 启动的引擎：尚不支持；
+  - `regex`、`choice` 和 `grammar`（`guided_regex`、`guided_choice`、`guided_grammar`，以及 `structured_outputs` 中的同类字段）：尚不支持，
+    请使用 `json_object` 或 `json_schema`；
+  - 语法只能比所写更宽松地遵守的 schema。服务器先检查 schema 并拒绝它，而不是返回不符合它的 JSON：JSON Schema 2020-12 以外的 `$schema`；
+    以数组给出的 `items` 或 `additionalItems`（draft 4 的元组，请改用 `prefixItems`）；`#`、`#/$defs/NAME`、`#/definitions/NAME` 以外的 `$ref`；
+    `nullable`（OpenAPI 的写法，请写 `"type": ["integer", "null"]`）；超过 ±2^53 的整数边界或常量；既不是 1 至 65,536 的整数、也不是最多 8 位小数
+    且去掉小数点后不超过 65,536 的小数（0.25、0.01）的 `multipleOf`，或同一个值上的两个 `multipleOf`；允许其他键的对象上的 `minProperties` 或
+    `maxProperties`；`x-guidance`（由服务器设定）；超过 64 KiB 或嵌套超过 32 层的 schema；孤立的代理项、NaN 或 Infinity。
+- **须知。**
+  - 有 `properties` 而没有 `additionalProperties` 的对象只接受它声明的键（`allOf` 的分支内除外）。要允许其他键，请写 `"additionalProperties": true`。
+  - 被 `max_tokens` 截断的回复以 `finish_reason` `length` 结束，其答案是未完成的 JSON：解析前请检查 `finish_reason`。
+  - JSON 中不出现 `\u` 转义：其他字符按原样写出，因此一个键只有一种写法；没有短转义（`\n`、`\r`、`\t`、`\b`、`\f`）的控制字符无法写出。两个
+    token 之间的空白最多为一个换行和最多 64 个空格或制表符。
+  - 结构化请求在没有 drafter（MTP 或 DFlash2）的情况下 decode，因此比同样长度的普通请求慢。普通请求与以前相同：与 r3.3.2-102 相同的 token、相同的速度。
+  - 关闭方法：引擎设置（Server）中的 **Structured output**、`docker run` 行的 `-e STRUCTURED=0` 或 `glm53.conf` 中的 `STRUCTURED=0`，
+    从下一次启动起生效；此类请求随后得到 400（`CONFIG.zh-CN.md`）。如果第一个节点无法加载 `lib/libllguidance.so`，引擎会在没有它的情况下启动
+    （rank 0 的日志：`structured output unavailable`），并返回同样的 400。
+  - 在交换机的 8 个节点上确认过：JSON 对象和 schema、开启思考、流式、被 `max_tokens` 截断、客户端中断的流、三种 API，以及所有拒绝的情况，之后每个 rank
+    都仍在运行。普通请求在 20 个 prompt 上给出与 r3.3.2-102 相同的 token。

@@ -30,7 +30,7 @@ fill in the nodes, the network devices and the paths. The examples carry the mea
     (the expert banks' directories go to `expert-plan/banks.json` the same way, copied to every node), and the
     launcher reads them again at once.
   - The engine settings screen (switched to from the header) writes the settings that need a restart:
-    `NAME`, `CONTEXT_LENGTH`, `KV_SIZE`, `KV`, `MAX_TOKENS`, `THINKING_*`, `MULTI*`, `DRAFTER_KIND`, `MTP_K`, `DRAFT_SAVES`, `DCP`, `MASTER_PORT`, `RESERVE_GB`, `READY_TIMEOUT`, `LAUNCH_DROP_CACHES`, `HOST`, `PORT`, `METRICS_LISTEN`, `LOG_KEEP_MB`, `LAUNCHER_PORT`, `ROWS`, `SP_PARTS`, `ROCE_PROXY_CORES`, `ENGINE_CORES`, `ATLAS_GENERIC`, `EXTRA_ENV` (the engine's `TF_GLM53_CANON_CLOSE` and `TF_GLM53_CANON_NEAR` as tokens of it); `TOPOLOGY`,
+    `NAME`, `CONTEXT_LENGTH`, `KV_SIZE`, `KV`, `MAX_TOKENS`, `THINKING_*`, `MULTI*`, `DRAFTER_KIND`, `MTP_K`, `DRAFT_SAVES`, `DCP`, `MASTER_PORT`, `RESERVE_GB`, `READY_TIMEOUT`, `LAUNCH_DROP_CACHES`, `HOST`, `PORT`, `METRICS_LISTEN`, `LOG_KEEP_MB`, `STRUCTURED`, `LAUNCHER_PORT`, `ROWS`, `SP_PARTS`, `ROCE_PROXY_CORES`, `ENGINE_CORES`, `ATLAS_GENERIC`, `EXTRA_ENV` (the engine's `TF_GLM53_CANON_CLOSE` and `TF_GLM53_CANON_NEAR` as tokens of it); `TOPOLOGY`,
     `SOCKET_IFNAME` and `IB_HCA` too until the node check has registered the nodes. Each value is checked first as
     `tf-glm53` checks it; `PORT` only while the engine is stopped. A change is written as it is made and used from the next start (a running engine
     keeps its settings); the thinking's live keys (`THINKING_SHARE`, `THINKING_FOLD`, `THINKING_FOLD_AT_CLOSE_SHARE`,
@@ -99,6 +99,7 @@ fill in the nodes, the network devices and the paths. The examples carry the mea
 | `EXPERT_LIVE` | `1` | `1`: the first node counts the experts each prompt row and each decoded token picks, for the control panel (its live view, the usage records and expert optimisation). `0`: not counted; the panel then shows the running engine with Stop, but no picks and no optimisation. A start from the panel always counts. |
 | `LOG_LISTEN` | empty | `HOST:PORT` where each node's log keeper also answers, read-only and with no key, `GET /streams` and `GET /logs?stream=S&after=N`, for a monitor on another host that keeps the logs. Empty: the logs stay in each node's memory only (`tf-glm53 logs`). A change takes effect at the engine's next start, which starts the keepers anew (the lines they held are lost). |
 | `LOG_KEEP_MB` | `8` | The MB each log (each rank's, the watcher's, the launcher's) keeps in memory; older lines go. Nothing is written to disk. A change takes effect as `LOG_LISTEN`'s does. |
+| `STRUCTURED` | `1` | `1`: structured output, a reply's answer held to JSON or to a JSON Schema (`response_format` and the like; FEATURES.md, "Structured output"). Rank 0 loads `lib/libllguidance.so` at the start; when it cannot, the engine starts without structured output. `0`: off, and requests that ask for it get 400. A change takes effect at the next start. |
 
 ### Context, cache and KV
 

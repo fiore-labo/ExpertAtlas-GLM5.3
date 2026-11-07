@@ -5,6 +5,13 @@
 //! 要求は等分した prompt チャンクのあと、1 ラウンドに 1 行 (または draft 付きの verify ウィンドウ) ずつ進む。選択は
 //! 全ランクで同じく計算する。ランク間の制御は、合意点での rank 0 の停止フラグと draft の照合だけ。
 const std = @import("std");
+// Fiore-lab: the mask protocol and host-only matcher logic (no CUDA in this module).
+// Fiore-lab: mask の約束と host だけの matcher の処理 (この module 内に CUDA はない)。
+pub const structure = @import("structure/host.zig");
+pub const MaskHook = struct {
+    ctx: *anyopaque,
+    fill: *const fn (ctx: *anyopaque, row: []u32) bool,
+};
 const cuda = @import("cuda");
 const Config = @import("config.zig").Config;
 const weights = @import("weights.zig");
@@ -57,6 +64,10 @@ const PromptCounts = struct { host: cuda.HostBuffer, start: cuda.Event, end: cud
 const prompt_counts_ring = 4;
 
 pub const Options = struct {
+    // Fiore-lab: enabled on all ranks; only rank 0 receives the matcher hook.
+    // Fiore-lab: 全 rank で有効化。matcher の hook は rank 0 だけ。
+    structured: bool = false,
+    masks: ?MaskHook = null,
     ckpt: []const u8,
     // the checkpoint's expert split; a smaller world reads its shares as virtual ranks
     // チェックポイントの expert の分割数。world がそれより小さければ仮想ランクとして読む
@@ -192,6 +203,7 @@ pub fn withEnv(o: Options) Options {
         }
     };
     var r = o;
+    r.structured = std.mem.eql(u8, F.get("TF_GLM53_STRUCTURED") orelse "0", "1");
     r.prompt_experts = std.mem.eql(u8, F.get("TF_EXL3_PROMPT_EXPERTS") orelse "0", "1");
     r.mtp = std.mem.eql(u8, F.get("TF_GLM53_DRAFTER") orelse "", "mtp");
     r.mtp_k = @intCast(std.math.clamp(F.num("TF_GLM53_MTP_K", 3), 1, mtp_mod.max_rows - 1));
@@ -451,6 +463,17 @@ pub fn bucket(t: usize, topk: usize) ?u32 {
 const max_graphs = 128;
 
 pub const Engine = struct {
+    // Fiore-lab: fixed addresses survive every graph replay; structured output uses row 0 only (no drafts yet), the
+    // rows of wider windows are allocated too.
+    // Fiore-lab: graph 再生を通して固定の番地。構造化出力は今は行 0 だけ (draft はまだなし) を使い、広い窓の行の分まで
+    // 確保する。
+    masks: ?MaskHook = null,
+    mask_host: ?cuda.HostBuffer = null,
+    mask_dev: ?cuda.DeviceBuffer = null,
+    mask_on: ?cuda.DeviceBuffer = null,
+    mask_flags: ?cuda.DeviceBuffer = null,
+    grammar: bool = false,
+    grammar_failed: bool = false,
     gpa: std.mem.Allocator,
     io: std.Io,
     d: *const cuda.Driver,
@@ -957,6 +980,7 @@ pub const Engine = struct {
             .graphs = o.graphs,
             .stored_world = o.stored_world,
         };
+        if (o.structured) try e.initMasks(o.masks);
         if (o.dcp > 1) {
             if (world % o.dcp != 0) return error.DcpDoesNotDivideWorld;
             e.dgroup = try group.split(rank / o.dcp, rank % o.dcp);
@@ -1266,6 +1290,10 @@ pub const Engine = struct {
         }
         for (e.execs[0..e.n_graphs]) |*x| x.deinit();
         e.n_graphs = 0;
+        if (e.mask_host) |*b| b.free();
+        if (e.mask_dev) |*b| b.free();
+        if (e.mask_on) |*b| b.free();
+        if (e.mask_flags) |*b| b.free();
         if (e.dfast) |*f| f.deinit();
         if (e.fast) |*f| f.deinit();
         if (e.dgroup) |*g| g.deinit();
@@ -1325,6 +1353,7 @@ pub const Engine = struct {
 
     fn ctxOf(e: *Engine, b: *forward.Buffers, xs: *const moe.Scratch, stream: cuda.Stream) forward.Ctx {
         return .{
+            .mask = if (e.mask_dev) |b0| .{ .rows = b0.ptr, .on = e.mask_on.?.ptr, .flags = e.mask_flags.?.ptr, .words = structure.words } else null,
             .ucache = if (e.ucache) |*u| u else null, .sid = if (e.n_sp > 0 and stream.handle == e.comm.handle) 1 else 0,
             .cfg = e.cfg, .heads = e.heads, .world = e.world, .rank = e.rank, .stream = stream,
             .ops = .{ .k = &e.nat, .stream = stream, .kv8 = e.kv8, .kv4 = e.kv4, .dcp = e.dcp, .drank = e.rank % e.dcp, .pmap = e.pmapPtr() }, .x3 = &e.x3, .glue = &e.glue, .blas = &e.blas,
@@ -1578,14 +1607,22 @@ pub const Engine = struct {
             for (&prof) |*x| x.* = std.fmt.parseInt(usize, it.next() orelse "0", 10) catch 0;
         }
         while (!stop and n < want) : (P += 1) {
-            if (try e.stopAgreed()) {
+            e.fillMask();
+            const lead = try e.stopAgreed();
+            if (lead & 1 != 0) {
                 stopped = true;
                 break;
             }
+            if (e.grammar) try e.broadcastMask();
             if (prof[1] > 0 and n == prof[0]) _ = e.d.api.cuProfilerStart();
             if (prof[1] > 0 and n == prof[1]) _ = e.d.api.cuProfilerStop();
             const fed: i64 = tok; // the row's input token, at P / 行の入力 token (位置 P)
             tok = if (e.graphs) try e.roundGraph(P) else try e.roundEager(P, tok);
+            if (e.grammar and tok == structure.invalid_token) {
+                e.grammar_failed = true;
+                stopped = true;
+                break;
+            }
             e.liveRows(0, 1, 0, P, &.{fed});
             // the row at P predicts P + 1; the next round's graph reads its token from ids[0]
             // 位置 P の行は P + 1 を予測する。次のラウンドのグラフはトークンを ids[0] から読む
@@ -1889,9 +1926,68 @@ pub const Engine = struct {
 
     /// The request's stop point agreement: rank 0's stop_req to every rank (one all-gather).
     /// 要求の停止の合意: rank 0 の stop_req を全ランクへ配る (all-gather 1 回)。
-    fn stopAgreed(e: *Engine) !bool {
+    fn stopAgreed(e: *Engine) !i32 {
         var w = [4]i32{ @intFromBool(e.stop_req.load(.monotonic)), 0, 0, 0 };
-        return e.agree(&w);
+        return e.agreeLead(&w);
+    }
+
+    // Fiore-lab: called before prewarm, after rank 0's library availability is shared by the Host.
+    // Fiore-lab: Host が rank 0 の library の有無を共有してから、prewarm の前に呼ぶ。
+    pub fn initMasks(e: *Engine, hook: ?MaskHook) !void {
+        if (e.n_graphs != 0 or e.mask_dev != null) return error.GrammarAlreadyInitialized;
+        if (e.vshare * e.world != structure.vocab_size or e.vshare % 32 != 0) return error.GrammarVocabulary;
+        const mask_rows = try e.glue.module.function("tf_glm53_mask_rows");
+        const row_argmax_masked = try e.glue.module.function("tf_glm53_row_argmax_masked");
+        const pick_masked = try e.glue.module.function("tf_glm53_pick_masked");
+        var dev = try cuda.DeviceBuffer.alloc(e.d, forward.multi_rows * structure.bytes);
+        errdefer dev.free();
+        var on = try cuda.DeviceBuffer.alloc(e.d, forward.multi_rows * 4);
+        errdefer on.free();
+        var flags = try cuda.DeviceBuffer.alloc(e.d, forward.multi_rows * 4);
+        errdefer flags.free();
+        try on.fill32(0, e.stream.handle);
+        const host = if (e.rank == 0) try cuda.HostBuffer.alloc(e.d, forward.multi_rows * structure.bytes) else null;
+        e.mask_dev = dev;
+        e.mask_on = on;
+        e.mask_flags = flags;
+        e.mask_host = host;
+        e.masks = if (e.rank == 0) hook else null;
+        e.glue.mask_rows = mask_rows;
+        e.glue.row_argmax_masked = row_argmax_masked;
+        e.glue.pick_masked = pick_masked;
+        // Fiore-lab: SP stores contexts during create, before the Host's library agreement.
+        // Fiore-lab: SP は Host の library 合意より前の create 中に context を保存している。
+        for (e.sp_parts[0..e.n_sp]) |*part| {
+            part.main.mask = .{ .rows = dev.ptr, .on = on.ptr, .flags = flags.ptr, .words = structure.words };
+            part.side.mask = part.main.mask;
+        }
+    }
+
+    // Fiore-lab: Header.grammar is constant for the segment. Clear every on word before any graph can run.
+    // Fiore-lab: Header.grammar は区間を通じて不変。graph の前に on 語をすべて消す。
+    pub fn grammarSegment(e: *Engine, on: bool) !void {
+        if (on and e.mask_dev == null) return error.GrammarUnavailable;
+        e.grammar = on;
+        e.grammar_failed = false;
+        if (e.mask_on) |b| try b.fill32(0, e.stream.handle);
+    }
+
+    fn fillMask(e: *Engine) void {
+        if (!e.grammar or e.rank != 0 or e.stop_req.load(.monotonic)) return;
+        const hook = e.masks orelse {
+            e.stop_req.store(true, .monotonic);
+            return;
+        };
+        if (!hook.fill(hook.ctx, e.mask_host.?.slice(u32)[0..structure.words])) e.stop_req.store(true, .monotonic);
+    }
+
+    // Fiore-lab: stream order is H2D -> broadcast (u32 count, not bytes) -> on -> graph.
+    // Fiore-lab: stream の順は H2D -> broadcast (byte でなく u32 の個数) -> on -> graph。
+    fn broadcastMask(e: *Engine) !void {
+        const b = e.mask_dev.?;
+        if (e.rank == 0) try b.uploadAsync(0, e.mask_host.?.slice(u8)[0..structure.bytes], e.stream.handle);
+        try e.group.lib.check(e.group.lib.api.ncclBroadcast(b.ptr, b.ptr, structure.words, .u32, 0, e.group.comm, e.stream.handle), "ncclBroadcast(grammar)");
+        try e.glue.setI32(e.stream, e.mask_on.?.ptr, 1);
     }
 
     /// A prompt chunk's start: stopAgreed with rank 0's `layers` (MidHook.first) in the same word (bits 8 ..); `yield`
@@ -2069,12 +2165,26 @@ pub const Engine = struct {
         if ((e.slots != null or e.pool != null) and prop != null) if (e.drafter) |dr| {
             e.dr_snap_end = try dr.snapshot();
         };
+        // Fiore-lab: a grammar segment adds exactly one four-word agreement before the first token's mask broadcast.
+        // Fiore-lab: 文法の区間の時だけ、最初の token の mask 配布の前に 4 語の合意を 1 回足す。
+        var masked: ?u32 = null;
+        if (e.grammar) {
+            e.fillMask();
+            if ((try e.stopAgreed()) & 1 != 0) return null;
+            try e.broadcastMask();
+            const picked = try head.maskedPick(e.vshare);
+            if (picked == structure.invalid_token) {
+                e.grammar_failed = true;
+                return null;
+            }
+            masked = picked;
+        }
         if (e.samp) |s| { // the first token sits at position prompt.len / 最初のトークンは位置 prompt.len
             var one: [1]u32 = undefined;
             _ = try e.sampleRows(head.b.lpart.ptr, 1, prompt.len, s, &.{}, &one);
             return one[0];
         }
-        return try head.pickArgmax(e.gpa, e.vshare);
+        return masked orelse try head.pickArgmax(e.gpa, e.vshare);
     }
 
     /// Keyed sampling over rows 0 .. R of `lpart` (this rank's fp32 logits share, [R, vshare]): every rank's share
@@ -2167,6 +2277,11 @@ pub const Engine = struct {
         try c.embed(e.embed.ptr, 1);
         for (e.layers, 0..) |*L, i| try c.layerDecode(L, 1, e.state.kc[i].ptr, if (e.state.ic[i]) |b| b.ptr else null, e.state.pos.ptr, t);
         try c.headLogits(e.final_norm.ptr, e.lm_head.ptr, 0, 1, e.vshare);
+        // Fiore-lab: only a grammar segment takes the masked pick; outside one the eager pick stays the CPU's (its
+        // NaN rule differs from the GPU pick's)
+        // Fiore-lab: mask つきの pick は文法の区間だけ。区間の外の eager の pick は今までどおり CPU のもの (NaN の扱いが
+        // GPU の pick と違う)
+        if (c.mask != null and e.grammar) return c.maskedPick(e.vshare);
         return c.pickArgmax(e.gpa, e.vshare);
     }
 
@@ -2185,7 +2300,7 @@ pub const Engine = struct {
         try e.vbufs.tok_out.downloadAsync(0, std.mem.sliceAsBytes(&got), e.stream.handle);
         try e.stream.synchronize();
         try e.roceCheck();
-        return @intCast(got[0]);
+        return @bitCast(got[0]);
     }
 
     /// Every decode graph up front - each index-key bucket up to the capacity (and none, below index_topk), windows of

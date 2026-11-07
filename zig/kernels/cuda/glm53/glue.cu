@@ -196,6 +196,78 @@ __global__ void tf_glm53_pick(const float* __restrict__ all, int world, int n, l
     tok[r] = id;
 }
 
+// Fiore-lab: one block per mask row; disallowed NaNs are overwritten too. Each rank scans only its
+// vocabulary share. flags: bit 0 finite allowed value, bit 1 allowed NaN, bit 2 row on. Slot 2 is MTP's.
+// Fiore-lab: mask の行ごとに 1 block。禁止された NaN も上書きする。各 rank は語彙の自分の分だけ読む。
+// flags: bit 0 許可された有限値、bit 1 許可された NaN、bit 2 行が on。slot 2 は MTP 用。
+__global__ void tf_glm53_mask_rows(float* __restrict__ logits, const unsigned* __restrict__ masks,
+                                  const unsigned* __restrict__ on, unsigned* __restrict__ flags,
+                                  int V, int vocab_off, int words) {
+    const int r = blockIdx.x;
+    if (!on[r]) { if (threadIdx.x == 0) flags[r] = 0; return; }
+    float* row = logits + (long long)r * V;
+    const unsigned* mask = masks + (long long)r * words;
+    unsigned f = 0;
+    for (int i = threadIdx.x; i < V; i += blockDim.x) {
+        const int id = vocab_off + i;
+        if (!(mask[id / 32] & (1u << (id % 32)))) row[i] = -__int_as_float(0x7f800000);
+        else { const float x = row[i]; if (isfinite(x)) f |= 1; if (isnan(x)) f |= 2; }
+    }
+    __shared__ unsigned warp[32];
+    for (int d = 16; d > 0; d >>= 1) f |= __shfl_xor_sync(0xffffffffu, f, d);
+    if ((threadIdx.x & 31) == 0) warp[threadIdx.x >> 5] = f;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        unsigned all = 4;
+        for (int w = 0; w < (blockDim.x >> 5); ++w) all |= warp[w];
+        flags[r] = all;
+    }
+}
+
+// Fiore-lab: separate entry points preserve the disabled path's original kernels and graph.
+// Fiore-lab: 無効時の kernel と graph を保つために入口を分ける。
+__global__ void tf_glm53_row_argmax_masked(const float* __restrict__ logits, float* __restrict__ amax, int V, int vocab_off, const unsigned* __restrict__ flags) {
+    __shared__ float bv[33];
+    __shared__ int bi[33];
+    const float* row = logits + (long long)blockIdx.x * V;
+    float v = -__int_as_float(0x7f800000);
+    int at = 0x7fffffff;
+    for (int i = threadIdx.x; i < V; i += blockDim.x) {
+        const float x = row[i];
+        if (tf_glm53_before(x, i, v, at)) { v = x; at = i; }
+    }
+    tf_glm53_block_first(&v, &at, bv, bi);
+    if (threadIdx.x == 0) {
+        float* out = amax + 4 * blockIdx.x;
+        out[0] = v;
+        out[1] = (float)(at + vocab_off);
+        out[2] = 0.0f;
+        out[3] = (float)flags[blockIdx.x];
+    }
+}
+
+__global__ void tf_glm53_pick_masked(const float* __restrict__ all, int world, int n, long long* __restrict__ ids,
+                              int* __restrict__ tok) {
+    const int r = threadIdx.x;
+    if (r >= n) return;
+    int best = 0;
+    float bv = all[r * 4];
+    for (int w = 1; w < world; ++w) {
+        const float x = all[(w * n + r) * 4];
+        if (bv == bv && (x != x || x > bv)) { bv = x; best = w; }
+    }
+    unsigned flags = 0;
+    for (int w = 0; w < world; ++w) flags |= (unsigned)all[(w * n + r) * 4 + 3];
+    if ((flags & 4) && (!(flags & 1) || (flags & 2))) {
+        ids[r] = 0; // never replayed: the host ends this segment before emit
+        tok[r] = -1;
+        return;
+    }
+    const int id = (int)all[(best * n + r) * 4 + 1];
+    ids[r] = id;
+    tok[r] = id;
+}
+
 // TF_GLM53_MTP_CONF: beside each row's argmax (tf_glm53_row_argmax's 16-byte row, its value in slot 0), this rank's
 // softmax mass of the row into slot 2: the sum over its vocabulary share of exp((x - value) * inv_t), in a fixed order
 // (each thread's elements, the warp's shuffles, then the warps in order). A row whose value is not finite gets 0. The

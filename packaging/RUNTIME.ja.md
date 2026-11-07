@@ -10,6 +10,7 @@
 
 - `bin/tensorfold-native`: サーバー本体です。GB10（sm_121）向けにビルドした CUDA カーネルを内蔵しています。Linux aarch64、glibc 2.28 以降。
 - `lib/libroce_proxy.so`: decode の集団通信に使う RDMA プロキシです（`libibverbs.so.1` が必要）。
+- `lib/libllguidance.so`: 構造化出力の文法です（llguidance 1.9.1、MIT）。rank 0 が読み込みます（`CONFIG.ja.md` の `STRUCTURED`）。
 - `tf-glm53`、`glm53.conf.example`（8 台）、`glm53.t4.conf.example`（4 台）: ランクの起動、停止、確認を行います。`glm53.conf` の全設定項目は `CONFIG.ja.md` にあります。
 - `tools/quickstart.py`: 新しいインストールからエンジンの起動までを行います（`docker run ... IMAGE up` と `./tf-glm53 quickstart` がこれを実行します）。`tools/topology.py`: ノードのつなぎ方を判定します。`tools/logkeep.py`: ログ係です。
 - `claude-glm53`: Claude Code をサーバーで使います（「Claude Code」）。
@@ -108,7 +109,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/
   "messages": [{"role": "user", "content": "Say hello in one short sentence."}]}'
 ```
 
-応答の `message` には、モデルの思考過程が `reasoning_content` に、続いて回答が `content` に入ります。`max_tokens` は両方を合わせて数えます。別のマシンからは、リクエストを `http://FIRST-NODE:PORT` に送ります（既定の `HOST=0.0.0.0` のとき）。
+応答の `message` には、モデルの思考過程が `reasoning_content` に、続いて回答が `content` に入ります。`max_tokens` は両方を合わせて数えます。別のマシンからは、リクエストを `http://FIRST-NODE:PORT` に送ります（既定の `HOST=0.0.0.0` のとき）。`response_format` で、返事の答えを JSON か JSON Schema に保つこともできます（`FEATURES.ja.md` の「構造化出力」）。
 
 ## Drafter
 
@@ -253,7 +254,7 @@ done
 リリースはコンテナイメージとしても配布します。中身は、`/opt/glm53` に置いたアーカイブのファイルと、サーバーの実行に要るもの（cuBLAS 13、libibverbs とそのプロバイダー、AArch64 の fence を入れた NCCL 2.30.7）です。`glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定すると、`tf-glm53` は ssh で各ノードに入り、ランクを `IMAGE` のコンテナとして起動します。このとき各ノードに要るのは、cuBLAS・libibverbs・NCCL の代わりに Docker と NVIDIA Container Toolkit です（DGX OS には両方あります）。`tf-glm53` を動かすユーザーは、各ノードで `docker` を実行できる必要があります（`docker` グループ）。`tf-glm53`、コントロールパネルのランチャー、設定はアーカイブのときと同じく 1 台目のホストに置き、重みと expert のバンクもホストに置いたままです。
 
 ```sh
-I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.2-102
+I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.3-102
 docker pull $I                                                # 各ノードで
 mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out $I install /out
 cd glm53 && cp glm53.conf.example glm53.conf                  # または glm53.t4.conf.example。RUNTIME=docker と IMAGE=$I を設定
@@ -261,7 +262,7 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # または glm53.
 ```
 
 - `install` は、リリースのファイル（展開したアーカイブと同じもの）をそのディレクトリに書きます。`./tf-glm53 pull` は各ノードで `docker pull IMAGE` を実行します。
-- イメージはアーカイブから作ることもできます。展開したばかりのアーカイブの中で `docker build --build-context fenced=DIR -f docker/Dockerfile -t glm53-tensorfold:r3.3.2-102 .` を実行します。`DIR` には fence を入れた NCCL を置きます（`RING.ja.md`。ないとビルドは失敗します）。アーカイブの `SHA256SUMS` に載っていないファイルがあるとビルドは失敗するので、インストール先の設定やログがイメージに入ることはありません。他のノードへは `docker save` と `docker load` で写します。
+- イメージはアーカイブから作ることもできます。展開したばかりのアーカイブの中で `docker build --build-context fenced=DIR -f docker/Dockerfile -t glm53-tensorfold:r3.3.3-102 .` を実行します。`DIR` には fence を入れた NCCL を置きます（`RING.ja.md`。ないとビルドは失敗します）。アーカイブの `SHA256SUMS` に載っていないファイルがあるとビルドは失敗するので、インストール先の設定やログがイメージに入ることはありません。他のノードへは `docker save` と `docker load` で写します。
 - `tf-glm53 check` は各ノードで、`IMAGE` が 1 台目と同じレイヤーであること、コンテナから GPU に届くこと（`--gpus all`）、イメージがこのディレクトリと同じリリースであること（違えば `NG: image-not-this-release`）を確かめます。
 - 各ランクのコンテナには、GPU、`/dev/infiniband`、ホストのネットワークと IPC、`--ulimit memlock=-1 --ulimit nofile=1048576:1048576`、`--oom-score-adj 1000`、ホストのユーザー、init を与えます。同じパスにマウントするのは、読み取り専用の `WEIGHTS`、`DRAFTER`（DFlash2）、そのノードにある `expert-plan/banks.json` のすべてのバンクと、書き込み可能な `launch/` です。Docker はコンテナのログを持ちません（`--log-driver none`）。出力はノードのログ係に入ります。コンテナの名前は `glm53-p<PORT>-r<ランク>` で、止まると削除されます。`tf-glm53 down`、`status`、監視プロセス、コントロールパネルは、ホストから動かすランクと同じように扱います。
 - エンジンは、スイッチでもリングでも `/opt/nccl-fenced` の NCCL を読みます。
@@ -293,7 +294,7 @@ ENDPOINT=http://FIRST-NODE:8000 ./claude-glm53      # 後ろに Claude Code 自�
 制限:
 
 - 既定では、リクエストは 1 本ずつ処理します（`MULTI`: 「複数の会話を同時に」）。Claude Code の裏のリクエスト（思考なしで数トークン。会話の題名づけなど）は本流のリクエストを待ち、始まり方が本流と違うので、本流とはキャッシュを共有しません。裏のリクエストどうしでは共有します。
-- 構造化出力（`output_config.format`）は断ります（400）。Claude Code はそれなしで続けます。
+- 構造化出力（`output_config.format` の JSON Schema）は、chat API と同じように答えをスキーマに保ちます（`FEATURES.ja.md` の「構造化出力」）。ただしツールと一緒には使えません。ツールのあるリクエストでそれを頼むと断り（400）、Claude Code はそれなしで続けます。
 - 思考の強さ: GLM-5.3 は low、high、max を持ち、minimal は low、medium は high、xhigh は max で動きます（Claude Code は xhigh を送ります）。Claude Code は 1 回の応答に最大 32,000 トークンを求めます（`CLAUDE_CODE_MAX_OUTPUT_TOKENS` で上げられます）。思考の上限が、その残りを回答のために取っておきます。`THINKING_SHARE=0` のときは、思考の途中で上限に達した応答は本文なしで終わります。
 
 ## 速度

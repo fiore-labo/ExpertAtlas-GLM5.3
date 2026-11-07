@@ -55,9 +55,25 @@ sit together at the top level.
   The reply is the model's own choice in every case.
 - The thinking kept in bounds: a limit as a share of `max_tokens`, and organizing a long thinking midway or at its close, set
   per request or while the engine runs.
+- Structured output: a reply's answer held to JSON or to a JSON Schema (`response_format`), with the thinking on or
+  off.
 - `/metrics` (Prometheus text) and `/health` count the running request too, so a monitor reads prefill and decode
   speed, cache hits and draft acceptance while a request runs. `METRICS_LISTEN` serves the two read-only on an address
   of their own, for a monitor on another host.
+
+## New in r3.3.3-102
+
+- **Structured output, on by default.** A reply's answer can be held to a JSON object or to a JSON Schema:
+  `response_format` on `/v1/chat/completions` (vLLM's `guided_json` and `structured_outputs` too), `text.format` on
+  `/v1/responses` and `output_config.format` on `/v1/messages`. At each token the model chooses only among the tokens
+  the grammar allows, so the answer parses and follows the schema unless `max_tokens` cuts it. With the thinking on,
+  the model thinks freely first. A schema the grammar would keep less strictly than it says is refused (400) rather
+  than half kept, and so is a structured request beside tools or with `MULTI`. The grammar is llguidance 1.9.1 (MIT),
+  in the archive and the image; `STRUCTURED=0` turns it off ([FEATURES](glm53/release/FEATURES.md#13-structured-output)).
+- A structured request decodes without the drafter, so more slowly. Plain requests are as on r3.3.2-102: the same
+  tokens and the same speed.
+- Nothing to change from r3.3.2-102: the weights and the settings are the same. A build from source also needs Rust
+  1.95.0 ("Build from source").
 
 ## New in r3.3.2-102
 
@@ -238,7 +254,7 @@ The release comes as a container image and as an archive with the same files; th
 the weights in place, one line on the first node starts the engine:
 
 ```sh
-docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.2-102 up
+docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.3-102 up
 ```
 
 It ends in `READY` with the addresses: the API at `http://FIRST-NODE:8000/v1` and the control panel at
@@ -248,7 +264,7 @@ It ends in `READY` with the addresses: the API at `http://FIRST-NODE:8000/v1` an
 To the same end by hand, with the image: `docker pull` it on every node, run
 `mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out`, and set
 `RUNTIME=docker` and `IMAGE` in `glm53.conf` ([packaging/RUNTIME.md](packaging/RUNTIME.md), "Running in containers").
-Without Docker: download the release archive `tensorfold-r3.3.2-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
+Without Docker: download the release archive `tensorfold-r3.3.3-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
 ([packaging/RUNTIME.md](packaging/RUNTIME.md) here). Either way, copy `glm53.conf.example` (eight nodes) or
 `glm53.t4.conf.example` (four nodes, see [glm53/release/T4.md](glm53/release/T4.md)) to `glm53.conf`, fill in what it
 asks for, then `./tf-glm53 deploy` and `./tf-glm53 up`, which starts the control panel, and start the engine there.
@@ -313,17 +329,19 @@ the official implementation, computed in FP32), with this recipe's serving confi
 
 ## Build from source
 
-On a GB10 system with Zig 0.17.0 on the `PATH` (or `ZIG=` its path for `build_libs.sh`), CUDA 13 (`nvcc`) and the
-libibverbs headers (`libibverbs-dev`):
+On a GB10 system with Zig 0.17.0 on the `PATH` (or `ZIG=` its path for `build_libs.sh`), CUDA 13 (`nvcc`), the
+libibverbs headers (`libibverbs-dev`) and Rust 1.95.0 through rustup (`rustup toolchain install 1.95.0`;
+`build_libs.sh` runs `~/.cargo/bin/cargo`, or the one `CARGO=` names):
 
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
-sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so
-zig build dist -Dversion=r3.3.2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so, lib/libllguidance.so
+zig build dist -Dversion=r3.3.3-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 
-The archive lands in `zig-out/dist/`.
+The archive lands in `zig-out/dist/`. `build_libs.sh` builds llguidance offline, from `third_party/llguidance/` and the
+crates vendored there. The image and the archive need no Rust.
 
 ## Limits
 
@@ -332,6 +350,8 @@ The archive lands in `zig-out/dist/`.
 - By default one request runs at a time; up to 32 others wait in arrival order, chat-title requests last, and past 32 the
   server refuses them (a 503, or an error event in a stream). `MULTI` decodes up to four together, at a cost in node
   memory. Agents that run sub-agents in parallel are otherwise better served by pointing the sub-agents at another model.
+- Structured output takes a JSON object or a JSON Schema (no regex, choice or grammar yet), and not beside tools or
+  with `MULTI`.
 - The control panel's screen is in English and Japanese only.
 - `packaging/RUNTIME.md` lists the rest.
 

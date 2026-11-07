@@ -15,7 +15,7 @@
 - 控制面板的启动器在启动器自身启动时读取它；引擎停止期间文件有变化时，启动器会自行重新读取（引擎运行期间的编辑在引擎停止后读取）。`LAUNCHER_HOST` 和 `LAUNCHER_PORT` 在启动器重新启动后生效：`./tf-glm53 launcher stop`，然后 `./tf-glm53 up`。期间引擎可以继续运行：启动器会发现它正在运行。
 - 除两种情况外，没有其他程序会改写它，两者都在控制面板上。两者都只写改动的行（每个设置一行，值后面的注释保留，没有该行时追加在末尾），并把之前的文件以 `glm53.conf.bak-<时间>` 保留在旁边：
   - 启动设置中权重下的“保存”会写入 `WEIGHTS` 和 `DRAFTER`，前提是每个节点上都有它们所指的内容（专家库的目录以同样的方式写入 `expert-plan/banks.json`，并复制到每个节点），启动器会立即重新读取。
-  - 引擎设置界面（从标题栏切换进入）写入需要重启的设置：`NAME`, `CONTEXT_LENGTH`, `KV_SIZE`, `KV`, `MAX_TOKENS`, `THINKING_*`, `MULTI*`, `DRAFTER_KIND`, `MTP_K`, `DRAFT_SAVES`, `DCP`, `MASTER_PORT`, `RESERVE_GB`, `READY_TIMEOUT`, `LAUNCH_DROP_CACHES`, `HOST`, `PORT`, `METRICS_LISTEN`, `LOG_KEEP_MB`, `LAUNCHER_PORT`, `ROWS`, `SP_PARTS`, `ROCE_PROXY_CORES`, `ENGINE_CORES`, `ATLAS_GENERIC`, `EXTRA_ENV`（引擎的 `TF_GLM53_CANON_CLOSE` 和 `TF_GLM53_CANON_NEAR` 作为其中的词）；在节点检查登记节点之前还包括 `TOPOLOGY`、`SOCKET_IFNAME` 和 `IB_HCA`。每个值先按 `tf-glm53` 的规则检查；`PORT` 只能在引擎停止时修改。更改在发生时写入，从下一次启动起使用（正在运行的引擎保持启动时的设置）；但思考中运行时生效的项（`THINKING_SHARE`、`THINKING_FOLD`、`THINKING_FOLD_AT_CLOSE_SHARE`、`THINKING_FOLD_SHARE`）也会立即交给运行中的引擎，推理界面 [ THINKING ] 中的修改也写入此文件，因此两个界面显示同一个值。“Restart to apply”（引擎运行时）：与“停止”一样先询问是否保留本次运行的使用记录，然后停止，再以相同的专家和保存的设置重新启动。
+  - 引擎设置界面（从标题栏切换进入）写入需要重启的设置：`NAME`, `CONTEXT_LENGTH`, `KV_SIZE`, `KV`, `MAX_TOKENS`, `THINKING_*`, `MULTI*`, `DRAFTER_KIND`, `MTP_K`, `DRAFT_SAVES`, `DCP`, `MASTER_PORT`, `RESERVE_GB`, `READY_TIMEOUT`, `LAUNCH_DROP_CACHES`, `HOST`, `PORT`, `METRICS_LISTEN`, `LOG_KEEP_MB`, `STRUCTURED`, `LAUNCHER_PORT`, `ROWS`, `SP_PARTS`, `ROCE_PROXY_CORES`, `ENGINE_CORES`, `ATLAS_GENERIC`, `EXTRA_ENV`（引擎的 `TF_GLM53_CANON_CLOSE` 和 `TF_GLM53_CANON_NEAR` 作为其中的词）；在节点检查登记节点之前还包括 `TOPOLOGY`、`SOCKET_IFNAME` 和 `IB_HCA`。每个值先按 `tf-glm53` 的规则检查；`PORT` 只能在引擎停止时修改。更改在发生时写入，从下一次启动起使用（正在运行的引擎保持启动时的设置）；但思考中运行时生效的项（`THINKING_SHARE`、`THINKING_FOLD`、`THINKING_FOLD_AT_CLOSE_SHARE`、`THINKING_FOLD_SHARE`）也会立即交给运行中的引擎，推理界面 [ THINKING ] 中的修改也写入此文件，因此两个界面显示同一个值。“Restart to apply”（引擎运行时）：与“停止”一样先询问是否保留本次运行的使用记录，然后停止，再以相同的专家和保存的设置重新启动。
 - 控制面板的节点检查所登记的节点写入单独的文件 `glm53.nodes.conf`（在本文件旁边）：`TOPOLOGY`、`NODES`、`SOCKET_IFNAME`、`IB_HCA`，取确认时对连接方式的判定（之前的文件以 `glm53.nodes.conf.bak-<时间>` 保留）。`tf-glm53` 和启动器在 `glm53.conf` 之后读取它，所以这四项以它为准。没有这个文件时，面板从节点检查开始；有了之后，从启动设置开始。`NODES_CONF=FILE` 读取另一个文件，`NODES_CONF=`（空）则不读取。`tf-glm53 deploy` 不复制它。
 - 在启动界面选择的内容（KV 格式、上下文长度、草稿模型、并发推理数、每个节点为操作系统保留的内存）在选择时写入本文件（`KV`、`CONTEXT_LENGTH`、`DRAFTER_KIND`、`MULTI`、`RESERVE_GB`）。启动时写入计划采用的上下文长度，因此下次打开时会选中该值。`KV_SIZE` 只在不够上下文长度时才调高。专家的位宽和计划采用的 KV 只对该次启动有效，启动器通过环境变量（`LAUNCH_*`）把它们交给 `tf-glm53`；它们不是本文件的设置项。
 - 页面自身的设置（颜色、圆的排列方式等）保存在 `launch/panel-settings.json` 中。
@@ -66,6 +66,7 @@
 | `EXPERT_LIVE` | `1` | `1`：第一个节点为控制面板统计每个提示行和每个解码 token 选中的专家（实时显示、使用记录和专家优化）。`0`：不统计；面板仍显示正在运行的引擎和“停止”，但不显示选择，也没有专家优化。从面板启动时始终统计。 |
 | `LOG_LISTEN` | 空 | `HOST:PORT`：每个节点的日志保管进程还在此以只读、无密钥的方式响应 `GET /streams` 和 `GET /logs?stream=S&after=N`，供另一台主机上保存日志的监控程序使用。为空时，日志只在每个节点的内存中（`tf-glm53 logs`）。修改在引擎下一次启动时生效：届时重新启动保管进程，之前保存的行会丢失。 |
 | `LOG_KEEP_MB` | `8` | 每条日志（各 rank、监视进程、启动器）在内存中保留的 MB，较旧的行被丢弃。不向磁盘写入任何内容。修改的生效方式与 `LOG_LISTEN` 相同。 |
+| `STRUCTURED` | `1` | `1`：结构化输出，把回复的答案限定为 JSON 或 JSON Schema（`response_format` 等；见 FEATURES.zh-CN.md 的“结构化输出”）。启动时 rank 0 加载 `lib/libllguidance.so`，无法加载时引擎在没有结构化输出的情况下启动。`0`：关闭，请求它的请求得到 400。修改在下一次启动时生效。 |
 
 ### 上下文、缓存与 KV
 

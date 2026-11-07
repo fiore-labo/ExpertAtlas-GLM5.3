@@ -9,6 +9,9 @@ const cuda = @import("cuda");
 const api = @import("engine_api");
 const glm = @import("glm_moe_dsa");
 const Allocator = std.mem.Allocator;
+// Fiore-lab: host-only structured output, shared with the Mac tests.
+// Fiore-lab: Mac の試験と共用する host だけの構造化出力。
+const structure = glm.engine.structure;
 
 /// What rank 0 stopped a decode for in the think block (Job.thinkCut): the text to write into the reply, and a fold
 /// of the context the model goes on from.
@@ -21,7 +24,7 @@ const Cut = struct {
     // branch_open: the summary beside the reply asked for (think_fold branch), branch_close: it ended, the block folds
     // canon: 文も畳み込みもない。閉じた思考ブロックの id を作り直してから答える (Host.closeCut)。branch_open: 応答の横での
     // 要約を求める (think_fold branch)、branch_close: それが終わり、ブロックを畳む
-    const Fold = enum { none, recent, checkpoint, canon, branch_open, branch_close };
+    const Fold = enum { none, recent, checkpoint, canon, grammar, branch_open, branch_close };
 };
 
 /// R-027: where a reply stands in its think block, read from its tokens as they come (Request.think_mark): in it from
@@ -59,6 +62,9 @@ const Job = struct {
     id: api.Id,
     request: *const api.Request,
     sink: api.Sink,
+    // Fiore-lab: owned after successful submit, freed only by Host.finish.
+    // Fiore-lab: submit 成功後に所有し、Host.finish だけで放す。
+    grammar: ?structure.State = null,
     emitted: std.ArrayList(u32) = .empty,
     // a stop string matched or the client left: the rest of the reply is dropped
     // stop 文字列に一致したか、クライアントが去った: 応答の残りは捨てる
@@ -264,11 +270,11 @@ const Job = struct {
 
     fn thinkCut(job: *Job, t: u32) ?Cut {
         const r = job.request;
-        const end = r.think_end orelse return null;
+        const end = r.think_end orelse (if (r.structure) |st| st.after else null) orelse return null;
         const folding = r.think_fold != .off and r.think_fold_window > 0;
         const closing = r.think_fold_at_close > 0 and r.think_fold_close_open.len > 0;
         const stepping = r.think_step_budget != null or r.think_step_close != null or r.think_unclosed == .close;
-        if (job.think_shut or (r.think_budget == 0 and r.think_notice_every == 0 and !folding and !closing and !stepping)) return null;
+        if (job.think_shut or (r.think_budget == 0 and r.think_notice_every == 0 and !folding and !closing and !stepping and r.structure == null)) return null;
         if (t == end) {
             if (job.stepAtClose()) |c| return c;
             // the summary at the close: a close inside it ends it there (folded, then closed); a long enough block
@@ -749,6 +755,10 @@ pub const Host = struct {
     eng: *glm.engine.Engine,
     ch: glm.lockstep.Channel,
     info_: api.Info,
+    // Fiore-lab: rank 0 only; tokenizer outlives all submitted and unsubmitted matchers.
+    // Fiore-lab: rank 0 だけ。tokenizer は全 matcher より長く生きる。
+    grammar: ?structure.Runtime = null,
+    grammar_mutex: std.Io.Mutex = .init,
     mutex: std.Io.Mutex = .init,
     wake: std.Io.Condition = .init,
     queued: std.ArrayList(*Job) = .empty,
@@ -868,6 +878,7 @@ pub const Host = struct {
     const window_ns: i96 = 2 * std.time.ns_per_s;
 
     pub fn engine(h: *Host) api.Engine {
+        if (h.grammar != null) return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .experts = expertsFn, .experts_control = controlFn, .schedule = scheduleFn, .stop_all = stopAllFn, .grammar_init = grammarInitFn, .structure = structureFn, .structure_free = structureFreeFn } };
         return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .experts = expertsFn, .experts_control = controlFn, .schedule = scheduleFn, .stop_all = stopAllFn } };
     }
 
@@ -888,7 +899,62 @@ pub const Host = struct {
     }
 
     fn infoFn(ctx: *anyopaque) api.Info {
-        return self(ctx).info_;
+        const h = self(ctx);
+        h.lock();
+        defer h.unlock();
+        return h.info_;
+    }
+
+    // Fiore-lab: compile is serialized on HTTP threads; no GPU or Job is touched here.
+    // Fiore-lab: HTTP スレッドの compile を直列化する。GPU と Job には触れない。
+    fn grammarInitFn(ctx: *anyopaque, v: api.GrammarVocab) error{ Unavailable, OutOfMemory }!void {
+        const h = self(ctx);
+        h.grammar_mutex.lockUncancelable(h.io);
+        defer h.grammar_mutex.unlock(h.io);
+        const g = if (h.grammar) |*g| g else return error.Unavailable;
+        try g.init(h.gpa, .{ .ctx = v.vocab.ctx, .bytes = v.vocab.bytes, .added = v.vocab.added }, v.size, v.eos);
+        h.lock();
+        defer h.unlock();
+        h.info_.structures = true;
+    }
+
+    fn structureFn(ctx: *anyopaque, a: Allocator, s: *const api.Structure) Allocator.Error!api.Compiled {
+        const h = self(ctx);
+        h.grammar_mutex.lockUncancelable(h.io);
+        defer h.grammar_mutex.unlock(h.io);
+        if (s.kind != .json and s.kind != .json_schema) return .{ .refused = try a.dupe(u8, "structured output supports only json_object and json_schema") };
+        const g = if (h.grammar) |*g| g else return .{ .refused = try a.dupe(u8, "structured output is unavailable") };
+        const text = if (s.kind == .json and s.text.len == 0) structure.object_schema else s.text;
+        return switch (try g.compile(a, text)) {
+            .ok => |m| .{ .ok = @ptrCast(m) },
+            .refused => |why| .{ .refused = why },
+        };
+    }
+
+    fn structureFreeFn(ctx: *anyopaque, handle: *anyopaque) void {
+        const h = self(ctx);
+        h.grammar.?.library.api.llg_free_matcher(@ptrCast(@alignCast(handle)));
+    }
+
+    fn maskFill(ctx: *anyopaque, row: []u32) bool {
+        const h = self(ctx);
+        const job = h.running orelse return false;
+        const g = if (job.grammar) |*g| g else return false;
+        const start = h.now();
+        const ok = g.fill(row);
+        const elapsed = h.now() - start;
+        if (elapsed > 10 * std.time.ns_per_ms) std.log.warn("glm53: grammar mask took {d} ms", .{@divTrunc(elapsed, std.time.ns_per_ms)});
+        if (!ok) h.stopJob(job);
+        return ok;
+    }
+
+    fn structureRefusal(h: *Host, job: *Job) ?[]const u8 {
+        if (job.request.structure == null) return null;
+        if (h.multi_n > 0) return "structured output does not support MULTI yet";
+        if (job.request.drafts) return "structured output does not support drafts yet: it requires draft=false";
+        if (job.grammar == null or h.grammar == null or h.grammar.?.tokenizer == null) return "structured output requires a compiled grammar and initialized tokenizer";
+        if (job.request.eos.len == 0 or job.request.stop != null) return "structured output requires EOS stopping and no stop strings";
+        return null;
     }
 
     fn submitFn(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
@@ -917,6 +983,11 @@ pub const Host = struct {
         h.queued.insert(h.gpa, at, job) catch {
             h.gpa.destroy(job);
             return error.Busy;
+        };
+        // Fiore-lab: no failure past this ownership transfer.
+        // Fiore-lab: この所有権の移動より後には失敗がない。
+        if (request.structure) |st| if (st.compiled) |m| if (h.grammar) |*g| {
+            job.grammar = g.state(@ptrCast(@alignCast(m)));
         };
         h.wake.signal(h.io);
     }
@@ -1510,7 +1581,11 @@ pub const Host = struct {
         // クライアントに伝え、次のターンで送り返してもらう
         var st = stats;
         if (job.segs > 0) st.context_reply = job.live.items;
-        emit(job, .{ .finished = .{ .reason = reason, .stats = st, .message = message } });
+        // Fiore-lab: FAILED wins over quiet/cancel/cut, and the matcher is released at this single exit.
+        // Fiore-lab: FAILED は quiet/cancel/cut より先。この唯一の出口で matcher を放す。
+        const failed = if (job.grammar) |*g| g.failed() else false;
+        emit(job, .{ .finished = .{ .reason = if (failed) .failed else reason, .stats = st, .message = if (failed) job.grammar.?.message() else message } });
+        if (job.grammar) |*g| g.api.llg_free_matcher(g.matcher);
         job.emitted.deinit(h.gpa);
         job.live.deinit(h.gpa);
         job.br_text.deinit(h.gpa);
@@ -1734,7 +1809,7 @@ pub const Host = struct {
             h.noteDecoded(toks.len);
             // a stop, or the decode stopping for a notice or the cut: the rows past it are not the reply's
             // 停止、またはお知らせや打ち切りのために止めている decode: その先の行は応答のものではない
-            if (job.quiet or job.cut != null) return;
+            if (job.quiet or job.cut != null or (if (job.grammar) |*g| g.failed() or g.done else false)) return;
             h.lock();
             const gone = h.closing or std.mem.indexOfScalar(api.Id, h.cancels.items, job.id) != null;
             h.unlock();
@@ -1748,6 +1823,15 @@ pub const Host = struct {
             // stop strings are checked after each token
             // stop 文字列はトークンごとに確かめる
             for (toks) |t| {
+                // Fiore-lab: the only committed accept point, before any token reaches the client.
+                // Fiore-lab: クライアントへ届く前の、確定 token の唯一の受理点。
+                if (job.grammar) |*g| if (g.active) switch (g.accept(t)) {
+                    .token => {},
+                    .done, .failed => {
+                        h.stopJob(job);
+                        break;
+                    },
+                };
                 // the reply's EOS with its think block open: the EOS stays out of the reply (the server ends a reply
                 // at it) and the block closes, so the model answers (Request.think_unclosed)
                 // 思考ブロックを開いたままの EOS: EOS は応答に入れない (サーバーはそこで応答を終える)。ブロックを閉じ、
@@ -1777,6 +1861,9 @@ pub const Host = struct {
                     h.stopJob(job);
                     break;
                 };
+                // Fiore-lab: answer tokens must not trigger thinking edits or another segment cut.
+                // Fiore-lab: 答えの token で思考の編集や区間の打ち切りを起こさない。
+                if (job.grammar) |g| if (g.active) continue;
                 // a notice or the budget's cut at this line break: every rank stops, then the host writes it (goOn)
                 // この改行でお知らせか予算の打ち切り: 全ランクを止め、そのあとホストが書き込む (goOn)
                 if (job.thinkCut(t)) |cut| {
@@ -1800,6 +1887,11 @@ pub const Host = struct {
                     job.closed_now = false;
                     if (h.closeCut(job)) |cut| {
                         job.cut = cut;
+                        h.stopJob(job);
+                        break;
+                    }
+                    if (job.grammar != null) {
+                        job.cut = .{ .fold = .grammar };
                         h.stopJob(job);
                         break;
                     }
@@ -1879,6 +1971,10 @@ pub const Host = struct {
     };
 
     fn serve(h: *Host, job: *Job) void {
+        if (h.structureRefusal(job)) |why| {
+            noPrefill(job);
+            return h.finish(job, .failed, .{}, why);
+        }
         h.byteResume(job);
         const r = job.request;
         const seg = job.promptNow();
@@ -1903,6 +1999,10 @@ pub const Host = struct {
         // 要求が許せば draft する ("draft": false なら逐次ラウンド): MTP 層のもの、なければ DFlash2 のもの
         const mode: u8 = if (!r.drafts) 0 else if (h.eng.mtp != null) glm.lockstep.mode_mtp else if (h.eng.drafter != null) glm.lockstep.mode_dflash else 0;
         var header: glm.lockstep.Header = .{ .max_tokens = @intCast(@min(job.maxNow(), std.math.maxInt(i32))), .stop_eos = r.eos.len > 0, .mode = mode };
+        if (job.grammar) |*g| {
+            if (g.segment(r.structure.?.after != null, job.think_shut, job.br_writing)) emit(job, .answer);
+            header.grammar = g.active;
+        }
         // a later segment of the same reply continues its own slot (Header.own_slot)
         // 同じ応答の 2 つ目以降の区間は自分のスロットを続ける (Header.own_slot)
         if (job.segs > 0) header.own_slot = job.pool_x;
@@ -1929,20 +2029,29 @@ pub const Host = struct {
             }
             fatal("serving a shared request", err);
         };
+        // Fiore-lab: every rank saw the same numeric verdict before any token was emitted.
+        // Fiore-lab: token を出す前に全ランクが同じ数値の判定を得ている。
+        if (job.grammar) |*g| {
+            if (h.eng.grammar_failed) g.fail("grammar logits contain an allowed NaN or no allowed finite value");
+            if (g.failed()) return h.finish(job, .failed, statsOf(job, st, job.done -| job.cached), g.message());
+        }
         // the summary beside the reply ended with its segment (max_tokens or the context left): closed as at its EOS
         // 応答の横での要約が区間とともに終わった (max_tokens か残りの文脈): EOS で終わった時と同じに閉じる
         if (job.br_writing and job.cut == null and !job.quiet) job.cut = .{ .fold = .branch_close };
         // stopped for a notice or the budget's cut: the reply goes on from the queue's head
         // お知らせか予算の打ち切りのために止めた: 応答は待ち行列の先頭から続く
-        if (job.cut != null and h.goOn(job, st, null)) return;
+        // Fiore-lab: a close at the length/context boundary must not re-admit a zero-token segment.
+        // Fiore-lab: 長さ・文脈の端で閉じた時、残り 0 token の区間を受け入れ直さない。
+        const grammar_full = if (job.cut) |cut| cut.fold == .grammar and job.fits(cut) == null else false;
+        if (!grammar_full and job.cut != null and h.goOn(job, st, null)) return;
         // the cancel list under the lock: a cancel arriving now may grow it
         // cancel の一覧はロックの下で読む: いま届く cancel が一覧を伸ばしうる
-        const cancelled = if (job.quiet) blk: {
+        const cancelled = if (job.quiet or job.grammar != null) blk: {
             h.lock();
             defer h.unlock();
-            break :blk std.mem.indexOfScalar(api.Id, h.cancels.items, job.id) != null;
+            break :blk (job.grammar != null and h.closing) or std.mem.indexOfScalar(api.Id, h.cancels.items, job.id) != null;
         } else false;
-        const reason: api.Reason = if (job.quiet) (if (cancelled) .cancelled else .stop) else switch (st.finish) {
+        var reason: api.Reason = if (job.quiet) (if (cancelled) .cancelled else .stop) else switch (st.finish) {
             .stop => .stop,
             .length => .length,
             .cancelled => .cancelled,
@@ -1950,6 +2059,12 @@ pub const Host = struct {
         h.lock();
         const computed = job.done -| job.cached;
         h.unlock();
+        if (job.grammar) |*g| reason = switch (g.finishReason(st.finish == .length or grammar_full, cancelled)) {
+            .failed => .failed,
+            .cancelled => .cancelled,
+            .stop => .stop,
+            .length => .length,
+        };
         h.finish(job, reason, statsOf(job, st, computed), "");
     }
 
@@ -2108,7 +2223,7 @@ pub const Host = struct {
         const br_secs = @as(f64, @floatFromInt(h.now() - job.br_t0)) / 1e9;
         var br_kind: Job.BranchFold = .summary;
         switch (c.fold) {
-            .none, .canon => {},
+            .none, .canon, .grammar => {},
             .recent => job.foldRecent(),
             .checkpoint => job.foldCheckpoint(h.gpa) catch return false,
             // the summary beside the reply: its segment runs from the context with the request after it, and the
@@ -2202,6 +2317,7 @@ pub const Host = struct {
                 std.log.info("glm53: thinking: fold {d} (summary at the close) at {d} think tokens: the context's reply {d} -> {d} tokens (summary {d}; prompt {d}), the answer goes on from it", .{ job.folds, job.think_n, before, job.live.items.len, ck_len, job.prompt0().len })
             else
                 std.log.info("glm53: thinking: fold {d} (checkpoint, stage {d}{s}) at {d} think tokens: the context's reply {d} -> {d} tokens (checkpoint {d}; prompt {d})", .{ job.folds, job.ck_stage, if (c.text.ptr == job.request.think_fold_closes[job.ck_stage].ptr) ", ended at its cap" else "", job.think_n, before, job.live.items.len, ck_len, job.prompt0().len }),
+            .grammar => {},
             .canon => std.log.info("glm53: thinking: the think block closed after {d} reply tokens; the answer goes on from its remade ids", .{job.emitted.items.len}),
             .branch_open => std.log.info("glm53: thinking: a summary beside the reply asked for{s} at {d} think tokens ({d} in the context; prompt {d})", .{ stepName(job.br_step), job.think_n, job.fold_n, job.prompt0().len }),
             .branch_close => if (br_kind == .kept)
@@ -2403,6 +2519,10 @@ pub const Host = struct {
     /// job を空いた会話へ: 使用中の会話の横でのプラン、prefill、最初のトークン。その横に pool の余地がなければ、job は
     /// 待ち行列の先頭へ戻る。
     fn admitJob(h: *Host, job: *Job) void {
+        if (h.structureRefusal(job)) |why| {
+            noPrefill(job);
+            return h.finish(job, .failed, .{}, why);
+        }
         // the pool's slots change (or may): the queued jobs' estimates are made again
         // pool のスロットが変わる (かもしれない): 待ち行列の job の見積もりは作り直す
         defer h.pool_gen +%= 1;
@@ -2873,7 +2993,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: usize) !*Host {
     // TF_GLM53_TOPOLOGY=ring4: リングに結線した 4 台、NODES はリングの順。向かいのランクに直接届くものはエンジンが断る
     if (std.mem.eql(u8, topology, "ring4")) h.group.topology = .ring4;
     const t0 = std.Io.Clock.awake.now(io);
-    h.eng = try glm.engine.Engine.create(gpa, io, &h.driver, &h.ctx, &h.group, glm.engine.withEnv(.{
+    var engine_options = glm.engine.withEnv(.{
         .ckpt = dir,
         .stored_world = try envNum("TF_GLM53_STORED_WORLD", 8),
         .layers = if (std.c.getenv("TF_GLM53_LAYERS")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else null,
@@ -2883,7 +3003,13 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: usize) !*Host {
         .kv_fp8 = std.mem.eql(u8, envOr("TF_GLM53_KV", "bf16"), "fp8") or std.mem.eql(u8, envOr("TF_GLM53_KV", "bf16"), "fp4"),
         .kv_fp4 = std.mem.eql(u8, envOr("TF_GLM53_KV", "bf16"), "fp4"),
         .dcp = @intCast(try envNum("TF_GLM53_DCP", 1)),
-    }));
+    });
+    const want_grammar = engine_options.structured;
+    // Fiore-lab: leave graphs unchanged when the optional rank 0 library is missing.
+    // Fiore-lab: rank 0 の任意 library がなければ graph も変えない。
+    engine_options.structured = false;
+    h.eng = try glm.engine.Engine.create(gpa, io, &h.driver, &h.ctx, &h.group, engine_options);
+    errdefer if (h.grammar) |*g| g.deinit(gpa);
     // every rank's checkpoint, executable and engine env compared before the prewarm, whose collectives would hang
     // on ranks set up differently
     // 全ランクのチェックポイント・実行ファイル・エンジンの env を prewarm の前に比べる。設定の違うランクがあると
@@ -2900,6 +3026,21 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: usize) !*Host {
         std.log.err("glm53: the ranks loaded different checkpoints, executables, settings or ranks ({s}); refusing to start", .{@errorName(err)});
         return err;
     };
+    // Fiore-lab: after the env fingerprint agrees, rank 0 alone opens llguidance. One startup word
+    // tells every rank whether to allocate masks before graph capture. Disabled: no extra collective.
+    // Fiore-lab: env の一致後、rank 0 だけが llguidance を読む。起動時の 1 語で capture 前の mask 確保を決める。
+    // 無効なら通信を追加しない。
+    if (want_grammar) {
+        if (rank == 0) {
+            if (structure.llg.Library.openPath(envOr("TF_GRAMMAR_LIB", "./libllguidance.so"))) |lib| {
+                h.grammar = .{ .library = lib };
+            } else |err| std.log.warn("glm53: structured output unavailable: {s}", .{@errorName(err)});
+        }
+        const enabled = try h.ch.share(if (rank == 0) &.{@intFromBool(h.grammar != null)} else null);
+        defer gpa.free(enabled);
+        if (enabled.len != 1) return error.GrammarAvailability;
+        if (enabled[0] != 0) try h.eng.initMasks(if (rank == 0) .{ .ctx = h, .fill = Host.maskFill } else null);
+    }
     var mt: usize = 0; // TF_GLM53_MEMTRACE
     glm.engine.memMark(&h.ctx, rank, "-", &mt);
     if (h.eng.load_progress) |*p| p.setPhase(.prewarm);
@@ -3035,6 +3176,7 @@ pub fn close(ctx: *anyopaque) void {
         h.unlock();
     }
     if (h.thread) |t| t.join();
+    if (h.grammar) |*g| g.deinit(h.gpa);
     h.ch.deinit();
     h.eng.destroy();
     h.group.deinit();
@@ -3044,4 +3186,115 @@ pub fn close(ctx: *anyopaque) void {
     h.decoded.deinit(h.gpa);
     h.gpa.free(h.labels);
     h.gpa.destroy(h);
+}
+
+// Fiore-lab: structured thinking still uses the Host's real token-id close and summary handling.
+// Fiore-lab: 構造化の思考も Host の実 token id の閉じ・要約の処理を使う。
+test "structured output: thinking closes on the real id even without budget hooks, and a summary can defer it" {
+    var request: api.Request = .{ .prompt = &.{1}, .max_tokens = 10000, .structure = .{ .kind = .json, .after = 9 } };
+    var job: Job = .{ .id = 1, .request = &request, .sink = undefined };
+    try std.testing.expect(job.thinkCut(1) == null);
+    try std.testing.expect(!job.think_shut and !job.closed_now);
+    try std.testing.expect(job.thinkCut(9) == null);
+    try std.testing.expect(job.think_shut and job.closed_now);
+    request.think_end = 9;
+    request.think_fold_at_close = 1;
+    request.think_fold_close_open = &.{8};
+    request.think_fold_cap = 16;
+    job = .{ .id = 2, .request = &request, .sink = undefined, .fold_n = 10 };
+    try std.testing.expect(job.thinkCut(9) != null);
+    try std.testing.expect(job.drop_close and !job.think_shut and !job.closed_now);
+}
+
+// Fiore-lab: exercise the actual delivery/finish boundary without a GPU, not only the matcher helper.
+// Fiore-lab: matcher の補助関数だけでなく、実際の送出・終了の境界を GPU なしで試す。
+test "structured output: Out rejects before delivery, cuts at the real close, and finish frees once with FAILED first" {
+    const Fake = struct {
+        consumed: usize = 0,
+        freed: usize = 0,
+        delivered: [8]u32 = @splat(0),
+        n: usize = 0,
+        finished: usize = 0,
+        reason: api.Reason = .stop,
+        fn self(m: *structure.llg.Matcher) *@This() {
+            return @ptrCast(@alignCast(m));
+        }
+        fn consume(m: *structure.llg.Matcher, id: u32) callconv(.c) i32 {
+            self(m).consumed += 1;
+            return if (id == 11) -1 else 0;
+        }
+        fn accepting(_: *structure.llg.Matcher) callconv(.c) bool {
+            return true;
+        }
+        fn err(_: *structure.llg.Matcher) callconv(.c) ?[*:0]const u8 {
+            return "test reject\nnot public";
+        }
+        fn free(m: *structure.llg.Matcher) callconv(.c) void {
+            self(m).freed += 1;
+        }
+        fn event(ctx: *anyopaque, _: api.Id, ev: *const api.Event) void {
+            const f: *@This() = @ptrCast(@alignCast(ctx));
+            switch (ev.*) {
+                .tokens => |ids| {
+                    @memcpy(f.delivered[f.n..][0..ids.len], ids);
+                    f.n += ids.len;
+                },
+                .finished => |v| {
+                    f.finished += 1;
+                    f.reason = v.reason;
+                },
+                else => {},
+            }
+        }
+    };
+    const a = std.testing.allocator;
+    var eng: glm.engine.Engine = undefined;
+    eng.stop_req = .init(false);
+    var h: Host = .{ .gpa = a, .io = std.testing.io, .driver = undefined, .ctx = undefined, .nccl = undefined, .group = undefined, .eng = &eng, .ch = undefined, .info_ = .{}, .canon_close = .off };
+    defer h.decoded.deinit(a);
+    var calls: structure.llg.Api = undefined;
+    calls.llg_matcher_consume_token = Fake.consume;
+    calls.llg_matcher_is_accepting = Fake.accepting;
+    calls.llg_matcher_get_error = Fake.err;
+    calls.llg_free_matcher = Fake.free;
+    var r: api.Request = .{ .prompt = &.{1}, .max_tokens = 100, .drafts = false, .eos = &.{154820}, .structure = .{ .kind = .json, .after = 9 }, .think_end = 9 };
+    for (0..3) |case| {
+        var f: Fake = .{};
+        const job = try a.create(Job);
+        job.* = .{ .id = 1, .request = &r, .sink = .{ .ctx = &f, .event = Fake.event }, .grammar = .{ .api = &calls, .matcher = @ptrCast(&f), .eos = r.eos, .real_size = 154856, .active = case != 2 } };
+        h.running = job;
+        eng.stop_req.store(false, .monotonic);
+        var out: Host.Out = .{ .h = &h, .job = job };
+        switch (case) {
+            0 => {
+                Host.Out.tokens(&out, &.{ 10, 11, 12 });
+                try std.testing.expectEqualSlices(u32, &.{10}, f.delivered[0..f.n]);
+                try std.testing.expectEqual(@as(usize, 2), f.consumed);
+                try std.testing.expect(job.grammar.?.failed());
+                job.quiet = true;
+                job.cut = .{ .fold = .grammar };
+            },
+            1 => {
+                Host.Out.tokens(&out, &.{ 10, 154820, 12 });
+                try std.testing.expectEqualSlices(u32, &.{10}, f.delivered[0..f.n]);
+                try std.testing.expectEqual(@as(usize, 1), f.consumed);
+                try std.testing.expect(job.grammar.?.done);
+            },
+            2 => {
+                Host.Out.tokens(&out, &.{ 1, 9, 12 });
+                try std.testing.expectEqualSlices(u32, &.{ 1, 9 }, f.delivered[0..f.n]);
+                try std.testing.expectEqual(@as(usize, 0), f.consumed);
+                try std.testing.expect(job.think_shut);
+                try std.testing.expectEqual(Cut.Fold.grammar, job.cut.?.fold);
+                try std.testing.expect(!job.grammar.?.active);
+            },
+            else => unreachable,
+        }
+        try std.testing.expect(eng.stop_req.load(.monotonic));
+        h.finish(job, .stop, .{}, "");
+        try std.testing.expectEqual(@as(usize, 1), f.freed);
+        try std.testing.expectEqual(@as(usize, 1), f.finished);
+        try std.testing.expectEqual(if (case == 0) api.Reason.failed else api.Reason.stop, f.reason);
+        try std.testing.expect(h.running == null);
+    }
 }

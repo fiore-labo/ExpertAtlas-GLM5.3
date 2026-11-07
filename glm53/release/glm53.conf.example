@@ -37,7 +37,7 @@ NCCL_LIB=~/nccl-2.30.7/nvidia/nccl/lib/libnccl.so.2
 # node needs Docker and the NVIDIA container toolkit, and the libraries are the image's, so NCCL_LIB is not used).
 # RUNTIME.md, "Running in containers".
 #RUNTIME=docker
-#IMAGE=glm53-tensorfold:r3.3.2-102
+#IMAGE=glm53-tensorfold:r3.3.3-102
 
 # What a start reads besides the banks, fiore-lab/GLM-5.3-EXL3-Base on Hugging Face, the same path on every node. A
 # full checkpoint (fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) serves as well: its routed experts are not read.
@@ -68,6 +68,9 @@ PORT=8000
 # (GET /streams, /logs) there. Empty: off. Keep them on a closed network.
 #METRICS_LISTEN=0.0.0.0:9894
 #LOG_LISTEN=0.0.0.0:9895
+# Structured output (response_format json_object / json_schema, FEATURES.md): rank 0 loads lib/libllguidance.so.
+# 0: off, and such requests get 400.
+#STRUCTURED=1
 
 # CONTEXT_LENGTH: the positions one request may reach (prompt + reply), the model's 1,048,576 at most. KV_SIZE: the
 # whole KV in positions. The KV pool keeps KV_SIZE positions in blocks of 256 that every conversation shares: a

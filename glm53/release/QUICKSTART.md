@@ -128,7 +128,7 @@ On the first node, as the user who will run it:
 docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 ```
 
-`IMAGE` is the release's image, `ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.2-102`. The line writes the release to `~/expertatlas`, finds the nodes (a ring or a switch), checks
+`IMAGE` is the release's image, `ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.3-102`. The line writes the release to `~/expertatlas`, finds the nodes (a ring or a switch), checks
 them, looks for the weights, starts the engine and sends one request. The first start takes a few minutes.
 
 It ends in one of two ways.
@@ -195,7 +195,7 @@ The start:
 | `RESERVE_GB` | `4` | The memory each node keeps for the system |
 
 Every other key of the engine settings works the same way, for example `MAX_TOKENS`, `THINKING_SHARE`, `THINKING_FOLD_PROMPT`,
-`NAME` or `HOST`. `CONFIG.md` gives each key's meaning and the keys that are not options. Its defaults are `tf-glm53`'s: for this line, the
+`NAME`, `HOST` or `STRUCTURED` (`0` turns structured output off). `CONFIG.md` gives each key's meaning and the keys that are not options. Its defaults are `tf-glm53`'s: for this line, the
 tables here come first.
 
 This install:
@@ -228,6 +228,10 @@ curl -s http://NODE:8000/v1/chat/completions -H 'Content-Type: application/json'
 
 A reply's thinking is in `reasoning_content` and its answer in `content` (`delta.reasoning_content` and `delta.content` in a
 stream).
+
+For JSON, add `"response_format": {"type": "json_object"}`, or a JSON Schema with `json_schema`: the answer is held to
+it. With the thinking on (the default), `max_tokens` must be at least 545; for a short reply add
+`"chat_template_kwargs": {"enable_thinking": false}`. `FEATURES.md`, "Structured output", has the rest.
 
 The dashboard at `http://NODE:8010/panel` shows the engine and starts and stops it. An AI agent can do the same through
 the control API: `AGENT-API.md` has the steps, and `AI-GUIDE.md` describes the whole system.

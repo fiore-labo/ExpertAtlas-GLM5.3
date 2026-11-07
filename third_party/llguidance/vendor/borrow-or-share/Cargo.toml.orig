@@ -1,0 +1,19 @@
+[package]
+name = "borrow-or-share"
+version = "0.2.2"
+authors = ["Scallop Ye <yescallop@gmail.com>"]
+edition = "2021"
+description = "Traits for either borrowing or sharing data."
+documentation = "https://docs.rs/borrow-or-share"
+repository = "https://github.com/yescallop/borrow-or-share"
+license = "MIT-0"
+keywords = ["borrow", "share"]
+categories = ["rust-patterns"]
+
+[features]
+default = []
+std = []
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

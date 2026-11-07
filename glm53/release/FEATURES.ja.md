@@ -21,6 +21,7 @@ Expert Atlas の機能を 1 つずつ説明します。何をするか、なぜ�
 10. [正常性確認](#10-正常性確認)
 11. [エンジンコアと RDMA の行](#11-エンジンコアと-rdma-の行)
 12. [表示設定](#12-表示設定)
+13. [構造化出力](#13-構造化出力)
 
 ## 1. リングとスイッチ、ノード確認
 
@@ -248,3 +249,85 @@ prompt を読まないと出せません。
 - ノード確認のノードの一覧とチェックも、同じファイルに残ります。
 - **既定に戻す** (2 回押す) は、レーンのすべてのブラウザの表示設定を既定に戻します。言語とノードはそのままです。
 - リングとスイッチのレーンは、設定で別のものを選んでいなければ、光の色を bit ごとに変え、配色 Material · 藍 で開きます。
+
+## 13. 構造化出力
+
+**何をするか。** 返事の答えを JSON に保ちます。JSON のオブジェクトか、送った JSON Schema に合う JSON です。エンジンは token ごとに、答えがその形から
+外れない token の中からだけモデルに選ばせます。なので答えは JSON として読め、スキーマにも合います (`max_tokens` で先に切れたときを除きます)。
+文法は llguidance 1.9.1 のもので、最初のノードで動きます。既定でオンです (`STRUCTURED`)。
+
+**なぜあるか。** 返事をプログラムが読むとき (情報の抜き出し、フォーム、エージェントの 1 手など)、期待どおりのキーと型を持つ JSON をそのまま受け取れます。
+モデルに聞き直す必要がありません。
+
+**使い方。** リクエストで指定します。
+
+- `/v1/chat/completions` (OpenAI の chat): JSON のオブジェクトなら `"response_format": {"type": "json_object"}`、スキーマに合う JSON なら
+  `{"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}}` です。vLLM の書き方も読みます: `"guided_json": SCHEMA`、
+  `"structured_outputs"` の `{"json": SCHEMA}` か `{"json_object": true}`。`{"type": "text"}` は制約なしです。
+- `/v1/responses` (OpenAI の Responses API): `"text": {"format": {"type": "json_schema", "name": "...", "schema": {...}}}`、
+  または `{"type": "json_object"}`。
+- `/v1/messages` (Anthropic の Messages API): `"output_config": {"format": {"type": "json_schema", "schema": {...}}}`。
+
+chat API で、思考なしの例:
+
+```sh
+curl -s http://NODE:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "glm-5.3", "max_tokens": 300,
+  "chat_template_kwargs": {"enable_thinking": false},
+  "messages": [{"role": "user", "content": "A city in Japan and its prefecture."}],
+  "response_format": {"type": "json_schema", "json_schema": {"name": "city", "schema": {
+    "type": "object",
+    "properties": {"city": {"type": "string"}, "prefecture": {"type": "string"}},
+    "required": ["city", "prefecture"]}}}}'
+```
+
+Python の `openai` パッケージで、思考ありの例:
+
+```python
+import json
+from openai import OpenAI
+
+client = OpenAI(base_url="http://NODE:8000/v1", api_key="none")
+r = client.chat.completions.create(
+    model="glm-5.3", max_tokens=4000,
+    messages=[{"role": "user", "content": "Three prime numbers above 100."}],
+    response_format={"type": "json_schema", "json_schema": {"name": "primes", "schema": {
+        "type": "object",
+        "properties": {"primes": {"type": "array", "items": {"type": "integer"},
+                                  "minItems": 3, "maxItems": 3}},
+        "required": ["primes"]}}})
+choice = r.choices[0]
+if choice.finish_reason == "length":
+    raise SystemExit("cut by max_tokens: the JSON is not finished")
+print(json.loads(choice.message.content)["primes"])
+```
+
+- **思考ありのとき。** chat API と Responses API では、GLM-5.3 は既定で思考します。Messages API では `thinking` で頼んだときです。思考は自由に書き、
+  制約は思考が閉じたところから始まります。思考は `reasoning_content` (Messages API では `thinking` のブロック) に、JSON は答えに入ります。エンジンは
+  答えに少なくとも 256 token を残すように思考を閉じます。そのため思考ありでは `max_tokens` (Responses API では `max_output_tokens`) が 545 以上要り、
+  それより小さいと 400 で断ります。短い返事なら、curl の例のように `"chat_template_kwargs": {"enable_thinking": false}` で思考を切ってください。
+- **400 で断るもの。** 返事のヘッダより前に断ります (ストリーミングでも同じ)。どれも理由をメッセージで返します。
+  - `tools` (空でない一覧) と一緒のとき、`tool_choice` が `required` か名前を指定した関数のとき: まだ対応していません。
+  - `stop` の文字列 (JSON を途中で切りうるため) や `ignore_eos` と一緒のとき。
+  - `MULTI` で起動したエンジン: まだ対応していません。
+  - `regex`・`choice`・`grammar` (`guided_regex`・`guided_choice`・`guided_grammar`、`structured_outputs` の同じもの): まだ対応していません。
+    `json_object` か `json_schema` を使ってください。
+  - 文法が、書いてあるより緩くしか守れないスキーマ。サーバーは先にスキーマを確かめ、守っていない JSON を返す代わりに断ります: JSON Schema 2020-12
+    以外の `$schema`。配列で書いた `items` や `additionalItems` (draft 4 のタプル。`prefixItems` で書いてください)。`#`・`#/$defs/NAME`・
+    `#/definitions/NAME` 以外の `$ref`。`nullable` (OpenAPI のもの。`"type": ["integer", "null"]` と書いてください)。±2^53 を超える整数の範囲や定数。
+    1〜65,536 の整数でも、小数点以下 8 桁までで小数点を除くと 65,536 以下の小数 (0.25、0.01) でもない `multipleOf`、1 つの値に 2 つの `multipleOf`。
+    ほかのキーを許すオブジェクトの `minProperties`・`maxProperties`。`x-guidance` (サーバーが決めます)。64 KiB を超えるか、32 段より深いスキーマ。
+    対になっていないサロゲート、NaN、Infinity。
+- **知っておくこと。**
+  - `properties` があって `additionalProperties` のないオブジェクトは、書いたキーだけを受け付けます (`allOf` の枝の中は除きます)。ほかのキーも
+    許すなら `"additionalProperties": true` と書いてください。
+  - `max_tokens` で切れた返事は `finish_reason` が `length` で、答えは終わっていない JSON です。読む前に `finish_reason` を確かめてください。
+  - JSON に `\u` のエスケープは出ません。ほかの文字はそのまま書くので、キーの綴りは 1 通りです。短いエスケープ (`\n`、`\r`、`\t`、`\b`、`\f`)
+    のない制御文字は書けません。token の間の空白は、改行 1 つまでと、空白かタブ 64 個までです。
+  - 構造化のリクエストは drafter (MTP や DFlash2) なしで decode するので、同じ長さの普通のリクエストより遅くなります。普通のリクエストは前と同じで、
+    r3.3.2-102 と同じ token、同じ速さです。
+  - オフにするには、エンジン設定の「サーバー」の **構造化出力**、`docker run` の行の `-e STRUCTURED=0`、`glm53.conf` の `STRUCTURED=0` のどれかを使います。
+    次の起動から効き、そのようなリクエストは 400 になります (`CONFIG.ja.md`)。最初のノードが `lib/libllguidance.so` を読み込めないときは、
+    エンジンはそれなしで起動し (rank 0 のログに `structured output unavailable`)、同じ 400 になります。
+  - スイッチの 8 台で確かめたこと: JSON のオブジェクトとスキーマ、思考あり、ストリーミング、`max_tokens` で切れたとき、クライアントが切ったストリーム、
+    3 つの API、断るものすべて。どの後もすべての rank が動いていました。普通のリクエストは 20 の prompt で r3.3.2-102 と同じ token でした。

@@ -1,0 +1,3 @@
+# vendor/ is cargo vendor's output as it is (each crate's .cargo-checksum.json lists its files): the repository's
+# ignore rules must not drop any of it (build/ would drop vendor/proc-macro2/build/probe.rs)
+!build/

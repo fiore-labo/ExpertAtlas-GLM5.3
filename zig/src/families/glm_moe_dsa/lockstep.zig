@@ -22,6 +22,11 @@ pub const Header = struct {
     stop_eos: bool = true,
     k: u8 = 0,
     mode: u8 = 0,
+    /// Fiore-lab: the segment is under a grammar (structured output): every round that does not stop
+    /// broadcasts rank 0's mask rows once; bit 16 of the third word.
+    /// Fiore-lab: この区間は文法つき (構造化出力): 止めないラウンドごとに rank 0 の mask の行を 1 回配る。
+    /// 3 語目の bit 16。
+    grammar: bool = false,
     seed: u64 = 0,
     temperature: f64 = 0,
     top_k: i32 = 0,
@@ -56,7 +61,7 @@ pub const Header = struct {
         var w: [words]i32 = undefined;
         w[0] = h.max_tokens;
         w[1] = @intFromBool(h.stop_eos);
-        w[2] = @as(i32, h.k) | (@as(i32, h.mode) << 8);
+        w[2] = @as(i32, h.k) | (@as(i32, h.mode) << 8) | (@as(i32, @intFromBool(h.grammar)) << 16);
         w[3] = @intCast(h.seed & 0x7FFFFFFF);
         w[4] = @intCast((h.seed >> 31) & 0x7FFFFFFF);
         w[5] = @intCast(h.seed >> 62);
@@ -75,6 +80,7 @@ pub const Header = struct {
             .stop_eos = w[1] != 0,
             .k = @intCast(w[2] & 0xFF),
             .mode = @intCast((w[2] >> 8) & 0xFF),
+            .grammar = ((w[2] >> 16) & 1) != 0,
             .seed = @as(u64, @intCast(w[3])) | (@as(u64, @intCast(w[4])) << 31) | (@as(u64, @intCast(w[5])) << 62),
             .temperature = wordsF64(w[6..9]),
             .top_k = w[9],
@@ -267,6 +273,10 @@ pub fn takeDraftWords(e: *engine.Engine, x: []const i32) void {
 /// One request on this rank: the slot cache's agreement first when there is one, then the decode the header asks for.
 /// このランクでの 1 要求: スロットキャッシュがあればその合意を先に行い、次にヘッダが求める decode を行う。
 fn run(ch: *Channel, e: *engine.Engine, h: Header, prompt: []const i64, sink: ?engine.Sink, prop: ?engine.Proposer, plan: ?*slots.Plan, pplan: ?*pool_plan.Plan) !engine.Stats {
+    // Fiore-lab: every rank takes the grammar bit from the header, including cached prompt re-admissions.
+    // Fiore-lab: cache からの受け入れ直しでも、全 rank が header の文法の bit を使う。
+    try e.grammarSegment(h.grammar);
+    if (h.grammar and h.mode != 0) return error.GrammarDraftsUnsupported;
     if (e.pool != null) return pool_serve.serve(ch, e, h, prompt, sink, prop, pplan, runPlain);
     // TF_GLM53_POOL_POISON (tests): prefix off poisons every row before every request (poison.zig)
     // TF_GLM53_POOL_POISON (試験用): prefix off は要求ごとに全行を毒で埋める (poison.zig)
@@ -929,11 +939,16 @@ pub fn followMulti(ch: *Channel, e: *engine.Engine) !void {
 }
 
 test "the header round-trips through its words" {
-    const h: Header = .{ .max_tokens = 300, .stop_eos = false, .k = 2, .mode = 9, .seed = 0x7FFF_FFFF_1234_5678, .temperature = 0.7, .top_k = 20, .top_p = 0.95, .min_p = 0.05, .r0 = 17 };
+    const h: Header = .{ .max_tokens = 300, .stop_eos = false, .k = 2, .mode = 9, .grammar = true, .seed = 0x7FFF_FFFF_1234_5678, .temperature = 0.7, .top_k = 20, .top_p = 0.95, .min_p = 0.05, .r0 = 17 };
     const w = h.encode();
     for (w) |v| try std.testing.expect(v >= 0);
     const back = try Header.decode(&w);
     try std.testing.expectEqualDeep(h, back);
+    // Fiore-lab: without a grammar the third word is what it was before bit 16 was given to it
+    // Fiore-lab: 文法なしなら 3 語目は bit 16 を使う前と同じ
+    const plain: Header = .{ .max_tokens = 300, .k = 2, .mode = 9 };
+    try std.testing.expectEqual(@as(i32, 2 | 9 << 8), plain.encode()[2]);
+    try std.testing.expect(!(try Header.decode(&plain.encode())).grammar);
     // 1.0's bits split low 31 / next 31 / top 2
     // 1.0 のビットを下位 31・次の 31・上位 2 に分ける
     var one: [3]i32 = undefined;

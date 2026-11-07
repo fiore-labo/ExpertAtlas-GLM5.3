@@ -77,6 +77,7 @@ const Mailbox = struct {
     cond: std.Io.Condition = .init,
     tokens: std.ArrayList(u32) = .empty,
     chunks: std.ArrayList(usize) = .empty, // where each round's tokens end
+    answer_at: ?usize = null, // Fiore-lab: a structured reply's first answer token (api.Event.answer), in `tokens`
     cached: ?u32 = null,
     prefilled_ns: ?i96 = null,
     finished: bool = false,
@@ -101,6 +102,9 @@ const Mailbox = struct {
                 m.tokens.appendSlice(m.gpa, t) catch {};
                 m.chunks.append(m.gpa, m.tokens.items.len) catch {};
             },
+            .answer => if (m.answer_at == null) {
+                m.answer_at = m.tokens.items.len;
+            },
             .finished => |f| {
                 m.finished = true;
                 m.reason = f.reason;
@@ -113,6 +117,14 @@ const Mailbox = struct {
             },
         }
         m.cond.signal(m.io);
+    }
+
+    /// Fiore-lab: where a structured reply's answer starts among its tokens (api.Event.answer), null until it does.
+    /// Fiore-lab: 構造化の応答の答えが token のどこから始まるか (api.Event.answer)。始まるまでは null。
+    fn answerAt(m: *Mailbox) ?usize {
+        m.mutex.lockUncancelable(m.io);
+        defer m.mutex.unlock(m.io);
+        return m.answer_at;
     }
 
     fn deinit(m: *Mailbox) void {
@@ -135,6 +147,13 @@ fn flag(f: Value, key: []const u8) ?bool {
     if (v == .null) return null;
     return v.truthy();
 }
+
+/// Fiore-lab: the answer a structured reply with thinking keeps at least, in tokens, and the line
+/// break the thinking budget's cut waits for at most (glm53_host's think_grace).
+/// Fiore-lab: 思考ありの構造化の応答が少なくとも残す答えの token 数と、思考の予算の打ち切りが最大で待つ改行
+/// (glm53_host の think_grace)。
+pub const structured_answer_min: u32 = 256;
+const structured_break_wait: i64 = 256;
 
 /// A request rendered and checked but not submitted; it holds the preparing count until generate or release.
 pub const Prepared = struct {
@@ -213,6 +232,15 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .tools_json = if (input.tools.len > 0) try json.stringify(a, .{ .array = @constCast(input.tools) }, .{ .ascii = false }) else "",
     };
     try srv.checkFeatures(cx, f, input.tools.len > 0, thinking, rendered.ids, input.tools, &request);
+    // Fiore-lab: structured output runs one conversation without a drafter for now, ends at the model's end token and
+    // writes no stop strings into the grammar's answer (they could cut the JSON)
+    // Fiore-lab: 構造化出力は今は drafter なしの 1 会話で、モデルの終わりの token で終わり、文法の答えに stop 文字列を
+    // 持ち込まない (JSON を途中で切りうる)
+    if (request.structure != null) {
+        if (stops_opt.ignore_eos) return cx.refuse("structured output with ignore_eos is not supported: the grammar ends the answer at the model's end token");
+        if (stops_opt.strings.len > 0) return cx.refuse("structured output with stop strings is not supported yet: they could cut the JSON");
+        request.drafts = false;
+    }
     // R-027: a reply that starts in its think block, for /health to tell when it leaves it
     // R-027: 思考ブロックの中から始まる応答。/health がいつ抜けたかを言えるように
     if (thinking) request.think_mark = srv.think_close_end;
@@ -336,6 +364,24 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
             }
         }
     }
+    // Fiore-lab: a structured reply with thinking: the think block always closes, and the
+    // budget leaves the answer structured_answer_min tokens beside the close's text and the line break the cut waits
+    // for (the Host's think_grace); a max_tokens too small for that is a 400
+    // Fiore-lab: 思考ありの構造化の応答: 思考ブロックは必ず閉じ、予算は答えに
+    // structured_answer_min token を、閉じの文と打ち切りが待つ改行 (Host の think_grace) とは別に残す。それに足りない
+    // max_tokens は 400
+    if (thinking and request.structure != null) {
+        if (srv.think_close.len == 0) return cx.refuse("structured output with thinking needs a chat template whose think block closes with </think>: turn thinking off");
+        const most: i64 = limit - structured_answer_min - structured_break_wait - @as(i64, @intCast(srv.think_wrap.len));
+        if (most < 1) return cx.fail(.request, "structured output with thinking needs max_tokens of at least {d} (the thinking, its close and at least {d} tokens of answer); this request has {d}: raise max_tokens or turn thinking off", .{ limit - most + 1, structured_answer_min, limit });
+        if (request.think_budget == 0 or request.think_budget > most) request.think_budget = @intCast(most);
+        request.think_answer = @max(request.think_answer, structured_answer_min);
+        request.think_unclosed = .close;
+        request.think_close = srv.think_close;
+        request.think_end = srv.think_close_end;
+        request.think_wrap = srv.think_wrap;
+        request.think_breaks = srv.think_breaks;
+    }
     // with folds, the context holds the prompt, the thinking at its most (the head kept, the label, the fold window,
     // the line break waited for, the checkpoint's request, cap and close) and the answer past the thinking budget:
     // that has to fit, not max_tokens (the host caps each segment at the context left, so the context never overruns).
@@ -385,7 +431,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         const need = @min(limit, peak + answer);
         if (n + need > window) return cx.fail(.context_length, "{s} {d} tokens, but the rendered prompt has {d} tokens; with thinking folds the context also holds up to {d} thinking tokens (the fold window, the checkpoint and its texts) and the answer past the thinking budget ({d} tokens). Reduce the prompt to at most {d} prompt tokens, or lower thinking_fold_window, thinking_fold_cap or max_tokens.", .{ errors.context_limit, window, n, peak, answer, @max(0, window - need) });
     }
-    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .effort = effort, .sampled = sampling != null, .drafts = drafts, .stops = stops_opt, .preparing = preparing };
+    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .effort = effort, .sampled = sampling != null, .drafts = request.drafts, .stops = stops_opt, .preparing = preparing };
 }
 
 /// Where the summary at the think block's close starts: `share` percent of the thinking's limit, at least one token;
@@ -535,6 +581,22 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     const submitted = nowNs(io);
     if (srv.keepalive) |k| k.begin(); // the GPU is busy: the idle ticker holds its commits
     defer if (srv.keepalive) |k| k.end();
+    // Fiore-lab: the structure compiled on this thread just before submit, so a refusal is still a 400 before any
+    // header; the request owns the grammar until submit hands it to the engine
+    // Fiore-lab: structure は submit の直前にこのスレッドで compile する。断る時もヘッダの前の 400。submit がエンジンに
+    // 渡すまで、文法は要求のもの
+    var grammar_owned: ?*anyopaque = null;
+    defer if (grammar_owned) |g| srv.engine.freeStructure(g);
+    if (request.structure) |*st| {
+        const compiled = try srv.engine.compileStructure(a, st) orelse return cx.refuse("structured output is not supported by this engine yet");
+        switch (compiled) {
+            .ok => |g| {
+                st.compiled = g;
+                grammar_owned = g;
+            },
+            .refused => |why| return cx.fail(.request, "the schema was refused by the grammar compiler: {s}", .{why}),
+        }
+    }
     srv.engine.submit(id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| return switch (e) {
         error.Busy => blk: {
             srv.metrics.refused(io);
@@ -542,9 +604,10 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
         },
         error.Closed => cx.fail(.other, "the scheduler is closed", .{}),
     };
+    grammar_owned = null; // the engine's now (it frees it when the reply ends)
     release(srv, preparing); // a background request waits only while a foreground one prepares
     preparing = false;
-    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .ping_ns = pingInterval(), .last_write = submitted };
+    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .ping_ns = pingInterval(), .last_write = submitted, .structured = request.structure != null };
     defer srv.noteRequest(prepared.prompt_len, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds, if (box.cached) |c| @as(usize, c) else null, box.stats.decode_seconds, box.stats.queue_seconds);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     const result: Failure!Reply = blk: {
@@ -621,6 +684,16 @@ const Generation = struct {
     max_tokens: u32,
     tools: []const Value,
     calls: ?tool_stream.Streamer = null,
+    // Fiore-lab: a structured reply splits its thinking from its answer by token, not by the close's text (a </think>
+    // the thinking spells with ordinary tokens is text, not the close the Host sees): the text before the first
+    // special close is the thinking, the text from api.Event.answer on is the answer; the two places in the text,
+    // once known (a special token's boundary decodes the same whatever follows it)
+    // Fiore-lab: 構造化の応答は思考と答えを token で分け、閉じの文字列では分けない (思考が普通の token で綴った </think> は
+    // 文で、Host が見る閉じではない): 最初の特殊な閉じより前の文が思考、api.Event.answer より後の文が答え。文の中の 2 つ
+    // の位置は、分かれば覚える (特殊 token の境目は後に何が来ても同じに復号される)
+    structured: bool = false,
+    close_char: ?usize = null,
+    answer_char: ?usize = null,
     collected: std.ArrayList(u32) = .empty,
     visible: reply_text.Incremental = .{},
     hidden: std.ArrayList(u8) = .empty, // reused for the answer without its call blocks
@@ -657,6 +730,24 @@ const Generation = struct {
         return false;
     }
 
+    /// Fiore-lab: a structured reply's thinking and answer in `text` (the reply's text so far, its end tokens left out):
+    /// the thinking runs to the first special close (all of it while the block is open), the answer from where
+    /// api.Event.answer fell (none before it).
+    /// Fiore-lab: `text` (ここまでの応答の文、終わりの token は除く) の中の構造化の応答の思考と答え: 思考は最初の特殊な閉じまで
+    /// (ブロックが開いている間は全部)、答えは api.Event.answer の位置から (それより前はない)。
+    fn structuredParts(g: *Generation, text: []const u8) Allocator.Error!struct { reasoning: []const u8, answer: []const u8 } {
+        const items = g.collected.items;
+        if (g.close_char == null and g.thinking) if (g.srv.think_close_end) |end| if (std.mem.indexOfScalar(u32, items, end)) |p| {
+            g.close_char = (try g.srv.text.decode(g.a, items[0..p])).len;
+        };
+        if (g.answer_char == null) if (g.box.answerAt()) |k| if (k <= items.len) {
+            g.answer_char = (try g.srv.text.decode(g.a, items[0..k])).len;
+        };
+        const reasoning = if (g.thinking) text[0..@min(g.close_char orelse text.len, text.len)] else "";
+        const answer = if (g.answer_char) |c| (if (c <= text.len) text[c..] else "") else "";
+        return .{ .reasoning = reasoning, .answer = answer };
+    }
+
     /// Commits a round's tokens as ``LaneStream.commit`` would, then streams what they add.
     fn commit(g: *Generation, chunk: []const u32) Failure!void {
         var landed: usize = 0;
@@ -689,7 +780,15 @@ const Generation = struct {
         const text = g.stops.visible(all, true);
         if (g.visible.pending()) return; // a character still split across tokens
         var answer = text;
-        if (g.thinking) {
+        if (g.structured) {
+            const parts = try g.structuredParts(text);
+            const piece = g.streamed_reasoning.after(parts.reasoning, true);
+            if (piece.len > 0) {
+                try g.streamed_reasoning.set(g.a, parts.reasoning, piece);
+                try g.emit(sink, try deltaOf(g.a, "reasoning_content", piece));
+            }
+            answer = parts.answer;
+        } else if (g.thinking) {
             const split = try reply_text.splitThinking(g.a, text, false, g.srv.markers);
             const piece = g.streamed_reasoning.after(split.reasoning, true);
             if (piece.len > 0) {
@@ -790,6 +889,11 @@ const Generation = struct {
         const a = g.a;
         const m = g.box;
         if (!g.engine_done) g.drain();
+        // Fiore-lab: a structured reply the engine failed (its grammar refused a token, or the logits had no allowed
+        // value) fails whatever ended the stream here
+        // Fiore-lab: エンジンが失敗させた構造化の応答 (文法が token を断った、または logits に許された値がない) は、ここで
+        // stream を何が終えたかによらず失敗
+        if (g.structured and m.finished and m.reason == .failed) return cx.other(if (m.message.len > 0) try a.dupe(u8, m.message) else "the structured reply failed");
         const reason: []const u8 = g.reason orelse switch (m.reason) {
             .stop => "stop",
             .length => "length",
@@ -806,7 +910,12 @@ const Generation = struct {
         const text = if (close.len > 0) try std.mem.concat(a, u8, &.{ visible, close }) else visible;
         var content: []const u8 = text;
         var reasoning: ?[]const u8 = null;
-        if (g.thinking) {
+        if (g.structured) {
+            const parts = try g.structuredParts(text);
+            const r = reply_text.pyStrip(parts.reasoning);
+            reasoning = if (r.len > 0) r else null;
+            content = parts.answer;
+        } else if (g.thinking) {
             const split = try reply_text.splitThinking(a, text, true, g.srv.markers);
             const r = reply_text.pyStrip(split.reasoning);
             reasoning = if (r.len > 0) r else null;

@@ -95,6 +95,7 @@ CACHE=${CACHE:-pool}       # pool: every conversation's KV in shared blocks of 2
 KV=${KV:-fp8}              # the KV cache's format: fp8, or fp4 (four nodes)
 DRAFT_SAVES=${DRAFT_SAVES:-8}  # pool with DFlash2: the conversations whose drafter state is kept
 EXPERT_LIVE=${EXPERT_LIVE:-1}  # 1: rank 0 counts the experts each row picks, for the control panel (a start from the panel always does); 0: not
+STRUCTURED=${STRUCTURED:-1}    # 1: structured output (response_format json_object / json_schema; rank 0 loads lib/libllguidance.so); 0: such requests get 400
 LOG_LISTEN=${LOG_LISTEN:-}      # HOST:PORT: each node's log keeper also answers GET /streams and /logs there, read-only (a monitor)
 LOG_KEEP_MB=${LOG_KEEP_MB:-8}   # the MB each log (each rank's, the watcher's, the launcher's) keeps in memory
 ROWS=${ROWS:-8192}
@@ -362,6 +363,7 @@ rank_env() {
     dflash2) e="$e TF_GLM53_DFLASH=$DRAFTER"; [ "$CACHE" = pool ] && e="$e TF_GLM53_POOL_DRAFT_SAVES=$DRAFT_SAVES" ;;
   esac
   [ "$EXPERT_LIVE" = 1 ] && e="$e TF_GLM53_EXPERT_LIVE=1"
+  [ "$STRUCTURED" = 1 ] && e="$e TF_GLM53_STRUCTURED=1 TF_GRAMMAR_LIB=$RUN_PKG/lib/libllguidance.so"
   # the panel's entrance is the launcher: rank 0's own /panel sends the browser there, when the launcher runs and
   # listens on every address (the engine's counts are read by the launcher from inside the node)
   if [ "$r" -eq 0 ] && [ -n "$(launcher_pid)" ]; then

@@ -184,6 +184,116 @@ archive carries weights. The optional
 evaluation, with commercial licensing from Inco AI; the engine runs without it, and neither the repository nor the
 archive carries it.
 
+### llguidance (structured output)
+
+The Linux aarch64 release archive also carries `lib/libllguidance.so` (and so does the container image built from it),
+the grammar engine of the structured output, which the engine opens at run time;
+`zig/src/families/glm_moe_dsa/structure/llg.zig` declares in Zig the structs and functions of its C API
+(`parser/llguidance.h`). The library is built from `third_party/llguidance/`:
+[llguidance](https://github.com/guidance-ai/llguidance) v1.9.1 (tag v1.9.1, commit f0971424), MIT License, Copyright (c)
+Microsoft Corporation (its `LICENSE`, text below). Its members `parser` (the crate `llguidance`, the C library) and
+`toktrie` keep upstream's code unmodified; Fiore-lab changed the build files only: the workspace `Cargo.toml` (those two
+members and a release profile), `parser/Cargo.toml` (without the dev-dependencies, the bench, and the optional
+dependencies and features the build does not use), `Cargo.lock` (trimmed to the two members, every version and checksum
+as upstream's), `.cargo/config.toml` and `.gitignore`.
+
+`third_party/llguidance/vendor/` is `cargo vendor`'s output for that lock: 62 crates from crates.io, each in its own
+directory with its manifest and license files. The library is built from them offline with Rust 1.95.0,
+`cargo build --release --locked --offline -p llguidance --target aarch64-unknown-linux-gnu --no-default-features
+--features lark,referencing,ahash` (upstream's default features without `rayon`), and linked by Zig 0.17.0
+(`zig cc -target aarch64-linux-gnu.2.28`). Rust's standard library is linked into it, as into any Rust library: the
+Rust Project's code under MIT OR Apache-2.0 (Copyright The Rust Project Developers) and the crates.io crates the
+standard library is built from, each under its own permissive license (the toolchain's
+`share/doc/rust/COPYRIGHT-library.html`). Of those, the library's panic and backtrace support shows addr2line 0.25.1,
+gimli 0.32.3, hashbrown 0.16.1, miniz_oxide 0.8.9 and rustc-demangle 0.1.27, each offering the MIT License (miniz_oxide:
+MIT OR Zlib OR Apache-2.0; the others MIT OR Apache-2.0) and used here under it.
+
+Where a crate offers the MIT License among its licenses, it is used here under the MIT License (text below); `ryu`,
+which offers Apache-2.0 or the Boost Software License 1.0, is used under Apache-2.0 (`LICENSES/Apache-2.0.txt`). Each
+crate below is named with its version and its manifest's license expression, then the copyright lines of its license
+files, and its manifest's authors where those lines name no holder.
+
+Compiled into `lib/libllguidance.so` (`cargo tree --offline --locked -e normal,no-proc-macro --target
+aarch64-unknown-linux-gnu -p llguidance --no-default-features --features lark,referencing,ahash`), besides `llguidance`
+and `toktrie` 1.9.1 (MIT, Copyright (c) Microsoft Corporation), 30 crates:
+
+- `ahash` 0.8.12, MIT OR Apache-2.0: Copyright (c) 2018 Tom Kaitchuck
+- `anyhow` 1.0.98, MIT OR Apache-2.0: no copyright line; authors: David Tolnay
+- `borrow-or-share` 0.2.2, MIT-0: Copyright 2024 Scallop Ye (its `LICENSE` is `LICENSES/MIT-0.txt`)
+- `bytemuck` 1.23.1, Zlib OR Apache-2.0 OR MIT: Copyright (c) 2019 Daniel "Lokathor" Gee. (its MIT text has
+  "(including the next paragraph)" after "this permission notice")
+- `cfg-if` 1.0.1, MIT OR Apache-2.0: Copyright (c) 2014 Alex Crichton
+- `derivre` 0.3.13, MIT: Copyright (c) Microsoft Corporation.
+- `equivalent` 1.0.2, Apache-2.0 OR MIT: Copyright (c) 2016--2023; no authors in its manifest (repository
+  indexmap-rs/equivalent)
+- `fluent-uri` 0.3.2, MIT: Copyright (c) 2024 Scallop Ye
+- `getrandom` 0.3.3, MIT OR Apache-2.0: Copyright (c) 2018-2025 The rust-random Project Developers; Copyright (c) 2014
+  The Rust Project Developers
+- `hashbrown` 0.15.4 and 0.17.1, MIT OR Apache-2.0: Copyright (c) 2016 Amanieu d'Antras
+- `indexmap` 2.10.0, Apache-2.0 OR MIT: Copyright (c) 2016--2017; no authors in its manifest (repository
+  indexmap-rs/indexmap)
+- `itoa` 1.0.15, MIT OR Apache-2.0: no copyright line; authors: David Tolnay
+- `libc` 0.2.174, MIT OR Apache-2.0: Copyright (c) 2014-2020 The Rust Project Developers
+- `lock_api` 0.4.13, `parking_lot` 0.12.4 and `parking_lot_core` 0.9.11, MIT OR Apache-2.0: Copyright (c) 2016 The Rust
+  Project Developers
+- `memchr` 2.7.5, Unlicense OR MIT: Copyright (c) 2015 Andrew Gallant
+- `once_cell` 1.21.3, MIT OR Apache-2.0: no copyright line; authors: Aleksey Kladov
+- `percent-encoding` 2.3.1, MIT OR Apache-2.0: Copyright (c) 2013-2022 The rust-url developers
+- `ref-cast` 1.0.24, MIT OR Apache-2.0: no copyright line; authors: David Tolnay
+- `referencing` 0.29.1, MIT: Copyright (c) 2020-2025 Dmitry Dygalo
+- `regex-syntax` 0.8.5, MIT OR Apache-2.0: Copyright (c) 2014 The Rust Project Developers. Its Unicode tables
+  (`src/unicode_tables/`, generated from the Unicode Character Database 16.0.0) are compiled in, under the Unicode, Inc.
+  License Agreement in its `src/unicode_tables/LICENSE-UNICODE`, Copyright © 1991-2018 Unicode, Inc.
+  (`LICENSES/Unicode-DFS-2016.txt`)
+- `ryu` 1.0.20, Apache-2.0 OR BSL-1.0: no copyright line; authors: David Tolnay
+- `scopeguard` 1.2.0, MIT OR Apache-2.0: Copyright (c) 2016-2019 Ulrik Sverdrup "bluss" and scopeguard developers
+- `serde` 1.0.219 and `serde_json` 1.0.140, MIT OR Apache-2.0: no copyright line; authors: Erick Tryzelaar, David Tolnay
+- `smallvec` 1.15.1, MIT OR Apache-2.0: Copyright (c) 2018 The Servo Project Developers
+- `strum` 0.28.0, MIT: Copyright (c) 2019 Peter Glotfelty
+- `zerocopy` 0.8.26, BSD-2-Clause OR Apache-2.0 OR MIT: Copyright 2023 The Fuchsia Authors
+
+Run by the compiler while the library is built, and not linked into it: the procedural macros `bytemuck_derive`,
+`ref-cast-impl`, `serde_derive` and `strum_macros`, which generate code into the crates above, and their dependencies:
+
+- `bytemuck_derive` 1.9.3, Zlib OR Apache-2.0 OR MIT: Copyright (c) 2019 Daniel "Lokathor" Gee.
+- `heck` 0.5.0, MIT OR Apache-2.0: Copyright (c) 2015 The Rust Project Developers
+- `proc-macro2` 1.0.95, MIT OR Apache-2.0: no copyright line; authors: David Tolnay, Alex Crichton
+- `quote` 1.0.40, MIT OR Apache-2.0: no copyright line; authors: David Tolnay
+- `ref-cast-impl` 1.0.24, MIT OR Apache-2.0: no copyright line; authors: David Tolnay
+- `serde_derive` 1.0.219, MIT OR Apache-2.0: no copyright line; authors: Erick Tryzelaar, David Tolnay
+- `strum_macros` 0.28.0, MIT: Copyright (c) 2019 Peter Glotfelty
+- `syn` 2.0.104, MIT OR Apache-2.0: no copyright line; authors: David Tolnay
+- `unicode-ident` 1.0.18, (MIT OR Apache-2.0) AND Unicode-3.0: no copyright line in its MIT text; authors: David
+  Tolnay. Its Unicode tables: Copyright © 1991-2023 Unicode, Inc., under the Unicode License V3 in its
+  `LICENSE-UNICODE` (`LICENSES/Unicode-3.0.txt`)
+
+Build scripts only (build-dependencies): `autocfg` 1.5.0, Apache-2.0 OR MIT: Copyright (c) 2018 Josh Stone;
+`version_check` 0.9.5, MIT/Apache-2.0: Copyright (c) 2017-2018 Sergio Benitez.
+
+In `vendor/` but not built (the optional feature `rayon` is off): `rayon` 1.10.0 and `rayon-core` 1.12.1, MIT OR
+Apache-2.0: Copyright (c) 2010 The Rust Project Developers; `crossbeam-deque` 0.8.6, `crossbeam-epoch` 0.9.18 and
+`crossbeam-utils` 0.8.21, MIT OR Apache-2.0: Copyright (c) 2019 The Crossbeam Project Developers; `either` 1.15.0, MIT
+OR Apache-2.0: Copyright (c) 2015; authors: bluss.
+
+Fifteen crates in `vendor/` are stubs: cargo needs their manifests to resolve the lock, but they are reached only on
+platforms the release does not build for (Windows, WASI, Redox, UEFI) or, for `zerocopy-derive`, through an optional
+dependency that is off. Each keeps upstream's manifests and license files; every source file its manifest names is a
+placeholder of at most two lines by Fiore-lab, so they contain none of upstream's code:
+
+- `bitflags` 2.9.1, MIT OR Apache-2.0: Copyright (c) 2014 The Rust Project Developers
+- `r-efi` 5.3.0, MIT OR Apache-2.0 OR LGPL-2.1-or-later: Copyright (C) 2017-2023 Red Hat, Inc.; Copyright (C)
+  2019-2023 Microsoft Corporation; Copyright (C) 2022-2023 David Rheinsberg (from upstream's `AUTHORS`, which holds its
+  license statement and which the stub leaves out)
+- `redox_syscall` 0.5.13, MIT: Copyright (c) 2017 Redox OS Developers
+- `wasi` 0.14.2+wasi-0.2.4, Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT: no copyright line; authors: The
+  Cranelift Project Developers
+- `wit-bindgen-rt` 0.39.0, Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT: upstream's crate has no license file,
+  and its manifest no authors
+- `windows-targets`, `windows_aarch64_gnullvm`, `windows_aarch64_msvc`, `windows_i686_gnu`, `windows_i686_gnullvm`,
+  `windows_i686_msvc`, `windows_x86_64_gnu`, `windows_x86_64_gnullvm` and `windows_x86_64_msvc` 0.52.6, MIT OR
+  Apache-2.0: Copyright (c) Microsoft Corporation.
+- `zerocopy-derive` 0.8.26, BSD-2-Clause OR Apache-2.0 OR MIT: Copyright 2023 The Fuchsia Authors
+
 ## Unicode data
 
 The tokenizer and the template engine embed tables generated from the Unicode Character Database 16.0.0

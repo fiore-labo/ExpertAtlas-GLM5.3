@@ -16,6 +16,8 @@ gives what differs with four nodes, with its measurements, and `RING.md` four no
 - `bin/tensorfold-native`: the server, with its CUDA kernels built for GB10 (sm_121) inside. Linux aarch64, glibc 2.28
   or later.
 - `lib/libroce_proxy.so`: the RDMA proxy of the decode collectives (needs `libibverbs.so.1`).
+- `lib/libllguidance.so`: the grammar of structured output (llguidance 1.9.1, MIT), which rank 0 loads (`STRUCTURED` in
+  `CONFIG.md`).
 - `tf-glm53`, `glm53.conf.example` (eight nodes) and `glm53.t4.conf.example` (four nodes): start, stop and check the
   ranks. `CONFIG.md` lists every setting of `glm53.conf`.
 - `tools/quickstart.py`: a fresh install to a running engine (`docker run ... IMAGE up` and `./tf-glm53 quickstart` run
@@ -164,6 +166,8 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/
 
 The reply's `message` holds the model's reasoning in `reasoning_content`, then the answer in `content`; `max_tokens`
 counts both. From another machine, send the request to `http://FIRST-NODE:PORT` (with the default `HOST=0.0.0.0`).
+A reply's answer can also be held to JSON or to a JSON Schema with `response_format` (`FEATURES.md`, "Structured
+output").
 
 ## Drafters
 
@@ -468,7 +472,7 @@ run `docker` on every node (the `docker` group). `tf-glm53`, the control panel's
 first node's host, as with the archive; the weights and the expert banks stay on the hosts.
 
 ```sh
-I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.2-102
+I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.3-102
 docker pull $I                                                # on every node
 mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out $I install /out
 cd glm53 && cp glm53.conf.example glm53.conf                  # or glm53.t4.conf.example; set RUNTIME=docker, IMAGE=$I
@@ -478,7 +482,7 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # or glm53.t4.conf
 - `install` writes the release's files (the same as the unpacked archive) to the directory. `./tf-glm53 pull` runs
   `docker pull IMAGE` on every node.
 - The image can be built from the archive instead: in a freshly unpacked archive,
-  `docker build --build-context fenced=DIR -f docker/Dockerfile -t glm53-tensorfold:r3.3.2-102 .`, with the fenced NCCL in
+  `docker build --build-context fenced=DIR -f docker/Dockerfile -t glm53-tensorfold:r3.3.3-102 .`, with the fenced NCCL in
   `DIR` (`RING.md`; the build fails without it). The build refuses any file the archive's
   `SHA256SUMS` does not list, so nothing of an installation goes into the image. Copy it to the other nodes with
   `docker save` and `docker load`.
@@ -556,7 +560,9 @@ Limits:
 - By default requests run one at a time (`MULTI`: "Several conversations at once"). Claude Code's background requests (without thinking, a few tokens long, for example to
   name a conversation) wait for the main one, and they begin unlike the main conversation's requests, so they share
   no cache with them; they share it with each other.
-- Structured output (`output_config.format`) is refused (400); Claude Code carries on without it.
+- Structured output (`output_config.format`, a JSON Schema) holds the answer as on the chat API (`FEATURES.md`,
+  "Structured output"), but not beside tools: a request with tools that asks for it is refused (400), and Claude Code
+  carries on without it.
 - Effort: GLM-5.3 has low, high and max; minimal runs as low, medium as high and xhigh as max (Claude Code sends xhigh).
   Claude Code asks for at most 32,000 tokens a reply (`CLAUDE_CODE_MAX_OUTPUT_TOKENS` raises it). The thinking's limit
   keeps the rest of it for the answer; with `THINKING_SHARE=0`, a reply that reaches the limit while still thinking ends

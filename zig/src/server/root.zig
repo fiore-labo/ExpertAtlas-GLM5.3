@@ -43,4 +43,7 @@ test {
     _ = @import("compact_test.zig");
     _ = @import("decisions.zig");
     _ = @import("decisions_test.zig");
+    _ = @import("schema_check.zig");
+    _ = @import("schema_check_test.zig");
+    _ = @import("structured_test.zig");
 }

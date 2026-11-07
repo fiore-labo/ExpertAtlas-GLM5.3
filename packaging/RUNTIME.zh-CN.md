@@ -10,6 +10,7 @@
 
 - `bin/tensorfold-native`：服务器，内含为 GB10（sm_121）构建的 CUDA 内核。Linux aarch64，glibc 2.28 或更高版本。
 - `lib/libroce_proxy.so`：解码集合通信使用的 RDMA 代理（需要 `libibverbs.so.1`）。
+- `lib/libllguidance.so`：结构化输出的语法（llguidance 1.9.1，MIT），由 rank 0 加载（`CONFIG.zh-CN.md` 的 `STRUCTURED`）。
 - `tf-glm53`、`glm53.conf.example`（八个节点）和 `glm53.t4.conf.example`（四个节点）：用于启动、停止和检查各 rank。`glm53.conf` 的全部设置项见 `CONFIG.zh-CN.md`。
 - `tools/quickstart.py`：从全新安装到引擎运行（`docker run ... IMAGE up` 和 `./tf-glm53 quickstart` 会运行它）。`tools/topology.py`：判定节点的连接方式。`tools/logkeep.py`：日志保管进程。
 - `claude-glm53`：在服务器上使用 Claude Code（“Claude Code”）。
@@ -108,7 +109,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/
   "messages": [{"role": "user", "content": "Say hello in one short sentence."}]}'
 ```
 
-回复的 `message` 中，`reasoning_content` 是模型的推理过程，其后 `content` 是答案；`max_tokens` 同时计入两者。从其他机器访问时，将请求发送到 `http://FIRST-NODE:PORT`（默认的 `HOST=0.0.0.0` 时）。
+回复的 `message` 中，`reasoning_content` 是模型的推理过程，其后 `content` 是答案；`max_tokens` 同时计入两者。从其他机器访问时，将请求发送到 `http://FIRST-NODE:PORT`（默认的 `HOST=0.0.0.0` 时）。也可以用 `response_format` 把回复的答案限定为 JSON 或 JSON Schema（`FEATURES.zh-CN.md` 的“结构化输出”）。
 
 ## 草稿模型
 
@@ -253,7 +254,7 @@ done
 本发布也以容器镜像形式提供：`/opt/glm53` 中是归档的文件，另有服务器运行所需的内容（cuBLAS 13、libibverbs 及其 provider、带 AArch64 fence 的 NCCL 2.30.7）。在 `glm53.conf` 中设置 `RUNTIME=docker` 和 `IMAGE` 后，`tf-glm53` 会通过 ssh 在每个节点上把各 rank 作为 `IMAGE` 的容器启动。这时每个节点需要的是 Docker 和 NVIDIA Container Toolkit（DGX OS 两者都有），而不是 cuBLAS、libibverbs 和 NCCL；运行 `tf-glm53` 的用户必须能在每个节点上运行 `docker`（`docker` 组）。`tf-glm53`、控制面板的启动器和设置与使用归档时一样留在第一个节点的主机上；权重和专家 bank 也留在主机上。
 
 ```sh
-I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.2-102
+I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.3-102
 docker pull $I                                                # 在每个节点上
 mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out $I install /out
 cd glm53 && cp glm53.conf.example glm53.conf                  # 或 glm53.t4.conf.example；设置 RUNTIME=docker 和 IMAGE=$I
@@ -261,7 +262,7 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # 或 glm53.t4.con
 ```
 
 - `install` 把本发布的文件（与解开的归档相同）写到该目录。`./tf-glm53 pull` 在每个节点上执行 `docker pull IMAGE`。
-- 镜像也可以由归档构建：在刚解开的归档中执行 `docker build --build-context fenced=DIR -f docker/Dockerfile -t glm53-tensorfold:r3.3.2-102 .`，`DIR` 中放带 fence 的 NCCL（`RING.zh-CN.md`；没有它构建会失败）。只要有归档 `SHA256SUMS` 未列出的文件，构建就会失败，因此安装环境中的设置或日志不会进入镜像。用 `docker save` 和 `docker load` 复制到其他节点。
+- 镜像也可以由归档构建：在刚解开的归档中执行 `docker build --build-context fenced=DIR -f docker/Dockerfile -t glm53-tensorfold:r3.3.3-102 .`，`DIR` 中放带 fence 的 NCCL（`RING.zh-CN.md`；没有它构建会失败）。只要有归档 `SHA256SUMS` 未列出的文件，构建就会失败，因此安装环境中的设置或日志不会进入镜像。用 `docker save` 和 `docker load` 复制到其他节点。
 - `tf-glm53 check` 在每个节点上检查：`IMAGE` 存在且层与第一个节点相同；容器能访问 GPU（`--gpus all`）；镜像中是与本目录相同的发布（否则为 `NG: image-not-this-release`）。
 - 每个 rank 的容器获得 GPU、`/dev/infiniband`、主机网络和 IPC、`--ulimit memlock=-1 --ulimit nofile=1048576:1048576`、`--oom-score-adj 1000`、主机用户和一个 init。以相同路径挂载：只读的 `WEIGHTS`、`DRAFTER`（DFlash2）以及该节点上 `expert-plan/banks.json` 中的每个 bank；可写的 `launch/`。Docker 不保存容器的日志（`--log-driver none`）：其输出进入节点的日志保管进程。容器名为 `glm53-p<PORT>-r<rank>`，停止后即删除。`tf-glm53 down`、`status`、监视进程和控制面板对它们的处理与从主机运行的 rank 相同。
 - 引擎在交换机和环上都读取 `/opt/nccl-fenced` 的 NCCL。
@@ -293,7 +294,7 @@ ENDPOINT=http://FIRST-NODE:8000 ./claude-glm53      # 后面可以接 Claude Cod
 限制：
 
 - 默认情况下请求逐个处理（`MULTI`：见“同时处理多个对话”）。Claude Code 的后台请求（不思考、只有几个 token，例如为对话命名）会等待主请求，而且开头与主对话的请求不同，因此与它们不共享缓存；后台请求之间会共享。
-- 结构化输出（`output_config.format`）会被拒绝（400）；Claude Code 会在没有它的情况下继续。
+- 结构化输出（`output_config.format` 的 JSON Schema）与 chat API 一样把答案限定为该 schema（`FEATURES.zh-CN.md` 的“结构化输出”），但不能与工具一起使用：带工具的请求要求它时会被拒绝（400），Claude Code 会在没有它的情况下继续。
 - 思考强度：GLM-5.3 有 low、high 和 max；minimal 按 low 运行，medium 按 high 运行，xhigh 按 max 运行（Claude Code 发送 xhigh）。Claude Code 每次回复最多请求 32,000 个 token（`CLAUDE_CODE_MAX_OUTPUT_TOKENS` 可以提高）。思考的上限会把其余部分留给回答；`THINKING_SHARE=0` 时，在思考途中达到上限的回复没有正文。
 
 ## 速度

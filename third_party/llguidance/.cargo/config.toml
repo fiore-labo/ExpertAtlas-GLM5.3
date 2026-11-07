@@ -1,0 +1,6 @@
+# The crates of Cargo.lock come from vendor/ (cargo vendor's output); the build does not use the network.
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

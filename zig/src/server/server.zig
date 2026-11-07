@@ -14,6 +14,7 @@ const listener_mod = @import("listener.zig");
 const routes = @import("routes.zig");
 const responses = @import("responses.zig");
 const grammar = @import("grammar.zig");
+const schema_check = @import("schema_check.zig");
 const clock = @import("clock.zig");
 const prompt = @import("prompt.zig");
 const tool_specs = @import("tool_specs.zig");
@@ -292,6 +293,16 @@ pub const Server = struct {
         };
     }
 
+    fn grammarBytes(ctx: *anyopaque, a: Allocator, id: u32) ?[]const u8 {
+        const srv: *Server = @ptrCast(@alignCast(ctx));
+        return srv.text.tokenBytes(a, id) catch null;
+    }
+
+    fn grammarAdded(ctx: *anyopaque, id: u32) bool {
+        const srv: *Server = @ptrCast(@alignCast(ctx));
+        return srv.text.isAdded(id);
+    }
+
     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
     pub fn init(gpa: Allocator, io: std.Io, engine: api.Engine, text: model_text.Text, config: Config, keys: ?*auth.Store) !*Server {
         const srv = try gpa.create(Server);
@@ -306,6 +317,15 @@ pub const Server = struct {
         };
         const a = srv.arena.allocator();
         srv.eos = try a.dupe(u32, text.eosIds());
+        // Fiore-lab: the grammar vocabulary, once (VTable.grammar_init): every id's raw bytes as this tokenizer knows
+        // them and the model's end tokens; structured output stays off when it cannot be built
+        // Fiore-lab: 文法の語彙を 1 回 (VTable.grammar_init): この tokenizer が知る全 id の生のバイトとモデルの終わりの
+        // token。作れなければ構造化出力はオフのまま
+        if (engine.vtable.grammar_init != null) {
+            engine.grammarInit(.{ .vocab = .{ .ctx = srv, .bytes = grammarBytes, .added = grammarAdded }, .size = text.vocabSize(), .eos = srv.eos }) catch |e|
+                log.line("structured output off: the grammar vocabulary could not be built ({s})", .{@errorName(e)});
+            srv.info = engine.info();
+        }
         if (text.tokenId(reply_text.channel_markers.close) != null) srv.markers = reply_text.channel_markers;
         srv.effort_levels = try fields.effortLevels(a, text.templateSource());
         srv.late_system = try lateSystem(a, text);
@@ -410,7 +430,28 @@ pub const Server = struct {
         }
         if (try grammar.spec(cx, f)) |s| {
             if (!srv.info.structures) return cx.refuse("structured output (response_format and the guided_* fields) is not supported by this engine yet");
-            request.structure = .{ .kind = s.kind, .text = s.text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null };
+            // Fiore-lab: structured output takes json_object and json_schema, the schema checked and rewritten for
+            // llguidance (schema_check: what llguidance would weaken without an error is a 400 here); it is compiled on
+            // this thread just before submit (generate), so a refusal still comes before any header
+            // Fiore-lab: 構造化出力は json_object と json_schema。schema は llguidance 向けに確かめて書き直す (schema_check:
+            // llguidance がエラーなしに弱めるものはここで 400)。compile は submit の直前にこのスレッドで (generate) するので、
+            // 断る時もヘッダの前
+            const text: []const u8 = switch (s.kind) {
+                .json => schema_check.json_object_text,
+                .json_schema => blk: {
+                    const value = switch (try json.parseText(cx.a, s.text)) {
+                        .ok => |v| v,
+                        .err => return cx.fail(.request, "{s} is not valid JSON", .{s.field}),
+                    };
+                    break :blk switch (try schema_check.check(cx.a, value)) {
+                        .text => |t| t,
+                        .refused => |r| return cx.fail(.request, "{s}: {s}", .{ s.field, r.message }),
+                    };
+                },
+                else => return cx.fail(.request, "{s}: regex, choice and grammar are not supported yet; use response_format json_object or json_schema", .{s.field}),
+            };
+            if (has_tools) return cx.refuse("structured output together with tools is not supported yet: send the tools or the response_format, not both");
+            request.structure = .{ .kind = s.kind, .text = text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null };
         }
     }
 

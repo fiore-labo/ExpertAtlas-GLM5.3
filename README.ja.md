@@ -34,7 +34,14 @@
 - すべての会話で 1 つの会話キャッシュを使い、256 トークンのブロック単位で保持します。リクエストは、どの会話のものであってもキャッシュにある最も長い先頭部分から再開します。同じように始まる会話（エージェントのシステムプロンプト、そのサブエージェント）は、共通のブロックを 1 回だけ保持します。
 - ラウンドごとにドラフトをモデルが検証します。ドラフトを作るのは、既定では GLM-5.3 自身の MTP 層、またはオプションの DFlash2 drafter です。どの場合も、応答はモデル自身が選んだものです。
 - 思考が長くなりすぎないようにします。上限は `max_tokens`（1 回の応答の上限）に対する割合で決め、長い思考は途中や終わりに整理できます。リクエストごとにも、エンジンの動作中にも設定できます。
+- 構造化出力: 返事の答えを JSON か JSON Schema に保ちます (`response_format`)。思考ありでも、なしでも使えます。
 - `/metrics`（Prometheus のテキスト）と `/health` は実行中のリクエストの分も数えるので、モニタはリクエストの実行中にも prefill と decode の速さ、キャッシュのヒット、ドラフトの受理を読めます。`METRICS_LISTEN` を設定すると、別のホストのモニタ向けに、この 2 つを専用のアドレスで読み取り専用で開きます。
+
+## r3.3.3-102 で変わったこと
+
+- **構造化出力 (既定でオン):** 返事の答えを JSON のオブジェクトか JSON Schema に保てます。`/v1/chat/completions` では `response_format` (vLLM の `guided_json` と `structured_outputs` も)、`/v1/responses` では `text.format`、`/v1/messages` では `output_config.format` で頼みます。モデルは token ごとに文法が許す token の中からだけ選ぶので、答えは JSON として読め、スキーマに合います (`max_tokens` で切れたときを除きます)。思考ありなら、モデルはまず自由に思考します。文法が書いてあるより緩くしか守れないスキーマは、半分だけ守る代わりに 400 で断ります。ツールと一緒のとき、`MULTI` のときも 400 です。文法は llguidance 1.9.1 (MIT) で、アーカイブとイメージに入っています。`STRUCTURED=0` でオフにできます ([FEATURES](glm53/release/FEATURES.ja.md#13-構造化出力))。
+- 構造化のリクエストは drafter なしで decode するので、遅くなります。普通のリクエストは r3.3.2-102 と同じ token、同じ速さです。
+- r3.3.2-102 からは変えることはありません。重みも設定も同じです。ソースからのビルドには Rust 1.95.0 も要ります (「ソースからのビルド」)。
 
 ## r3.3.2-102 で変わったこと
 
@@ -145,12 +152,12 @@ Fiore-lab のものと形が同じで、同じように読み込まれます。
 リリースは、コンテナイメージと、同じファイルを持つアーカイブの 2 つの形で配布します。おすすめはイメージです。重みを置いてあれば、1 台目のノードで次の 1 行を実行するとエンジンが起動します。
 
 ```sh
-docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.2-102 up
+docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.3-102 up
 ```
 
 最後に `READY` とアドレスが出ます。API は `http://FIRST-NODE:8000/v1`、コントロールパネルは `http://FIRST-NODE:8010/panel` です。足りないものがあると `STOP` で止まり、することと次に実行する行を示します。手順と全オプションは [QUICKSTART](glm53/release/QUICKSTART.ja.md) にあります。
 
-同じことを手で行う場合、イメージなら、全ノードで `docker pull` し、`mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out` を実行して、`glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定します（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3.3.2-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。どちらも、`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーして必要な項目を記入し、`./tf-glm53 deploy` と `./tf-glm53 up`（コントロールパネルを起動します）を実行して、パネルでエンジンを起動します。`./tf-glm53 start` は直前の起動の計画で起動し、`./tf-glm53 down` で停止します。
+同じことを手で行う場合、イメージなら、全ノードで `docker pull` し、`mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out` を実行して、`glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定します（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3.3.3-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。どちらも、`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーして必要な項目を記入し、`./tf-glm53 deploy` と `./tf-glm53 up`（コントロールパネルを起動します）を実行して、パネルでエンジンを起動します。`./tf-glm53 start` は直前の起動の計画で起動し、`./tf-glm53 down` で停止します。
 
 サーバーは既定で全アドレス（`HOST=0.0.0.0`）で OpenAI chat API と、Claude Code 向けの Anthropic Messages API を提供します。API にもコントロールパネルにもキーはないので、届く人なら誰でも使えます。ノードを閉じたネットワーク内に留めるか、前段に TLS とアクセス制御を置いてください（`HOST=127.0.0.1` と `LAUNCHER_HOST=127.0.0.1` にすると 1 台目のノードからだけになります）。
 
@@ -188,21 +195,22 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-la
 
 ## ソースからのビルド
 
-Zig 0.17.0 が `PATH` 上にあり（または `build_libs.sh` には `ZIG=` でそのパスを指定）、CUDA 13（`nvcc`）と libibverbs のヘッダ（`libibverbs-dev`）がある GB10 システムで次を実行します。
+Zig 0.17.0 が `PATH` 上にあり（または `build_libs.sh` には `ZIG=` でそのパスを指定）、CUDA 13（`nvcc`）、libibverbs のヘッダ（`libibverbs-dev`）、rustup で入れた Rust 1.95.0（`rustup toolchain install 1.95.0`。`build_libs.sh` は `~/.cargo/bin/cargo` か、`CARGO=` で指定したものを使います）がある GB10 システムで次を実行します。
 
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
-sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so
-zig build dist -Dversion=r3.3.2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so, lib/libllguidance.so
+zig build dist -Dversion=r3.3.3-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 
-アーカイブは `zig-out/dist/` に出力されます。
+アーカイブは `zig-out/dist/` に出力されます。`build_libs.sh` は llguidance を、`third_party/llguidance/` と、そこに同梱したクレートからオフラインでビルドします。イメージとアーカイブを使うだけなら Rust は要りません。
 
 ## 制限
 
 - GB10 システム 4 台または 8 台に対応します。2 台と 3 台の構成はテスト中です。他の GPU や他のランク数には対応していません。
 - 既定では、同時に実行するリクエストは 1 件です。他のリクエストは 32 件まで到着順に待ち（チャットのタイトル作成は最後）、それを超えるとサーバーは断ります（503、ストリーミングではエラーイベント）。`MULTI` を使うと 4 件までまとめて decode できますが、ノードのメモリが要ります。それ以外の場合、サブエージェントを並列に動かすエージェントでは、サブエージェントを別のモデルに向けるほうが適しています。
+- 構造化出力は JSON のオブジェクトと JSON Schema だけです (正規表現・選択肢・文法はまだ)。ツールと一緒のときと `MULTI` では使えません。
 - コントロールパネルの画面は英語と日本語だけです。
 - その他の制限は `packaging/RUNTIME.ja.md` に記載しています。
 

@@ -1,6 +1,6 @@
 English | [日本語](AI-GUIDE.ja.md) | [简体中文](AI-GUIDE.zh-CN.md)
 
-# A guide for AI assistants: full GLM-5.3 on DGX Spark (release r3.3.2-102)
+# A guide for AI assistants: full GLM-5.3 on DGX Spark (release r3.3.3-102)
 
 This page describes the whole system in one place: what it is, what each part does, how it is used, what it can do
 and what it cannot. It is written for AI assistants that help someone understand, install, run or troubleshoot this
@@ -36,6 +36,7 @@ server needs no Python at run time.
 |---|---|
 | `bin/tensorfold-native` | the server: the GLM-5.3 engine and the HTTP API, CUDA kernels for GB10 (sm_121) built in |
 | `lib/libroce_proxy.so` | the RDMA proxy the decode collectives use (needs `libibverbs.so.1`) |
+| `lib/libllguidance.so` | the grammar of structured output (llguidance 1.9.1, MIT), loaded by rank 0 |
 | `tf-glm53` | the script that deploys, checks, starts, stops and watches the ranks; run it on the first node |
 | `claude-glm53` | starts Claude Code against the server's Messages API (RUNTIME.md, "Claude Code") |
 | `glm53.conf.example` / `glm53.t4.conf.example` | settings for eight / four nodes; one is copied to `glm53.conf` |
@@ -206,6 +207,7 @@ details; the image can also be built from the archive with the fenced NCCL (`doc
 | `THINKING_NOTICE` | every this many thinking tokens, a line tells the model what it used; 0 is off | 0 |
 | `TF_GLM53_BYTE_RESUME` | Byte Resume: `on`, `log`, `off` | `on` |
 | `ROCE_PROXY_CORES` | the cores the RoCE proxy threads poll on: `a725`, `os` | `a725` |
+| `STRUCTURED` | structured output (a reply held to JSON or a JSON Schema): `1` on, `0` off | `1` |
 | `EXTRA_ENV` | engine variables (not `TF_GLM53_MULTI`: that is `MULTI`) | empty |
 | `LAUNCHER_HOST`, `LAUNCHER_PORT`, `ATLAS_DIR`, `RESERVE_GB` | the control panel: its address, port, saved allocations, memory kept for the OS | four-node example: `0.0.0.0`, 8010, `atlas/`, 4 |
 
@@ -243,7 +245,7 @@ forever).
 
 | Path | Method | Notes |
 |---|---|---|
-| `/v1/chat/completions` | POST | OpenAI chat: streaming (`stream`, `stream_options.include_usage`), tools (`tools`, `tool_choice` `auto` or `none`) |
+| `/v1/chat/completions` | POST | OpenAI chat: streaming (`stream`, `stream_options.include_usage`), tools (`tools`, `tool_choice` `auto` or `none`), structured output (`response_format`) |
 | `/v1/messages`, `/v1/messages/count_tokens` | POST | Anthropic's Messages API, for Claude Code (`RUNTIME.md`, "Claude Code") |
 | `/v1/responses` | POST | OpenAI's Responses API |
 | `/v1/completions` | POST | plain text completion of a prompt (no chat template is added) |
@@ -262,10 +264,16 @@ forever).
   counts both. `chat_template_kwargs` takes `{"enable_thinking": false}` (no reasoning) and `reasoning_effort`. A request's
   own `thinking_budget`, `thinking_fold`, `thinking_fold_at_budget`, `thinking_fold_margin` and `thinking_fold_at_close`
   (in tokens) come before the settings. `reasoning_details` carries the thinking the context holds, for the next turn.
-- Refused with 400: `n` other than 1, `logprobs`, `response_format` `json_object` and `json_schema`, `guided_*`,
+- Refused with 400: `n` other than 1, `logprobs`, `guided_regex`, `guided_choice` and `guided_grammar`,
   `tool_choice` `required` or a named tool, images on the chat API (on `/v1/messages` an image becomes a note; text only),
   and, with no summaries midway and no organising at the budget's end, a `max_tokens` beyond what the
   context has left (`CONFIG.md`, `MAX_TOKENS`, gives the rule with summaries midway). A streamed request that cannot fit ends with an error event.
+- Structured output (`FEATURES.md`, "Structured output"): `response_format` `json_object` or `json_schema` (also vLLM's
+  `guided_json` and `structured_outputs`; `text.format` on `/v1/responses`, `output_config.format` on `/v1/messages`)
+  holds the answer to a JSON object or to the schema. With the thinking on (the chat API's default) `max_tokens` must be
+  at least 545. Refused with 400: beside `tools`, with `stop` strings or `ignore_eos`, with `MULTI`, and schemas the
+  grammar would keep less strictly than they say (FEATURES lists them). It decodes without the drafter; `STRUCTURED=0`
+  turns it off.
 - A client that disconnects cancels its request.
 - No key: the API has none. By default it listens on every address (`HOST=0.0.0.0`), so anyone who can reach it can
   use it, and the server speaks plain HTTP, so text crosses the network in the clear unless the server stays on a
@@ -337,6 +345,7 @@ allocs/delete). `AGENT-API.md` gives what an agent needs of it; its fields may c
   0.019 to 0.032 over the same texts. Every routed expert at one width, positions 6,144 to 8,190: 2 bits 0.0517,
   3 bits 0.0203, 4 bits 0.0127, 5 bits 0.0114.
 - **Tools and streaming**: OpenAI-style function calls and streamed replies with reasoning deltas.
+- **Structured output**: replies held to a JSON object or a JSON Schema, with or without thinking.
 
 ## 10. What it cannot do
 
@@ -349,8 +358,9 @@ allocs/delete). `AGENT-API.md` gives what an agent needs of it; its fields may c
   3 nodes yet); it costs node memory and is off by default.
 - Change expert widths while a request runs (a re-sort waits for the request to end), or grow the KV cache after the
   start (it is set aside at the start).
-- Read images (the chat API refuses them, `/v1/messages` turns them into a note), or accept `n` > 1, `logprobs`, JSON mode
-  or forced tool calls (`tool_choice` `required` or a named tool).
+- Read images (the chat API refuses them, `/v1/messages` turns them into a note), or accept `n` > 1, `logprobs` or forced
+  tool calls (`tool_choice` `required` or a named tool). Structured output takes a JSON object or a JSON Schema only (no
+  regex, choice or grammar), not beside tools or with `MULTI`.
 - Promise bit-identical replies at temperature 0 from run to run in the served configuration: the summation order
   of some kernels varies. (The accuracy measurements use a deterministic configuration made for scoring.)
 - Include DFlash2: it is downloaded separately under its own licence (CC BY-NC-ND 4.0, non-commercial, research and
@@ -385,6 +395,9 @@ Logs: in memory, in a log keeper on each node (`tools/logkeep.py`), nothing on d
 - `max_tokens` counts reasoning tokens too. A request that names none gets 70 % of `CONTEXT_LENGTH`. The thinking's limit
   keeps the rest for the answer, so a small `max_tokens` gives a short answer; with `THINKING_SHARE=0` a reply can end in
   its reasoning.
+- A structured request with the thinking on needs `max_tokens` of at least 545 (400 below it): turn the thinking
+  off (`chat_template_kwargs` `{"enable_thinking": false}`) for a short reply. A reply cut by `max_tokens` holds JSON
+  not yet finished (`finish_reason` `length`).
 - The engine's start-up line says `drafts: on` whatever the drafter; `tf-glm53 status` names the drafter in use.
 - Every start needs the Base weights (or a full checkpoint) and the 3-bit bank.
 - The re-sort's measurements are against the all-4-bit model, not the BF16 model; `ATLAS-TESTS.md` says which.

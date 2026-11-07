@@ -114,7 +114,7 @@ done
 docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 ```
 
-`IMAGE` 是发布的镜像 `ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.2-102`。这一行把发布内容写到 `~/expertatlas`，找到节点（环或交换机）并检查，查找权重，启动引擎并发送一次请求。首次启动需要几分钟。
+`IMAGE` 是发布的镜像 `ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.3-102`。这一行把发布内容写到 `~/expertatlas`，找到节点（环或交换机）并检查，查找权重，启动引擎并发送一次请求。首次启动需要几分钟。
 
 最后有两种结果。
 
@@ -176,7 +176,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
 | `MULTI`、`MULTI_WAIT` | `0`、`600` | 同时解码的对话数（0 至 4），以及请求等待它们的秒数 |
 | `RESERVE_GB` | `4` | 每个节点留给系统的内存 |
 
-引擎设置的其他项目也以同样方式指定，例如 `MAX_TOKENS`、`THINKING_SHARE`、`THINKING_FOLD_PROMPT`、`NAME`、`HOST`。每项的含义以及哪些项目不是选项，见 `CONFIG.zh-CN.md`。那里的默认值是 `tf-glm53` 的，对这一行以这里的表格为准。
+引擎设置的其他项目也以同样方式指定，例如 `MAX_TOKENS`、`THINKING_SHARE`、`THINKING_FOLD_PROMPT`、`NAME`、`HOST`、`STRUCTURED`（`0` 关闭结构化输出）。每项的含义以及哪些项目不是选项，见 `CONFIG.zh-CN.md`。那里的默认值是 `tf-glm53` 的，对这一行以这里的表格为准。
 
 安装：
 
@@ -204,6 +204,8 @@ curl -s http://NODE:8000/v1/chat/completions -H 'Content-Type: application/json'
 ```
 
 回复的思考在 `reasoning_content` 中，答案在 `content` 中（流式时为 `delta.reasoning_content` 和 `delta.content`）。
+
+要得到 JSON，加上 `"response_format": {"type": "json_object"}`，或用 `json_schema` 给出 JSON Schema：答案会被限定为该形式。开启思考时（默认），`max_tokens` 至少要 545；简短的回复请再加上 `"chat_template_kwargs": {"enable_thinking": false}`。详见 `FEATURES.zh-CN.md` 的“结构化输出”。
 
 仪表板 `http://NODE:8010/panel` 显示引擎的状态，并可启动和停止它。AI 代理可以通过控制 API 做同样的事：步骤见 `AGENT-API.zh-CN.md`，整个系统的说明见 `AI-GUIDE.zh-CN.md`。
 

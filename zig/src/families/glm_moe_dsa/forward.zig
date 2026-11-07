@@ -72,6 +72,11 @@ pub const Glue = struct {
     add_f32: cuda.Function,
     topk_keys: cuda.Function,
     row_argmax: cuda.Function,
+    // Fiore-lab: loaded only when structured output is enabled.
+    // Fiore-lab: 構造化出力が有効な時だけ読む。
+    mask_rows: ?cuda.Function = null,
+    row_argmax_masked: ?cuda.Function = null,
+    pick_masked: ?cuda.Function = null,
     row_lse: cuda.Function,
     pick_fn: cuda.Function,
     set_i32: cuda.Function,
@@ -187,6 +192,40 @@ pub const Glue = struct {
         a.add(@as(c_int, @intCast(v)));
         a.add(@as(c_int, @intCast(off)));
         try cuda.launch.launch(g.row_argmax, .{ .grid = .{ .x = n, .y = 1, .z = 1 }, .block = .{ .x = 1024, .y = 1, .z = 1 } }, s, &a);
+    }
+
+    // Fiore-lab: fixed device addresses, captured along with the head and pick.
+    // Fiore-lab: head と pick とともに capture する固定の device 番地。
+    pub fn maskRows(g: *const Glue, s: cuda.Stream, logits: u64, mask: Mask, n: u32, v: u32, off: u32) !void {
+        var a: cuda.Args = .{};
+        a.add(logits);
+        a.add(mask.rows);
+        a.add(mask.on);
+        a.add(mask.flags);
+        a.add(@as(c_int, @intCast(v)));
+        a.add(@as(c_int, @intCast(off)));
+        a.add(@as(c_int, @intCast(mask.words)));
+        try cuda.launch.launch(g.mask_rows.?, .{ .grid = .{ .x = n, .y = 1, .z = 1 }, .block = .{ .x = 1024, .y = 1, .z = 1 } }, s, &a);
+    }
+
+    pub fn rowArgmaxMasked(g: *const Glue, s: cuda.Stream, logits: u64, amax: u64, n: u32, v: u32, off: u32, flags: u64) !void {
+        var a: cuda.Args = .{};
+        a.add(logits);
+        a.add(amax);
+        a.add(@as(c_int, @intCast(v)));
+        a.add(@as(c_int, @intCast(off)));
+        a.add(flags);
+        try cuda.launch.launch(g.row_argmax_masked.?, .{ .grid = .{ .x = n, .y = 1, .z = 1 }, .block = .{ .x = 1024, .y = 1, .z = 1 } }, s, &a);
+    }
+
+    pub fn pickMasked(g: *const Glue, s: cuda.Stream, all: u64, world: u32, n: u32, ids: u64, tok: u64) !void {
+        var a: cuda.Args = .{};
+        a.add(all);
+        a.add(@as(c_int, @intCast(world)));
+        a.add(@as(c_int, @intCast(n)));
+        a.add(ids);
+        a.add(tok);
+        try cuda.launch.launch(g.pick_masked.?, .{ .grid = .{ .x = 1, .y = 1, .z = 1 }, .block = .{ .x = 32, .y = 1, .z = 1 } }, s, &a);
     }
 
     /// TF_GLM53_MTP_CONF: each of n rows' softmax mass over this rank's V logits, beside the row's argmax rowArgmax
@@ -823,7 +862,14 @@ pub const MultiComm = enum { per, one, one_absorb, par };
 
 /// A rank's tensor-parallel context and the kernels the forward launches.
 /// ランクの tensor-parallel の文脈と、forward が起動するカーネル。
+// Fiore-lab: full vocabulary rows, row switches and rank-local anomaly flags; the pick ORs every rank's flags, so
+// the verdict is the whole row's (a share with no allowed token is fine).
+// Fiore-lab: 全語彙の行、行の switch、rank 内の異常の bit。pick が全 rank の bit を OR するので、判定は行全体のもの
+// (許された token のない取り分があってもよい)。
+pub const Mask = struct { rows: u64, on: u64, flags: u64, words: u32 };
+
 pub const Ctx = struct {
+    mask: ?Mask = null,
     cfg: Config,
     heads: u32,
     world: u32,
@@ -1594,6 +1640,29 @@ pub const Ctx = struct {
         try c.ops.router(b.fnormed.ptr, D, lm_head, b.rpart.ptr, b.lpart.ptr, n, D, vocab_share);
     }
 
+    // Fiore-lab: mask before argmax, with the anomaly bits beside the pick (never slot 2).
+    // Fiore-lab: argmax の前に mask。異常の bit は pick の横 (slot 2 は使わない)。
+    fn maskArgmax(c: *const Ctx, n: u32, v: u32) !void {
+        if (c.mask) |mask| {
+            try c.glue.maskRows(c.stream, c.b.lpart.ptr, mask, n, v, c.rank * v);
+            try c.glue.rowArgmaxMasked(c.stream, c.b.lpart.ptr, c.b.amax.ptr, n, v, c.rank * v, mask.flags);
+        } else try c.glue.rowArgmax(c.stream, c.b.lpart.ptr, c.b.amax.ptr, n, v, c.rank * v);
+    }
+
+    // Fiore-lab: prefill/eager use the same TP-wide verdict as the graph, including sampled requests.
+    // Fiore-lab: prefill/eager も graph と同じ TP 全体の判定。sampled 要求も含む。
+    pub fn maskedPick(c: *const Ctx, v: u32) !u32 {
+        std.debug.assert(c.mask != null);
+        try c.maskArgmax(1, v);
+        const b = c.b;
+        try c.group.lib.check(c.group.lib.api.ncclAllGather(b.amax.ptr, b.amax_all.ptr, 4, .f32, c.group.comm, c.stream.handle), "ncclAllGather(grammar pick)");
+        try c.glue.pickMasked(c.stream, b.amax_all.ptr, c.world, 1, b.ids.ptr, b.tok_out.ptr);
+        var got: [1]i32 = undefined;
+        try b.tok_out.downloadAsync(0, std.mem.sliceAsBytes(&got), c.stream.handle);
+        try c.stream.synchronize();
+        return @bitCast(got[0]);
+    }
+
     /// The head's argmax for one row: this rank's first maximum over its share, the 16-byte rows all-gathered, the
     /// lowest rank among equal maxima (the full argmax's own choice) -> the token.
     /// 1 行に対する head の argmax: このランクの取り分で最初の最大値、16 バイトの行を all-gather し、最大値が同じなら
@@ -1648,11 +1717,11 @@ pub const Ctx = struct {
             try cl.layerDecode(L, R, kc[i].ptr, if (ic[i]) |x| x.ptr else null, pos, t);
         }
         try c.headLogits(norm, lm_head, 0, R, vocab_share);
-        try c.glue.rowArgmax(c.stream, b.lpart.ptr, b.amax.ptr, R, vocab_share, c.rank * vocab_share);
+        try c.maskArgmax(R, vocab_share);
         if (c.fast) |f| {
             try f.allGather(c.stream, b.amax.ptr, b.amax_all.ptr, 16 * R);
         } else try c.group.lib.check(c.group.lib.api.ncclAllGather(b.amax.ptr, b.amax_all.ptr, 4 * @as(usize, R), .f32, c.group.comm, c.stream.handle), "ncclAllGather");
-        try c.glue.pick(c.stream, b.amax_all.ptr, c.world, R, b.ids.ptr, b.tok_out.ptr);
+        if (c.mask != null) try c.glue.pickMasked(c.stream, b.amax_all.ptr, c.world, R, b.ids.ptr, b.tok_out.ptr) else try c.glue.pick(c.stream, b.amax_all.ptr, c.world, R, b.ids.ptr, b.tok_out.ptr);
     }
 
     /// One verify window over several conversations (CUDA-graph capturable): conversation j's `rows` rows follow
@@ -1686,11 +1755,11 @@ pub const Ctx = struct {
         try c.embed(embed_table, R);
         for (layers, 0..) |*L, i| try c.layerMulti(L, i, seqs, R, comm);
         try c.headLogits(norm, lm_head, 0, R, vocab_share);
-        try c.glue.rowArgmax(c.stream, b.lpart.ptr, b.amax.ptr, R, vocab_share, c.rank * vocab_share);
+        try c.maskArgmax(R, vocab_share);
         if (c.fast) |f| {
             try f.allGather(c.stream, b.amax.ptr, b.amax_all.ptr, 16 * R);
         } else try c.group.lib.check(c.group.lib.api.ncclAllGather(b.amax.ptr, b.amax_all.ptr, 4 * @as(usize, R), .f32, c.group.comm, c.stream.handle), "ncclAllGather");
-        try c.glue.pick(c.stream, b.amax_all.ptr, c.world, R, b.ids.ptr, b.tok_out.ptr);
+        if (c.mask != null) try c.glue.pickMasked(c.stream, b.amax_all.ptr, c.world, R, b.ids.ptr, b.tok_out.ptr) else try c.glue.pick(c.stream, b.amax_all.ptr, c.world, R, b.ids.ptr, b.tok_out.ptr);
     }
 
     /// One layer over several conversations' rows (`seqs`, R rows in all) as a layer of windowMulti's `par` window, its

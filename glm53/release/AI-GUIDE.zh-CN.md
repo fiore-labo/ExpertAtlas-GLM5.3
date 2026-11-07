@@ -1,6 +1,6 @@
 [English](AI-GUIDE.md) | [日本語](AI-GUIDE.ja.md) | 简体中文
 
-# 面向 AI 助手的指南：在 DGX Spark 上运行完整版 GLM-5.3（发布版本 r3.3.2-102）
+# 面向 AI 助手的指南：在 DGX Spark 上运行完整版 GLM-5.3（发布版本 r3.3.3-102）
 
 本页在一处说明整个系统：它是什么、各部分做什么、如何使用、能做什么、不能做什么。本页是为帮助他人理解、安装、运行本发布版本或排查其故障的 AI 助手而写的，人来读也是同样的内容。其中的数字来自其他页面，那些页面有完整的细节，本页简略之处在那里有更多说明：`QUICKSTART.zh-CN.md`（首次启动）、`BEFORE-START.zh-CN.md`（启动前要决定的事项）、`RUNTIME.zh-CN.md`（运行，两种节点数）、`CONFIG.zh-CN.md`（所有设置）、`T4.zh-CN.md`（四个节点）、`RING.zh-CN.md`（连成环的四个节点）、`PANEL-GUIDE.zh-CN.md`（控制面板的各个界面）、`AGENT-API.zh-CN.md`（不用仪表板的控制 API）和 `ATLAS-TESTS.zh-CN.md`（专家重排的测量）。在源代码仓库中，`RUNTIME.md` 是 `packaging/RUNTIME.md`，其他页面在 `glm53/release/` 中。每个页面也有日语版（`.ja.md`）和简体中文版（`.zh-CN.md`）。
 
@@ -26,6 +26,7 @@
 |---|---|
 | `bin/tensorfold-native` | 服务器：GLM-5.3 引擎和 HTTP API，内置面向 GB10（sm_121）的 CUDA 内核 |
 | `lib/libroce_proxy.so` | 解码集合通信使用的 RDMA 代理（需要 `libibverbs.so.1`） |
+| `lib/libllguidance.so` | 结构化输出的语法（llguidance 1.9.1，MIT），由 rank 0 加载 |
 | `tf-glm53` | 部署、检查、启动、停止和监视各 rank 的脚本；在第一个节点上运行 |
 | `claude-glm53` | 启动 Claude Code 并连接服务器的 Messages API（RUNTIME.zh-CN.md 的“Claude Code”一节） |
 | `glm53.conf.example` / `glm53.t4.conf.example` | 八节点 / 四节点的设置；把其中一个复制为 `glm53.conf` |
@@ -128,6 +129,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 | `THINKING_NOTICE` | 每隔这么多思考 token，用一行告诉模型已用的量；0 为关闭 | 0 |
 | `TF_GLM53_BYTE_RESUME` | Byte Resume：`on`、`log`、`off` | `on` |
 | `ROCE_PROXY_CORES` | RoCE 代理线程轮询所在的核：`a725`、`os` | `a725` |
+| `STRUCTURED` | 结构化输出（把回复限定为 JSON 或 JSON Schema）：`1` 开启，`0` 关闭 | `1` |
 | `EXTRA_ENV` | 引擎变量（不包括 `TF_GLM53_MULTI`：那是 `MULTI`） | 空 |
 | `LAUNCHER_HOST`、`LAUNCHER_PORT`、`ATLAS_DIR`、`RESERVE_GB` | 控制面板：地址、端口、已保存的分配、为操作系统保留的内存 | 四节点示例：`0.0.0.0`、8010、`atlas/`、4 |
 
@@ -162,7 +164,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 
 | 路径 | 方法 | 说明 |
 |---|---|---|
-| `/v1/chat/completions` | POST | OpenAI 聊天：流式（`stream`、`stream_options.include_usage`），工具（`tools`、`tool_choice` `auto` 或 `none`） |
+| `/v1/chat/completions` | POST | OpenAI 聊天：流式（`stream`、`stream_options.include_usage`），工具（`tools`、`tool_choice` `auto` 或 `none`），结构化输出（`response_format`） |
 | `/v1/messages`、`/v1/messages/count_tokens` | POST | Anthropic 的 Messages API，供 Claude Code 使用（`RUNTIME.zh-CN.md` 的“Claude Code”） |
 | `/v1/responses` | POST | OpenAI 的 Responses API |
 | `/v1/completions` | POST | 对 prompt 的纯文本补全（不添加聊天模板） |
@@ -178,7 +180,8 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 `/v1/experts/...`、`/v1/memory`、`/v1/thinking`、`/v1/schedule` 和 `/v1/pool` 只在第一个节点上响应（从其他地方访问返回 403）。启动器的端口把它们提供给网络。
 
 - 回复的 `message.reasoning_content` 保存模型的思考，`message.content` 保存回答；`max_tokens` 把两者都计算在内。`chat_template_kwargs` 接受 `{"enable_thinking": false}`（无思考）和 `reasoning_effort`。请求自身的 `thinking_budget`、`thinking_fold`、`thinking_fold_at_budget`、`thinking_fold_margin` 和 `thinking_fold_at_close`（单位为 token）优先于设置。`reasoning_details` 携带上下文中保留的思考，供下一轮使用。
-- 以 400 拒绝：`n` 不为 1、`logprobs`、`response_format` `json_object` 和 `json_schema`、`guided_*`、`tool_choice` `required` 或指定工具、聊天 API 上的图片（在 `/v1/messages` 上图片变为一条说明；仅文本），以及在既无中途整理也无预算将尽时的整理时，超过上下文剩余量的 `max_tokens`（`CONFIG.zh-CN.md` 的 `MAX_TOKENS` 给出中途整理时的规则）。放不下的流式请求以错误事件结束。
+- 以 400 拒绝：`n` 不为 1、`logprobs`、`guided_regex`、`guided_choice` 和 `guided_grammar`、`tool_choice` `required` 或指定工具、聊天 API 上的图片（在 `/v1/messages` 上图片变为一条说明；仅文本），以及在既无中途整理也无预算将尽时的整理时，超过上下文剩余量的 `max_tokens`（`CONFIG.zh-CN.md` 的 `MAX_TOKENS` 给出中途整理时的规则）。放不下的流式请求以错误事件结束。
+- 结构化输出（`FEATURES.zh-CN.md` 的“结构化输出”）：`response_format` 的 `json_object` 或 `json_schema`（也读取 vLLM 的 `guided_json` 和 `structured_outputs`；`/v1/responses` 上为 `text.format`，`/v1/messages` 上为 `output_config.format`）把答案限定为 JSON 对象或该 schema。开启思考时（chat API 的默认）`max_tokens` 至少要 545。以 400 拒绝：与 `tools` 一起、带 `stop` 字符串或 `ignore_eos`、使用 `MULTI`，以及语法只能比所写更宽松地遵守的 schema（列表见 FEATURES）。它在没有 drafter 的情况下 decode；`STRUCTURED=0` 将其关闭。
 - 客户端断开连接会取消其请求。
 - 没有密钥：API 不使用密钥。默认监听所有地址（`HOST=0.0.0.0`），因此任何能访问到它的人都可以使用；服务器使用明文 HTTP，因此除非服务器留在封闭网络中，或在前面放置 TLS 和访问控制，否则文本以明文穿过网络（`HOST=127.0.0.1` 把 API 限制在第一个节点）。
 - 从计数器得到速度：解码 tokens/s = Δ`completion_tokens_total` / Δ`decode_seconds_total`；prefill tokens/s = Δ`prefill_tokens_total` / Δ`prefill_seconds_total`；每轮草稿保留的 token 数 = Δ`completion_tokens_total` / Δ`rounds_total`（1 表示没有保留草稿）；缓存命中 = Δ`cached_tokens_total` / Δ`prompt_tokens_total`。计数器包括正在运行的请求，且永不回退。
@@ -212,13 +215,14 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 - **已缓存的 prompt**：再次发送的对话从池中继续；一个 703,916 个 token 的对话在四个节点上不到 3 s 就给出首个 token。
 - **精度**（相对于以官方实现、FP32 运行的官方 BF16 模型的 KL 散度）：八个节点在 2,048 个 token 的文本上约 0.013（top-1 token 一致率约 96 %）；在 8,192 个 token 的文本上为 0.012 至 0.019；四个节点在相同文本上为 0.019 至 0.032。所有路由专家为同一位宽，位置 6,144 至 8,190：2 bit 0.0517，3 bit 0.0203，4 bit 0.0127，5 bit 0.0114。
 - **工具和流式**：OpenAI 风格的函数调用和带思考增量的流式回复。
+- **结构化输出**：把回复限定为 JSON 对象或 JSON Schema，开启或关闭思考均可。
 
 ## 10. 它不能做什么
 
 - 在四台或八台 GB10 系统以外的环境运行（不支持其他 GPU、其他 rank 数或单节点模式）。两台和三台的配置正在测试中。
 - 默认并行处理请求：一次运行一个，最多 32 个等待（聊天标题请求和 `"priority": "background"` 的请求排在最后），更多的以 503 "the engine is busy; retry shortly" 拒绝。并行运行子代理的代理，把子代理发送到另一个模型效果更好。设置 `MULTI=4` 时最多保持 4 个对话活动并一起解码（MTP 层、DFlash2 或无草稿模型；暂不支持 3 个节点）；它占用节点内存，默认关闭。
 - 在请求运行时更改专家位宽（重排会等待请求结束），或在启动后增大 KV 缓存（它在启动时预留）。
-- 读取图片（聊天 API 拒绝图片，`/v1/messages` 把图片变为一条说明），或接受 `n` > 1、`logprobs`、JSON 模式或强制工具调用（`tool_choice` `required` 或指定工具）。
+- 读取图片（聊天 API 拒绝图片，`/v1/messages` 把图片变为一条说明），或接受 `n` > 1、`logprobs` 或强制工具调用（`tool_choice` `required` 或指定工具）。结构化输出只支持 JSON 对象和 JSON Schema（不支持正则表达式、选项和语法），不能与工具一起使用，也不能在 `MULTI` 下使用。
 - 在提供服务的配置中保证温度 0 时各次运行的回复逐比特相同：某些内核的求和顺序会变化。（精度测量使用为评分而设的确定性配置。）
 - 包含 DFlash2：它另外下载，有自己的许可证（CC BY-NC-ND 4.0，非商业性使用，研究和评估）；某种使用是否在许可范围内，由其运营者判断。
 
@@ -247,6 +251,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 ## 12. 容易出错的地方
 
 - `max_tokens` 也计入思考 token。未指定的请求得到 `CONTEXT_LENGTH` 的 70 %。思考的上限为回答保留其余部分，因此 `max_tokens` 较小时回答较短；`THINKING_SHARE=0` 时，回复可能在思考中结束。
+- 开启思考的结构化请求需要 `max_tokens` 至少为 545（更小则返回 400）：简短的回复请关闭思考（`chat_template_kwargs` 的 `{"enable_thinking": false}`）。被 `max_tokens` 截断的回复中的 JSON 是未完成的（`finish_reason` 为 `length`）。
 - 无论使用哪种草稿模型，引擎的启动行都显示 `drafts: on`；`tf-glm53 status` 给出正在使用的草稿模型。
 - 每次启动都需要 Base 权重（或完整检查点）和 3 bit bank。
 - 重排的测量相对于全 4 bit 模型，而不是 BF16 模型；`ATLAS-TESTS.zh-CN.md` 有具体说明。

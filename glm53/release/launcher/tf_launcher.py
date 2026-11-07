@@ -342,6 +342,7 @@ SETTINGS = {
     "SP_PARTS": ("4", SET_INT(2, 4), "start"),
     "ROCE_PROXY_CORES": ("a725", SET_ENUM("a725", "os"), "start"),
     "ENGINE_CORES": ("os", SET_ENUM("os", "a725"), "start"),
+    "STRUCTURED": ("1", SET_BOOL, "start"),
     "ATLAS_GENERIC": ("1", SET_BOOL, "start"),
     "TF_GLM53_CANON_CLOSE": ("near", SET_ENUM("near", "all", "off"), "start"),
     "TF_GLM53_CANON_NEAR": ("4096", SET_INT(1, 1048576), "start"),

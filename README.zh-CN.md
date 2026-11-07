@@ -33,7 +33,14 @@
 - 所有对话共用一个对话缓存，以 256 个 token为一块：请求会从任意对话中已缓存的最长前缀接着处理；开头相同的对话（智能体的系统提示词、其子智能体）共享的块只保存一份。
 - 每一轮由模型校验草稿：草稿默认来自 GLM-5.3 自带的 MTP 层，也可来自可选的 DFlash2 草稿模型。无论哪种情况，回复都由模型本身决定。
 - 控制思考的长度：上限按 `max_tokens`（单次回复的上限）的比例设定，过长的思考可以在中途或结束时整理；既可以按请求设置，也可以在引擎运行中设置。
+- 结构化输出：把回复的答案限定为 JSON 或 JSON Schema（`response_format`），开启或关闭思考都可以。
 - `/metrics`（Prometheus 文本格式）和 `/health` 也统计正在运行的请求，因此监控程序在请求运行期间也能读取 prefill 与解码速度、缓存命中和草稿接受情况。设置 `METRICS_LISTEN` 后，这两个端点会在单独的地址上以只读方式开放，供其他主机上的监控程序使用。
+
+## r3.3.3-102 的变化
+
+- **结构化输出（默认开启）：** 回复的答案可以限定为 JSON 对象或 JSON Schema：在 `/v1/chat/completions` 上用 `response_format`（也读取 vLLM 的 `guided_json` 和 `structured_outputs`），在 `/v1/responses` 上用 `text.format`，在 `/v1/messages` 上用 `output_config.format`。模型在每个 token 处只从语法允许的 token 中选择，因此答案可以解析并符合 schema（被 `max_tokens` 截断时除外）。开启思考时，模型先自由思考。语法只能比所写更宽松地遵守的 schema 会以 400 拒绝，而不是只遵守一半；与工具一起或使用 `MULTI` 时也返回 400。语法由 llguidance 1.9.1（MIT）提供，包含在归档和镜像中；`STRUCTURED=0` 可将其关闭（[FEATURES](glm53/release/FEATURES.zh-CN.md#13-结构化输出)）。
+- 结构化请求在没有 drafter 的情况下 decode，因此较慢。普通请求与 r3.3.2-102 相同：相同的 token、相同的速度。
+- 从 r3.3.2-102 更新无需任何改动：权重和设置都相同。从源代码构建还需要 Rust 1.95.0（“从源代码构建”）。
 
 ## r3.3.2-102 的变化
 
@@ -141,12 +148,12 @@ python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
 发布以容器镜像和内容相同的归档两种形式提供；推荐使用镜像。权重就位后，在第一个节点上运行一行命令即可启动引擎：
 
 ```sh
-docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.2-102 up
+docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.3-102 up
 ```
 
 最后输出 `READY` 和地址：API 在 `http://FIRST-NODE:8000/v1`，控制面板在 `http://FIRST-NODE:8010/panel`。如果缺少什么，则以 `STOP` 结束，并说明要做什么以及接下来要运行的一行。步骤和所有选项见 [QUICKSTART](glm53/release/QUICKSTART.zh-CN.md)。
 
-手动完成同样的事：使用镜像时，在每个节点上 `docker pull` 它，运行 `mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out`，并在 `glm53.conf` 中设置 `RUNTIME=docker` 和 `IMAGE`（[packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)“在容器中运行”）。不使用 Docker 时：下载发布归档 `tensorfold-r3.3.2-102-linux-aarch64.tar.gz`，并按照其中的 `RUNTIME.md`（本仓库中为 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)）操作。两种方式都要将 `glm53.conf.example`（八个节点）或 `glm53.t4.conf.example`（四个节点，见 [glm53/release/T4.zh-CN.md](glm53/release/T4.zh-CN.md)）复制为 `glm53.conf`，填写其中要求的内容，然后执行 `./tf-glm53 deploy` 和 `./tf-glm53 up`（启动控制面板），再在那里启动引擎。`./tf-glm53 start` 按上一次启动的计划启动，`./tf-glm53 down` 停止。
+手动完成同样的事：使用镜像时，在每个节点上 `docker pull` 它，运行 `mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out`，并在 `glm53.conf` 中设置 `RUNTIME=docker` 和 `IMAGE`（[packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)“在容器中运行”）。不使用 Docker 时：下载发布归档 `tensorfold-r3.3.3-102-linux-aarch64.tar.gz`，并按照其中的 `RUNTIME.md`（本仓库中为 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)）操作。两种方式都要将 `glm53.conf.example`（八个节点）或 `glm53.t4.conf.example`（四个节点，见 [glm53/release/T4.zh-CN.md](glm53/release/T4.zh-CN.md)）复制为 `glm53.conf`，填写其中要求的内容，然后执行 `./tf-glm53 deploy` 和 `./tf-glm53 up`（启动控制面板），再在那里启动引擎。`./tf-glm53 start` 按上一次启动的计划启动，`./tf-glm53 down` 停止。
 
 服务器默认在所有地址（`HOST=0.0.0.0`）上提供 OpenAI chat API，以及供 Claude Code 使用的 Anthropic Messages API。API 和控制面板都没有密钥，任何能访问到它们的人都可以使用：请把节点放在封闭网络中，或在其前面加一层 TLS 和访问控制（设置 `HOST=127.0.0.1` 和 `LAUNCHER_HOST=127.0.0.1` 后只能从第一个节点访问）。
 
@@ -184,21 +191,22 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-la
 
 ## 从源代码构建
 
-在一台 GB10 系统上，需要 `PATH` 中有 Zig 0.17.0（或为 `build_libs.sh` 用 `ZIG=` 指定其路径）、CUDA 13（`nvcc`）以及 libibverbs 头文件（`libibverbs-dev`）：
+在一台 GB10 系统上，需要 `PATH` 中有 Zig 0.17.0（或为 `build_libs.sh` 用 `ZIG=` 指定其路径）、CUDA 13（`nvcc`）、libibverbs 头文件（`libibverbs-dev`）以及通过 rustup 安装的 Rust 1.95.0（`rustup toolchain install 1.95.0`；`build_libs.sh` 使用 `~/.cargo/bin/cargo`，或 `CARGO=` 指定的那个）：
 
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
-sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so
-zig build dist -Dversion=r3.3.2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so, lib/libllguidance.so
+zig build dist -Dversion=r3.3.3-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 
-归档会生成在 `zig-out/dist/` 中。
+归档会生成在 `zig-out/dist/` 中。`build_libs.sh` 从 `third_party/llguidance/` 及其中附带的 crate 离线构建 llguidance。只使用镜像或归档则不需要 Rust。
 
 ## 限制
 
 - 支持四台或八台 GB10 系统。两台和三台的配置正在测试中。不支持其他 GPU，也不支持其他 rank 数量。
 - 默认一次只运行一个请求；其他请求最多 32 个按到达顺序等待（聊天标题生成请求排在最后），超过 32 个时服务器会拒绝（返回 503，流式请求则为错误事件）。`MULTI` 可同时解码最多四个请求，但要占用节点内存。除此之外，对于并行运行子智能体的智能体，最好让子智能体改用另一个模型。
+- 结构化输出只支持 JSON 对象和 JSON Schema（尚不支持正则表达式、选项和语法），不能与工具一起使用，也不能在 `MULTI` 下使用。
 - 控制面板的界面只有英文和日文。
 - 其余限制见 `packaging/RUNTIME.zh-CN.md`。
 

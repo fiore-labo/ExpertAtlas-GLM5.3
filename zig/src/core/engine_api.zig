@@ -52,6 +52,25 @@ pub const Structure = struct {
     text: []const u8 = "",
     /// With thinking on, the grammar starts after this token.
     after: ?u32 = null,
+    /// Fiore-lab: the grammar the engine compiled ahead of submit (VTable.structure, on the HTTP thread), owned by the
+    /// request until submit hands it to the engine (then the engine frees it), else freed by VTable.structure_free;
+    /// null when the engine compiles nothing ahead.
+    compiled: ?*anyopaque = null,
+};
+
+/// Fiore-lab: what the engine builds its grammar vocabulary from, once at the server's start: every id's raw bytes and
+/// whether it is an added token (ids past the tokenizer's: no bytes), and the model's end tokens.
+pub const GrammarVocab = struct {
+    vocab: TokenVocab,
+    size: u32,
+    eos: []const u32,
+};
+
+/// Fiore-lab: a structure compiled (its handle for Structure.compiled), or refused with the reason for a 400 (in the
+/// allocator the call was given).
+pub const Compiled = union(enum) {
+    ok: *anyopaque,
+    refused: []const u8,
 };
 
 /// GLM-5.3: how a long think block is folded (Request.think_fold).
@@ -230,6 +249,9 @@ pub const Event = union(enum) {
     prefilled: u32,
     /// Tokens committed for this request, in order; valid only during the call.
     tokens: []const u32,
+    /// Fiore-lab: a structured reply's think block closed for real: every token after this is the answer (the server
+    /// splits reasoning from answer here, not at the close's text).
+    answer,
     /// The reply ended; nothing follows. ``message`` says why a failed reply failed.
     finished: struct { reason: Reason, stats: Stats = .{}, message: []const u8 = "" },
 };
@@ -518,7 +540,31 @@ pub const Engine = struct {
         /// the open replies end and a replica's other ranks are told before the process may leave (null: the engine
         /// needs nothing before close).
         stop_all: ?*const fn (ctx: *anyopaque) void = null,
+        /// Fiore-lab: the grammar vocabulary, once before any request (null: the engine compiles no structure ahead).
+        /// An error leaves structured output off for the server's life.
+        grammar_init: ?*const fn (ctx: *anyopaque, v: GrammarVocab) error{ Unavailable, OutOfMemory }!void = null,
+        /// Fiore-lab: compiles a request's structure ahead of submit, on the HTTP thread (any number at once).
+        structure: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, s: *const Structure) std.mem.Allocator.Error!Compiled = null,
+        /// Fiore-lab: frees a compiled structure that was not submitted (refused, busy, the client gone).
+        structure_free: ?*const fn (ctx: *anyopaque, handle: *anyopaque) void = null,
     };
+
+    /// Fiore-lab: see VTable.grammar_init; error.Unavailable when the engine has none.
+    pub fn grammarInit(e: Engine, v: GrammarVocab) error{ Unavailable, OutOfMemory }!void {
+        const f = e.vtable.grammar_init orelse return error.Unavailable;
+        return f(e.ctx, v);
+    }
+
+    /// Fiore-lab: see VTable.structure; null when the engine compiles nothing ahead.
+    pub fn compileStructure(e: Engine, a: std.mem.Allocator, s: *const Structure) std.mem.Allocator.Error!?Compiled {
+        const f = e.vtable.structure orelse return null;
+        return try f(e.ctx, a, s);
+    }
+
+    /// Fiore-lab: see VTable.structure_free.
+    pub fn freeStructure(e: Engine, handle: *anyopaque) void {
+        if (e.vtable.structure_free) |f| f(e.ctx, handle);
+    }
 
     pub fn stopAll(e: Engine) void {
         if (e.vtable.stop_all) |f| f(e.ctx);

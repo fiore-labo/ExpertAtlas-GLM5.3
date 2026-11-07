@@ -22,6 +22,7 @@ differ with the nodes, the prompt and the settings: take them as a guide.
 10. [Health check](#10-health-check)
 11. [Engine cores and the RDMA line](#11-engine-cores-and-the-rdma-line)
 12. [Display settings](#12-display-settings)
+13. [Structured output](#13-structured-output)
 
 ## 1. Ring or switch, and the node check
 
@@ -288,3 +289,95 @@ who opens the panel sees the same one.
 - **Back to defaults** (press it twice) drops the display settings for every browser of the lane. The language and the
   nodes stay.
 - A ring or switch lane opens with the light by bit and the Material · indigo colours, unless its settings name others.
+
+## 13. Structured output
+
+**What it does.** A reply's answer is held to JSON: a JSON object, or the JSON that a JSON Schema you send accepts. At
+each token the engine lets the model choose only among the tokens that keep the answer in that form, so the answer
+parses and follows the schema, unless `max_tokens` cuts it first. The grammar is llguidance 1.9.1's, on the first node.
+It is on by default (`STRUCTURED`).
+
+**Why.** A program that reads the reply, such as an extraction, a form or an agent's step, gets JSON it can parse, with
+the keys and the types it expects, without asking the model again.
+
+**How.** Ask for it in the request:
+
+- `/v1/chat/completions` (OpenAI's chat): `"response_format": {"type": "json_object"}` for a JSON object, or
+  `{"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}}` for JSON the schema accepts. vLLM's
+  fields are read too: `"guided_json": SCHEMA`, and `"structured_outputs"` with `{"json": SCHEMA}` or
+  `{"json_object": true}`. `{"type": "text"}` asks for no constraint.
+- `/v1/responses` (OpenAI's Responses API): `"text": {"format": {"type": "json_schema", "name": "...", "schema": {...}}}`,
+  or `{"type": "json_object"}`.
+- `/v1/messages` (Anthropic's Messages API): `"output_config": {"format": {"type": "json_schema", "schema": {...}}}`.
+
+On the chat API, with the thinking off:
+
+```sh
+curl -s http://NODE:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "glm-5.3", "max_tokens": 300,
+  "chat_template_kwargs": {"enable_thinking": false},
+  "messages": [{"role": "user", "content": "A city in Japan and its prefecture."}],
+  "response_format": {"type": "json_schema", "json_schema": {"name": "city", "schema": {
+    "type": "object",
+    "properties": {"city": {"type": "string"}, "prefecture": {"type": "string"}},
+    "required": ["city", "prefecture"]}}}}'
+```
+
+With Python's `openai` package, and the thinking on:
+
+```python
+import json
+from openai import OpenAI
+
+client = OpenAI(base_url="http://NODE:8000/v1", api_key="none")
+r = client.chat.completions.create(
+    model="glm-5.3", max_tokens=4000,
+    messages=[{"role": "user", "content": "Three prime numbers above 100."}],
+    response_format={"type": "json_schema", "json_schema": {"name": "primes", "schema": {
+        "type": "object",
+        "properties": {"primes": {"type": "array", "items": {"type": "integer"},
+                                  "minItems": 3, "maxItems": 3}},
+        "required": ["primes"]}}})
+choice = r.choices[0]
+if choice.finish_reason == "length":
+    raise SystemExit("cut by max_tokens: the JSON is not finished")
+print(json.loads(choice.message.content)["primes"])
+```
+
+- **With thinking.** GLM-5.3 thinks by default on the chat API and the Responses API, and on the Messages API when
+  `thinking` asks for it. The thinking is free and the constraint starts where it closes: the thinking comes in
+  `reasoning_content` (a `thinking` block on the Messages API) and the JSON in the answer. The engine closes the
+  thinking early enough to leave the answer at least 256 tokens, so with the thinking on, `max_tokens`
+  (`max_output_tokens` on the Responses API) must be at least 545; a smaller one is refused (400). For a short reply,
+  turn the thinking off: `"chat_template_kwargs": {"enable_thinking": false}`, as in the curl line.
+- **Refused with 400**, before any header of the reply (a stream too), each with a message that says why:
+  - with `tools` (a list that is not empty), or `tool_choice` `required` or a named function: not yet;
+  - with `stop` strings (they could cut the JSON) or `ignore_eos`;
+  - on an engine started with `MULTI`: not yet;
+  - `regex`, `choice` and `grammar` (`guided_regex`, `guided_choice`, `guided_grammar`, and the same under
+    `structured_outputs`): not yet; use `json_object` or `json_schema`;
+  - a schema the grammar would follow less strictly than it says. The server checks the schema first and refuses it,
+    rather than return JSON that does not follow it: a `$schema` other than JSON Schema 2020-12; `items` as an array, or
+    `additionalItems` (draft 4's tuples: write `prefixItems`); a `$ref` other than `#`, `#/$defs/NAME` or
+    `#/definitions/NAME`; `nullable` (OpenAPI's: write `"type": ["integer", "null"]`); an integer bound or constant
+    past ±2^53; a `multipleOf` that is neither an integer from 1 to 65,536 nor a decimal of at most 8 places that reads
+    at most 65,536 without its point (0.25, 0.01), or two `multipleOf` for one value; `minProperties` or `maxProperties`
+    on an object open to other keys; `x-guidance` (the server sets it); a schema over 64 KiB or nested deeper than 32
+    levels; a lone surrogate, NaN or Infinity.
+- **Good to know.**
+  - An object with `properties` and no `additionalProperties` takes only the keys it declares (`allOf`'s branches
+    aside). Write `"additionalProperties": true` to allow others.
+  - A reply cut by `max_tokens` ends with `finish_reason` `length`, and its answer is JSON not yet finished: check
+    `finish_reason` before parsing.
+  - The JSON has no `\u` escapes: other characters are written as themselves, so a key has one spelling, and a control
+    character without a short escape (`\n`, `\r`, `\t`, `\b`, `\f`) cannot be written. Between two tokens it has at
+    most one line break and up to 64 spaces or tabs.
+  - A structured request decodes without the drafter (MTP or DFlash2), so it decodes more slowly than a plain request
+    of the same length. Plain requests are as before: the same tokens and the same speed as on r3.3.2-102.
+  - To turn it off: **Structured output** in the engine settings (Server), `-e STRUCTURED=0` on the `docker run` line or
+    `STRUCTURED=0` in `glm53.conf`, from the next start; such requests then get 400 (`CONFIG.md`). If the first node cannot load
+    `lib/libllguidance.so`, the engine starts without it (rank 0's log: `structured output unavailable`) and they get
+    the same 400.
+  - Checked on the switch's eight nodes: JSON objects and schemas, with the thinking, streamed, cut by `max_tokens`, a
+    stream the client dropped, on the three APIs, and every refusal, with every rank running after it. Plain requests
+    gave the same tokens as on r3.3.2-102 for 20 prompts.

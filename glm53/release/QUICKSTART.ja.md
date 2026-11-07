@@ -114,7 +114,7 @@ done
 docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 ```
 
-`IMAGE` はリリースのイメージ `ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.2-102` です。リリースを `~/expertatlas` に書き、ノード (リングかスイッチか) を見つけて確認し、ウェイトを探し、エンジンを起動して、1 回推論します。初回は数分かかります。
+`IMAGE` はリリースのイメージ `ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.3-102` です。リリースを `~/expertatlas` に書き、ノード (リングかスイッチか) を見つけて確認し、ウェイトを探し、エンジンを起動して、1 回推論します。初回は数分かかります。
 
 最後は次のどちらかになります。
 
@@ -176,7 +176,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
 | `MULTI`、`MULTI_WAIT` | `0`、`600` | 同時に推論する会話の数 (0〜4) と、要求がそれを待つ秒数 |
 | `RESERVE_GB` | `4` | 各ノードがシステムのために残すメモリ |
 
-エンジン設定の他の項目も、同じように指定できます。たとえば `MAX_TOKENS`、`THINKING_SHARE`、`THINKING_FOLD_PROMPT`、`NAME`、`HOST` です。各項目の意味と、オプションにできない項目は `CONFIG.ja.md` にあります。そこの既定は `tf-glm53` のものなので、この行ではここの表の値が優先です。
+エンジン設定の他の項目も、同じように指定できます。たとえば `MAX_TOKENS`、`THINKING_SHARE`、`THINKING_FOLD_PROMPT`、`NAME`、`HOST`、`STRUCTURED` (`0` で構造化出力をオフ) です。各項目の意味と、オプションにできない項目は `CONFIG.ja.md` にあります。そこの既定は `tf-glm53` のものなので、この行ではここの表の値が優先です。
 
 インストール:
 
@@ -204,6 +204,8 @@ curl -s http://NODE:8000/v1/chat/completions -H 'Content-Type: application/json'
 ```
 
 応答の思考は `reasoning_content`、答えは `content` に入ります (ストリームでは `delta.reasoning_content` と `delta.content`)。
+
+JSON で答えさせるなら `"response_format": {"type": "json_object"}` を、スキーマを決めるなら `json_schema` を足します。答えはその形に保たれます。思考あり (既定) では `max_tokens` が 545 以上要ります。短い返事なら `"chat_template_kwargs": {"enable_thinking": false}` も足してください。詳しくは `FEATURES.ja.md` の「構造化出力」にあります。
 
 ダッシュボード `http://NODE:8010/panel` では、エンジンの状態を見て、起動と停止ができます。AI エージェントは同じことを操作 API でできます。手順は `AGENT-API.ja.md`、システム全体の説明は `AI-GUIDE.ja.md` にあります。
 

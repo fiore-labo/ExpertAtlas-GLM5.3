@@ -13,7 +13,9 @@ Copyright 2026 Fiore-lab
 Fiore-lab added the engine of full GLM-5.3 for DGX Spark (zig/src/families/glm_moe_dsa/,
 zig/kernels/cuda/glm53/, zig/native/, zig/src/native/glm53_host.zig, zig/src/cuda/cublas.zig,
 zig/src/cuda/tp.zig, zig/src/server/panel.html, zig/tests/cuda/glm53_*.zig, zig/tests/cuda/roce_main.zig,
-zig/tests/cuda/tp_main.zig, zig/src/server/glm_rescue.zig, glm53/) and
+zig/tests/cuda/tp_main.zig, zig/src/server/glm_rescue.zig, zig/src/server/schema_check.zig,
+zig/src/server/schema_check_test.zig, zig/src/server/structured_test.zig, glm53/), vendored llguidance
+(third_party/llguidance/, its own license; THIRD_PARTY_NOTICES.md) and
 changed these TensorFold files, each of which says so in its first lines:
 
   build.zig
@@ -22,6 +24,7 @@ changed these TensorFold files, each of which says so in its first lines:
   zig/build/cuda.zig
   zig/src/core/direct_io.zig
   zig/src/core/engine_api.zig
+  zig/src/core/lane_host_reuse_test.zig
   zig/src/core/template/access.zig
   zig/src/core/template/eval.zig
   zig/src/core/template/methods.zig

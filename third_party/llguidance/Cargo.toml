@@ -1,0 +1,17 @@
+# Replaces llguidance v1.9.1's workspace manifest (tag v1.9.1, f0971424): only the members parser (the C library
+# libllguidance) and toktrie. rust-version and the toktrie path are upstream's; [profile.release] is ours.
+# Build offline from vendor/ (.cargo/config.toml); see the build in glm53/tools/release/build_libs.sh.
+[workspace]
+members = ["parser", "toktrie"]
+resolver = "2"
+
+[workspace.package]
+rust-version = "1.87"
+
+[profile.release]
+debug = 0
+strip = "debuginfo"
+panic = "unwind"
+
+[workspace.dependencies]
+toktrie = { path = "toktrie" }
