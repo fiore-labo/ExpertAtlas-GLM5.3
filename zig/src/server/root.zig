@@ -21,6 +21,7 @@ test {
     _ = @import("json.zig");
     _ = @import("fields.zig");
     _ = @import("reply_text.zig");
+    _ = @import("glm_rescue.zig");
     _ = @import("tool_parse.zig");
     _ = @import("tool_stream.zig");
     _ = @import("tool_params.zig");

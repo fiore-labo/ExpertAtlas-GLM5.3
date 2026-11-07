@@ -1,6 +1,8 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! Tool calls while they are written: XML calls as argument deltas, and the one-call policy's text filter.
 const std = @import("std");
 const json = @import("json.zig");
+const glm_rescue = @import("glm_rescue.zig");
 const ids = @import("ids.zig");
 const reply_text = @import("reply_text.zig");
 const tool_params = @import("tool_params.zig");
@@ -203,68 +205,92 @@ fn nameLike(s: []const u8) bool {
     return true;
 }
 
-/// Hides tool envelopes from streamed prose, holding only a partial tag between deltas.
+/// Hides tool envelopes from streamed prose, holding only a partial tag between deltas. It keeps the reply it was fed,
+/// so a GLM call whose value holds ``</tool_call>`` reads on to its real end (``glm_rescue``).
 pub const TextFilter = struct {
-    pending: std.ArrayList(u8) = .empty,
+    text: std.ArrayList(u8) = .empty,
+    /// the first byte neither shown nor hidden yet
+    at: usize = 0,
     hidden: ?[]const u8 = null,
+    close: []const u8 = "",
+    /// the hidden envelope's first byte after its opener, where its closer's search resumes, and the closer found
+    /// while a GLM call read again waits for more
+    body: usize = 0,
+    search: usize = 0,
+    closer: ?usize = null,
+    waiting: ?glm_rescue.Candidate = null,
+    matches: glm_rescue.Matches = .{},
 
     pub fn feed(f: *TextFilter, a: Allocator, text: []const u8) Allocator.Error![]const u8 {
-        try f.pending.appendSlice(a, text);
+        try f.text.appendSlice(a, text);
+        return f.run(a, false);
+    }
+
+    /// The rest once the reply ends: a held partial tag as text, every call still waiting read as finished.
+    pub fn finish(f: *TextFilter, a: Allocator) Allocator.Error![]const u8 {
+        return f.run(a, true);
+    }
+
+    fn run(f: *TextFilter, a: Allocator, finished: bool) Allocator.Error![]const u8 {
         var out: std.ArrayList(u8) = .empty;
-        while (f.pending.items.len > 0) {
-            const p = f.pending.items;
+        const p = f.text.items;
+        while (true) {
             if (f.hidden) |name| {
-                const close = try std.mem.concat(a, u8, &.{ "</", name, ">" });
-                const end = std.ascii.findIgnoreCase(p, close) orelse {
-                    const keep = reply_text.charCount(close) - 1;
-                    const chars = reply_text.charCount(p);
-                    const tail = if (chars > keep) reply_text.afterChars(p, chars - keep) else p;
-                    try f.reset(a, tail);
+                const close = f.close;
+                const end = f.closer orelse std.ascii.findIgnoreCasePos(p, f.search, close) orelse {
+                    // an unclosed envelope stays hidden; the search resumes where its closer could still start
+                    f.search = @max(f.search, p.len -| (close.len - 1));
                     break;
                 };
-                try f.reset(a, p[end + close.len ..]);
+                var next = end + close.len;
+                if (f.closer == null and std.mem.eql(u8, name, "tool_call")) f.waiting = glm_rescue.candidate(p, f.body, end);
+                if (f.waiting) |*c| switch (try glm_rescue.reread(a, p, c, finished, &f.matches, null)) {
+                    .legacy => {},
+                    .end => |e| next = e,
+                    .need_more => {
+                        f.closer = end;
+                        break;
+                    },
+                };
                 f.hidden = null;
+                f.closer = null;
+                f.waiting = null;
+                f.at = next;
                 continue;
             }
-            const start = std.mem.indexOfScalar(u8, p, '<') orelse {
-                try out.appendSlice(a, p);
-                f.pending.clearRetainingCapacity();
+            if (f.at >= p.len) break;
+            const start = std.mem.indexOfScalarPos(u8, p, f.at, '<') orelse {
+                try out.appendSlice(a, p[f.at..]);
+                f.at = p.len;
                 break;
             };
-            try out.appendSlice(a, p[0..start]);
+            try out.appendSlice(a, p[f.at..start]);
             const rest = p[start..];
             const end = std.mem.indexOfScalar(u8, rest, '>') orelse {
                 const name = rest[1..];
                 const colon = std.mem.indexOfScalar(u8, name, ':');
                 const possible = name.len == 0 or nameLike(name) or (colon != null and nameLike(name[0..colon.?]) and
                     std.ascii.startsWithIgnoreCase("tool_call", name[colon.? + 1 ..]));
-                if (possible) {
-                    try f.reset(a, rest);
+                if (possible and !finished) {
+                    f.at = start;
                     break;
                 }
-                try out.append(a, '<');
-                try f.reset(a, rest[1..]);
+                // what the reply ended on is text; anything else is text up to its ``<``
+                try out.appendSlice(a, if (finished and possible) rest else "<");
+                f.at = if (finished and possible) p.len else start + 1;
                 continue;
             };
             const name = rest[1..end];
             if (callTag(name)) {
                 f.hidden = try std.ascii.allocLowerString(a, name);
+                f.close = try std.mem.concat(a, u8, &.{ "</", f.hidden.?, ">" });
+                f.body = start + end + 1;
+                f.search = f.body;
+                f.closer = null;
             } else try out.appendSlice(a, rest[0 .. end + 1]);
-            try f.reset(a, rest[end + 1 ..]);
+            f.at = start + end + 1;
         }
         return out.items;
-    }
-
-    fn reset(f: *TextFilter, a: Allocator, rest: []const u8) Allocator.Error!void {
-        const copy = try a.dupe(u8, rest);
-        f.pending.clearRetainingCapacity();
-        try f.pending.appendSlice(a, copy);
-    }
-
-    pub fn finish(f: *TextFilter) []const u8 {
-        const tail = if (f.hidden != null) "" else f.pending.items;
-        f.pending = .empty;
-        return tail;
     }
 };
 
@@ -289,15 +315,15 @@ pub const Policy = struct {
         return if (p.single) p.filter.feed(a, s) else s;
     }
 
-    pub fn flush(p: *Policy) []const u8 {
-        return if (p.single) p.filter.finish() else "";
+    pub fn flush(p: *Policy, a: Allocator) Allocator.Error![]const u8 {
+        return if (p.single) p.filter.finish(a) else "";
     }
 
     pub fn content(p: *const Policy, a: Allocator, s: []const u8) Allocator.Error![]const u8 {
         if (!p.single) return s;
         var f: TextFilter = .{};
         const head = try f.feed(a, s);
-        return std.mem.concat(a, u8, &.{ head, f.finish() });
+        return std.mem.concat(a, u8, &.{ head, try f.finish(a) });
     }
 
     /// ``parsed_content``: a parsed reply's content, whole envelopes the parser left as text kept and the rest filtered, so an unclosed envelope stays hidden.
@@ -305,7 +331,8 @@ pub const Policy = struct {
         if (!p.single) return s;
         var out: std.ArrayList(u8) = .empty;
         var cursor: usize = 0;
-        while (try wholeEnvelope(a, s, cursor)) |e| : (cursor = e.end) {
+        var matches: glm_rescue.Matches = .{};
+        while (try wholeEnvelope(a, s, cursor, &matches)) |e| : (cursor = e.end) {
             try out.appendSlice(a, try p.content(a, s[cursor..e.start]));
             try out.appendSlice(a, s[e.start..e.end]);
         }
@@ -323,14 +350,18 @@ pub const Policy = struct {
     }
 };
 
-/// The first whole envelope from ``from`` (``<((?:NAME:)?tool_call)>.*?</\1>``, any case).
-fn wholeEnvelope(a: Allocator, s: []const u8, from: usize) Allocator.Error!?struct { start: usize, end: usize } {
+/// The first whole envelope from ``from`` (``<((?:NAME:)?tool_call)>.*?</\1>``, any case; a GLM call to its real end).
+fn wholeEnvelope(a: Allocator, s: []const u8, from: usize, matches: *glm_rescue.Matches) Allocator.Error!?struct { start: usize, end: usize } {
     var at = from;
     while (std.mem.indexOfScalarPos(u8, s, at, '<')) |start| : (at = start + 1) {
         const close = std.mem.indexOfScalarPos(u8, s, start, '>') orelse return null;
         if (!callTag(s[start + 1 .. close])) continue;
         const closer = try std.mem.concat(a, u8, &.{ "</", s[start + 1 .. close], ">" });
         const end = std.ascii.findIgnoreCasePos(s, close + 1, closer) orelse continue;
+        if (std.ascii.eqlIgnoreCase(s[start + 1 .. close], "tool_call")) switch (try glm_rescue.rescue(a, s, close + 1, end, true, matches, null)) {
+            .end => |e| return .{ .start = start, .end = e },
+            else => {},
+        };
         return .{ .start = start, .end = end + closer.len };
     }
     return null;

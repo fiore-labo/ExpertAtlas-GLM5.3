@@ -13,7 +13,7 @@ Copyright 2026 Fiore-lab
 Fiore-lab added the engine of full GLM-5.3 for DGX Spark (zig/src/families/glm_moe_dsa/,
 zig/kernels/cuda/glm53/, zig/native/, zig/src/native/glm53_host.zig, zig/src/cuda/cublas.zig,
 zig/src/cuda/tp.zig, zig/src/server/panel.html, zig/tests/cuda/glm53_*.zig, zig/tests/cuda/roce_main.zig,
-zig/tests/cuda/tp_main.zig, glm53/) and
+zig/tests/cuda/tp_main.zig, zig/src/server/glm_rescue.zig, glm53/) and
 changed these TensorFold files, each of which says so in its first lines:
 
   build.zig
@@ -22,6 +22,11 @@ changed these TensorFold files, each of which says so in its first lines:
   zig/build/cuda.zig
   zig/src/core/direct_io.zig
   zig/src/core/engine_api.zig
+  zig/src/core/template/access.zig
+  zig/src/core/template/eval.zig
+  zig/src/core/template/methods.zig
+  zig/src/core/template/tests.zig
+  zig/src/core/template/value.zig
   zig/src/core/tokenizer/steps.zig
   zig/src/core/tokenizer/tokenizer.zig
   zig/src/cuda/abi.zig
@@ -43,6 +48,7 @@ changed these TensorFold files, each of which says so in its first lines:
   zig/src/server/metrics.zig
   zig/src/server/model_text.zig
   zig/src/server/openai.zig
+  zig/src/server/reply_text.zig
   zig/src/server/responses.zig
   zig/src/server/root.zig
   zig/src/server/routes.zig
@@ -53,10 +59,12 @@ changed these TensorFold files, each of which says so in its first lines:
   zig/src/server/stream_preflight_test.zig
   zig/src/server/tool_parse.zig
   zig/src/server/tool_parse_test.zig
+  zig/src/server/tool_stream.zig
 
 direct_io.zig, tool_parse.zig and tool_parse_test.zig are TensorFold's own later versions (commits e561a257 and
 c126fe16: a test's reference read, and GLM tool calls read when the model drops an <arg_key> or the end token leaves
-a value open), taken in unchanged apart from their first line.
+a value open), taken in unchanged apart from their first line; Fiore-lab then changed tool_parse.zig and
+tool_parse_test.zig so that a GLM value holding </arg_value> or </tool_call> reads whole (glm_rescue.zig).
 
 Fiore-lab's published tree leaves out TensorFold's documents; its README*.md (English, Japanese, Simplified Chinese
 and Korean), packaging/RUNTIME*.md (English, Japanese and Simplified Chinese) and the documents under glm53/ are

@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! Python methods templates call on strings, dicts and lists, the loop helpers, and the template globals.
 const std = @import("std");
 const builtin = @import("builtin");
@@ -385,7 +386,8 @@ fn mapping(rt: *Rt, comptime fname: []const u8, pos: []const Value, kw: []const 
     return map;
 }
 
-fn range(rt: *Rt, pos: []const Value, kw: []const Kw) Error!Value {
+/// range()'s arguments checked as range() checks them: (start, stop, step) and how many numbers.
+pub fn rangeSpec(rt: *Rt, pos: []const Value, kw: []const Kw) Error!struct { r: [3]i64, n: usize } {
     if (kw.len > 0) return rt.fail("range() takes no keyword arguments", .{});
     if (pos.len == 0 or pos.len > 3) return rt.fail("range expected 1 to 3 arguments, got {d}", .{pos.len});
     var r = [3]i64{ 0, 0, 1 };
@@ -397,7 +399,13 @@ fn range(rt: *Rt, pos: []const Value, kw: []const Kw) Error!Value {
     const step = if (r[2] > 0) r[2] else -r[2];
     const n: i64 = if (span <= 0) 0 else @divFloor(span - 1, step) + 1;
     if (n > 100000) return rt.fail("Range too big. The sandbox blocks ranges larger than MAX_RANGE (100000).", .{});
-    const items = try rt.a.alloc(Value, @intCast(n));
+    return .{ .r = r, .n = @intCast(n) };
+}
+
+fn range(rt: *Rt, pos: []const Value, kw: []const Kw) Error!Value {
+    const spec = try rangeSpec(rt, pos, kw);
+    const r = spec.r;
+    const items = try rt.a.alloc(Value, spec.n);
     for (items, 0..) |*x, i| x.* = .{ .int = r[0] + @as(i64, @intCast(i)) * r[2] };
     const l = try rt.a.create(v.List);
     l.* = .{ .items = items, .seq = .range, .range = r };

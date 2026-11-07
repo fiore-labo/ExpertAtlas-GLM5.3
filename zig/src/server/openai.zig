@@ -497,7 +497,7 @@ const Run = struct {
         };
         if (tools) {
             const calls = r.attachCalls(&reply) catch return;
-            const tail = r.plan.policy.flush();
+            const tail = r.plan.policy.flush(a) catch return;
             if (tail.len > 0) {
                 r.prose() catch return;
                 r.prose_sent.appendSlice(a, tail) catch return;

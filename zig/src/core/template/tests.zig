@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! Feature probes from tools/template_parity.py; expected strings come from Python jinja2 in transformers' environment.
 const std = @import("std");
 const template = @import("template.zig");
@@ -119,3 +120,96 @@ test "syntax and unknown filters fail at compile time" {
     try expect("{% if %}", shared, .{ .text = null, .raised = null });
     try expect("{% for x in y %}", shared, .{ .text = null, .raised = null });
 }
+
+/// Loops over range(...), counted and not built: expected strings from Python jinja2 3.1.6 in transformers' environment
+/// (sandboxed, trim and lstrip blocks, loop controls).
+const range_probes = [_]struct { []const u8, ?[]const u8, ?[]const u8 }{
+    .{ "{% for i in range(2, 9, 3) %}{{ i }}:{{ loop.index0 }}/{{ loop.index }}/{{ loop.length }}/{{ loop.revindex }}/{{ loop.revindex0 }}/{{ loop.first }}/{{ loop.last }};{% endfor %}", "2:0/1/3/3/2/True/False;5:1/2/3/2/1/False/False;8:2/3/3/1/0/False/True;", null },
+    .{ "{% for i in range(3) %}{{ loop.previtem if loop.previtem is defined else 'start' }}-{{ loop.nextitem if loop.nextitem is defined else 'end' }};{% endfor %}|{% for i in range(3) %}{{ loop.nextitem }}{% endfor %}", "start-1;0-2;1-end;|12", null },
+    .{ "{% for i in range(5, 0, -2) %}{{ i }}{{ loop.length }}{% endfor %}|{% for i in range(3, 3) %}x{% else %}empty{% endfor %}|{% for i in range(0) %}{% else %}e2{% endfor %}|{% for i in range(3, 0) %}{% else %}e3{% endfor %}", "533313|empty|e2|e3", null },
+    .{ "{% for i in range(4) %}{% if i == 1 %}{% continue %}{% endif %}{% if i == 3 %}{% break %}{% endif %}{% for j in range(i) %}{{ i }}{{ j }}{{ loop.length }}{% endfor %};{% endfor %}", ";202212;", null },
+    .{ "{% for i in range(2) %}{{ loop | length }}{{ 'T' if loop else 'F' }}{{ loop }}{% endfor %}", "2T<LoopContext 1/2>2T<LoopContext 2/2>", null },
+    .{ "{% macro range(n) %}m{{ n }}{% endmacro %}{% for c in range(2) %}{{ c }}{% endfor %}", "m2", null },
+    .{ "{% for i in range(6) if i is even %}{{ i }}{{ loop.length }}{{ loop.last }}{% endfor %}", "03False23False43True", null },
+    .{ "{% set s %}{% for i in range(3) %}{{ i }}{% endfor %}{% endset %}{{ s }}|{% macro m() %}{% for i in range(2) %}{{ i }}{% endfor %}{% endmacro %}{{ m() }}|{% for i in range(3) %}{% endfor %}{{ i is defined }}", "012|01|False", null },
+    .{ "{% for j in range(1, messages | length) %}{{ messages[j].role }}{% endfor %}|{% for j in range(0, 100000) %}{{ j }}{% break %}{% endfor %}|{% for i in range(-2, 2) %}{{ i }}{% endfor %}", "assistantuser|0|-2-101", null },
+    .{ "{% for i in range(2) %}{% for k in range(i, 3) %}{{ loop.revindex }}{% endfor %}{{ loop.cycle('a', 'b') }}{% endfor %}", "321a21b", null },
+    .{ "{% for i in range(2) %}{% break %}{% else %}E{% endfor %}|{% for i in range(2) %}{% continue %}{% else %}E{% endfor %}|{% for i in [1, 2] %}{% continue %}{% else %}E{% endfor %}", "E|E|E", null },
+    .{ "{% for i in range(1, 2, 0) %}{% endfor %}", null, null }, // jinja2: ValueError: range() arg 3 must not be zero
+    .{ "{% for i in range(200000) %}{% endfor %}", null, null }, // jinja2: OverflowError: Range too big. The sandbox blocks ranges larger than MAX_RANGE (100000).
+    .{ "{% for i in range(stop=3) %}{% endfor %}", null, null }, // jinja2: TypeError: safe_range() got an unexpected keyword argument 'stop'
+    .{ "{% for i in range() %}{% endfor %}", null, null }, // jinja2: TypeError: range expected at least 1 argument, got 0
+    .{ "{% for i in range('a') %}{% endfor %}", null, null }, // jinja2: TypeError: 'str' object cannot be interpreted as an integer
+};
+
+test "range loops match Python jinja2" {
+    for (range_probes) |p| try expect(p[0], shared, .{ .text = p[1], .raised = p[2] });
+}
+
+/// The text, or the error's message and whether raise_exception raised it, as `source` renders with no variables.
+fn expectSame(source: []const u8, text: ?[]const u8, msg: ?[]const u8, raised: bool) !void {
+    const a = std.testing.allocator;
+    var diag = template.Diag{};
+    defer if (diag.msg.len > 0) a.free(diag.msg);
+    const out = template.renderChat(a, source, .null, .null, .null, false, &diag) catch |err| {
+        if (err != error.TemplateFailed or text != null) {
+            std.debug.print("{s}\nfailed: {s}\n", .{ source, diag.msg });
+            return error.TestUnexpectedError;
+        }
+        try std.testing.expectEqualStrings(msg.?, diag.msg);
+        try std.testing.expectEqual(raised, diag.raised);
+        return;
+    };
+    defer a.free(out);
+    if (text == null) {
+        std.debug.print("{s}\nrendered instead of failing: {s}\n", .{ source, out });
+        return error.TestExpectedError;
+    }
+    try std.testing.expectEqualStrings(text.?, out);
+}
+
+/// Loops over range(...) and what is near them, with the outputs and errors (message, raised) the engine gave before
+/// range loops were counted rather than built.
+const range_golden = [_]struct { []const u8, ?[]const u8, ?[]const u8, bool }{
+    .{ "{% set ns = namespace(n=0) %}{% macro tick() %}{% set ns.n = ns.n + 1 %}{% endmacro %}{% macro r(n) %}ab{% endmacro %}{% for x in (tick() or r)(2) %}{{ x }}{% endfor %}{{ ns.n }}", "ab1", null, false },
+    .{ "{% set ns = namespace(range=range) %}{% macro change() %}{% set ns.range = 'x' %}2{% endmacro %}{% for i in ns.range(change()|length) %}{{ i }}{% endfor %}", "0", null, false },
+    .{ "{% for i in range(1) %}{% break %}{% else %}E{% endfor %}|{% for i in range(2) %}{% continue %}{% else %}E{% endfor %}|{% for i in range(2) %}{% if i == 1 %}{% break %}{% endif %}X{% else %}E{% endfor %}|{% for i in range(0) %}{% else %}E{% endfor %}", "E|E|X|E", null, false },
+    .{ "{% for i in range('bad', 2, 0, stop=3) %}{% endfor %}", null, "range() takes no keyword arguments", false },
+    .{ "{% for i in range(100001) %}{% break %}{% endfor %}", null, "Range too big. The sandbox blocks ranges larger than MAX_RANGE (100000).", false },
+    .{ "{% for i in range(100000) %}{{ i }}{% break %}{% endfor %}|{% for i in range(200000, 200002) %}{{ i }}{% endfor %}", "0|200000200001", null, false },
+    .{ "{% for i in range(stop=raise_exception('kw')) %}{% endfor %}", null, "kw", true },
+    .{ "{% for i in range('bad', raise_exception('second')) %}{% endfor %}", null, "second", true },
+    .{ "{% for i in range() %}{% endfor %}", null, "range expected 1 to 3 arguments, got 0", false },
+    .{ "{% for i in range(1, 2, 3, 4) %}{% endfor %}", null, "range expected 1 to 3 arguments, got 4", false },
+    .{ "{% for i in range(1.5) %}{% endfor %}", null, "'float' object cannot be interpreted as an integer", false },
+    .{ "{% for i in range('x') %}{% endfor %}", null, "'str' object cannot be interpreted as an integer", false },
+    .{ "{% for i in range(nothing) %}{% endfor %}", null, "'Undefined' object cannot be interpreted as an integer", false },
+    .{ "{% for i in range(1, 2, 0) %}{% endfor %}", null, "range() arg 3 must not be zero", false },
+    .{ "{% set i = 3 %}{% for i in range(i) %}{{ i }}{% endfor %}:{{ i }}|{% for range in range(2) %}{{ range }}{% endfor %}", "012:3|01", null, false },
+    .{ "{% set x = 10 %}{% for i in range(2) %}{{ x }}{% set x = x + 1 %}{{ x }};{% endfor %}{{ x }}", "1011;1011;10", null, false },
+    .{ "{% set range = 'ab'.upper %}{% for x in range() %}{{ x }}{% endfor %}", "AB", null, false },
+    .{ "{% set range = 3 %}{% for i in range(raise_exception('arg')) %}{% endfor %}", null, "arg", true },
+    .{ "{% set range = 3 %}{% for i in range(2) %}{% endfor %}", null, "'int' object is not callable", false },
+    .{ "{% macro f(range) %}{% for i in range(2) %}{{ i }}{% endfor %}{% endmacro %}{{ f('ab'.upper) }}", null, "lower() takes at most 0 arguments (1 given)", false },
+    .{ "{% set ns = namespace(saved=none) %}{% for i in range(3) %}{% set ns.saved = loop %}{% endfor %}{{ ns.saved }}:{{ ns.saved.last }}:{{ ns.saved.previtem }}", "<LoopContext 3/3>:True:1", null, false },
+    .{ "{% set ns = namespace(prev=none) %}{% for i in range(3) %}{{ loop.changed(1) }}/{{ loop.cycle('a', 'b') }}/{{ loop == ns.prev }};{% set ns.prev = loop %}{% endfor %}", "True/a/False;False/b/True;False/a/True;", null, false },
+    .{ "{% for i in range(3, 0, -1) %}{{ loop.previtem }}|{{ loop.nextitem }};{% endfor %}", "|2;3|1;2|;", null, false },
+    .{ "{% for i in range(2) %}{{ loop.previtem + 1 }}{% endfor %}", null, "there is no previous item", false },
+    .{ "{% for i in range(2) %}{{ loop.nextitem }}{% endfor %}{% for i in range(1) %}{{ loop.nextitem + 1 }}{% endfor %}", null, "there is no next item", false },
+    .{ "{% for i in range(2) %}{{ loop['length'] }}{{ loop | count }}{{ [loop] }}{% endfor %}", "22[<LoopContext 1/2>]22[<LoopContext 2/2>]", null, false },
+    .{ "{% for i in range(1) %}{{ loop[0] is defined }}{% endfor %}", "False", null, false },
+    .{ "{% for i in range(1) %}{{ loop[:] }}{% endfor %}", null, "'LoopContext' object is not subscriptable", false },
+    .{ "{% for i in range(1) %}{{ loop | list }}{% endfor %}", null, "'LoopContext' object is not iterable", false },
+    .{ "{% for i in range(1) %}{{ loop([]) }}{% endfor %}", null, "Tried to call non recursive loop.  Maybe you forgot the 'recursive' modifier.", false },
+    .{ "{% for i in range(9223372036854775806, 9223372036854775807, 2) %}{{ i }}{% endfor %}", "9223372036854775806", null, false },
+    .{ "{% for a, b in range(1) %}{% endfor %}", null, "'int' object is not iterable", false },
+    .{ "{% for a, b in range(0) %}{% endfor %}empty", "empty", null, false },
+    .{ "{% for i in range(5, 0, 2) %}x{% else %}E{% endfor %}|{% for i in range(-3) %}x{% else %}E{% endfor %}", "E|E", null, false },
+    .{ "{% for i in range(3) if i > 0 %}{{ i }}{{ loop.length }}{% endfor %}", "1222", null, false },
+    .{ "{% set r = range %}{% for i in r(2) %}{{ i }}{% endfor %}", "01", null, false },
+};
+
+test "range loops render and fail as before" {
+    for (range_golden) |g| try expectSame(g[0], g[1], g[2], g[3]);
+}
+

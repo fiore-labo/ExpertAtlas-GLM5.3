@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! Template values with the Python semantics Jinja2 inherits: equality, ordering, truth, str() and repr().
 const std = @import("std");
 const uni = @import("unicode.zig");
@@ -32,6 +33,18 @@ pub const Loop = struct {
     items: []const Value,
     index0: usize = 0,
     changed: ?[]const Value = null,
+    /// A loop over range(...) counts its numbers instead of holding them (`items` empty): GLM-5.3's template loops so
+    /// once per tool result, which built a list of every later message each time.
+    range: ?struct { start: i64, step: i64, n: usize } = null,
+
+    pub fn len(l: *const Loop) usize {
+        return if (l.range) |r| r.n else l.items.len;
+    }
+
+    /// Item `k` (below len()).
+    pub fn item(l: *const Loop, k: usize) Value {
+        return if (l.range) |r| .{ .int = r.start + @as(i64, @intCast(k)) * r.step } else l.items[k];
+    }
 };
 
 pub const Macro = struct { node: *const anyopaque, closure: *anyopaque, name: []const u8 };
@@ -139,7 +152,7 @@ pub fn truthy(v: Value) bool {
         .str => |s| s.s.len > 0,
         .list => |l| l.items.len > 0,
         .dict => |d| d.map.count() > 0,
-        .loop => |l| l.items.len > 0,
+        .loop => |l| l.len() > 0,
         .ns, .macro, .method, .func, .iter => true,
     };
 }
@@ -151,7 +164,7 @@ pub fn len(v: Value) ?usize {
         .str => |s| uni.count(s.s),
         .list => |l| l.items.len,
         .dict => |d| d.map.count(),
-        .loop => |l| l.items.len,
+        .loop => |l| l.len(),
         else => null,
     };
 }
@@ -419,7 +432,7 @@ fn write(rt: *Rt, out: *std.ArrayList(u8), v: Value, quoted: bool) Error!void {
             try writeQuoted(out, a, m.name);
             try out.append(a, '>');
         },
-        .loop => |l| try out.print(a, "<LoopContext {d}/{d}>", .{ l.index0 + 1, l.items.len }),
+        .loop => |l| try out.print(a, "<LoopContext {d}/{d}>", .{ l.index0 + 1, l.len() }),
         .method, .func, .iter => return rt.fail("printing a {s} is not supported", .{typeName(v)}),
     }
 }

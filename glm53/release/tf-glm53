@@ -732,6 +732,64 @@ gone_ranks() {                                      # each rank not running, wit
   cat "$tmp"/[0-9]*; rm -rf "$tmp"
 }
 
+# One rank's start (start_ranks runs each as its own job): its GID, its arguments, then its container or its process.
+# The container's start is the job's status; a process's start, as before, is not checked. Reads cmd_up's `args`.
+start_rank() {
+  local r=$1 n gid a m pre=""
+  n=${NODES[$r]}
+  gid=${GID_INDEX:-$(on "$n" "$GID_PROBE")}
+  # ranks above 0 refuse requests; they listen on loopback only
+  a=$args; [ "$r" -gt 0 ] && a="--host 127.0.0.1 --port $PORT --name $NAME --context $CONTEXT"
+  # rank 0 alone opens METRICS_LISTEN (the others' counters stay at 0)
+  m=""; [ "$r" -eq 0 ] && [ -n "$METRICS_LISTEN" ] && m="TENSORFOLD_METRICS_LISTEN='$METRICS_LISTEN' "
+  # the server and its output's writer go to the background, the output into the node's keeper (the start before
+  # becomes rankR.prev there): ssh returns at once. oom_score_adj 1000: the kernel's OOM killer takes the rank first (a shell of sshd inherits
+  # -1000, never taken: out of memory the node then livelocks and needs a cold power cycle)
+  if [ "$RUNTIME" = docker ]; then
+    on "$n" "mkdir -p $PKG/launch; $(docker_rank "$r" "$gid" "$a" "${m:+TENSORFOLD_METRICS_LISTEN=$METRICS_LISTEN}")"
+    return
+  fi
+  # NSYS_RANK0 (profiling, CONF): rank 0's server started by this nsys command line; its process is still
+  # ./bin/tensorfold-native (nsys starts it), so PIDS finds it and down stops it, and nsys writes its report after
+  [ "$r" -eq 0 ] && [ -n "${NSYS_RANK0:-}" ] && pre="$NSYS_RANK0 "
+  [ "$ENGINE_CORES" = a725 ] && pre="taskset -c $A725_CORES $pre"
+  on "$n" "cd $PKG || exit 1; echo 1000 > /proc/self/oom_score_adj || exit 1; export $(rank_env "$r" "$gid"); ${m}nohup ${pre}./bin/tensorfold-native serve $WEIGHTS $a < /dev/null 2>&1 | nohup $KEEP send rank$r > /dev/null 2>&1 &"
+  return 0
+}
+
+# Every rank started at once, each a job whose output and status go to files; then every job waited for, also when
+# INT or TERM comes while they run (the stop then waits, so no rank starts after cmd_down), the outputs printed in rank
+# order, and the first failing rank (by number) reported as before. 0: every rank started.
+start_ranks() {
+  local tmp r pid st stop=0 pids=()
+  tmp=$(mktemp -d) || { echo "not started: no temporary directory"; return 1; }
+  trap 'stop=1' INT TERM
+  for r in $(seq $LAST -1 0); do
+    ( start_rank "$r"; echo $? > "$tmp/$r.rc" ) > "$tmp/$r.out" 2>&1 &
+    pids[$r]=$!
+  done
+  # a signal ends `wait` early: wait again while the job lives (its status is the file it writes, not wait's)
+  for r in $(seq 0 $LAST); do
+    pid=${pids[$r]}
+    wait "$pid" 2>/dev/null
+    while kill -0 "$pid" 2>/dev/null; do wait "$pid" 2>/dev/null; done
+  done
+  # every job has ended: a signal now cleans up first; cmd_up's own trap is back before this returns
+  trap 'rm -rf "$tmp"; fail_up "interrupted"; exit 130' INT TERM
+  for r in $(seq 0 $LAST); do cat "$tmp/$r.out"; done
+  if [ "$stop" = 1 ]; then rm -rf "$tmp"; fail_up "interrupted"; exit 130; fi
+  for r in $(seq 0 $LAST); do
+    st=$(cat "$tmp/$r.rc" 2>/dev/null)
+    if [ "$st" != 0 ]; then
+      rm -rf "$tmp"; trap 'fail_up "interrupted"; exit 130' INT TERM
+      if [ "$RUNTIME" = docker ]; then fail_up "rank $r's container did not start on ${NODES[$r]}"; else fail_up "rank $r did not start on ${NODES[$r]}"; fi
+      return 1
+    fi
+  done
+  rm -rf "$tmp"; trap 'fail_up "interrupted"; exit 130' INT TERM
+  return 0
+}
+
 fail_up() {                                         # a start that failed: stop every rank, keep the logs
   trap - INT TERM
   echo "$1: stopping every rank"
@@ -753,40 +811,25 @@ cmd_up() {
     ( e=$(on "${NODES[$r]}" "$KEEPER_UP --renew && $KEEP open $s" 2>&1) || echo "  ${NODES[$r]}: the log keeper did not start: ${e:-python3?}" ) & done; wait)
   [ -n "$bad" ] && { echo "$bad"; echo "not started"; return 1; }
   trap 'fail_up "interrupted"; exit 130' INT TERM
-  for r in $(seq $LAST -1 0); do
-    n=${NODES[$r]}
-    gid=${GID_INDEX:-$(on "$n" "$GID_PROBE")}
-    # ranks above 0 refuse requests; they listen on loopback only
-    a=$args; [ "$r" -gt 0 ] && a="--host 127.0.0.1 --port $PORT --name $NAME --context $CONTEXT"
-    # rank 0 alone opens METRICS_LISTEN (the others' counters stay at 0)
-    m=""; [ "$r" -eq 0 ] && [ -n "$METRICS_LISTEN" ] && m="TENSORFOLD_METRICS_LISTEN='$METRICS_LISTEN' "
-    # the server and its output's writer go to the background, the output into the node's keeper (the start before
-    # becomes rankR.prev there): ssh returns at once. oom_score_adj 1000: the kernel's OOM killer takes the rank first (a shell of sshd inherits
-    # -1000, never taken: out of memory the node then livelocks and needs a cold power cycle)
-    if [ "$RUNTIME" = docker ]; then
-      on "$n" "mkdir -p $PKG/launch; $(docker_rank "$r" "$gid" "$a" "${m:+TENSORFOLD_METRICS_LISTEN=$METRICS_LISTEN}")" \
-        || { fail_up "rank $r's container did not start on $n"; return 1; }
-      continue
-    fi
-    # NSYS_RANK0 (profiling, CONF): rank 0's server started by this nsys command line; its process is still
-    # ./bin/tensorfold-native (nsys starts it), so PIDS finds it and down stops it, and nsys writes its report after
-    local pre=""; [ "$r" -eq 0 ] && [ -n "${NSYS_RANK0:-}" ] && pre="$NSYS_RANK0 "
-    [ "$ENGINE_CORES" = a725 ] && pre="taskset -c $A725_CORES $pre"
-    on "$n" "cd $PKG || exit 1; echo 1000 > /proc/self/oom_score_adj || exit 1; export $(rank_env "$r" "$gid"); ${m}nohup ${pre}./bin/tensorfold-native serve $WEIGHTS $a < /dev/null 2>&1 | nohup $KEEP send rank$r > /dev/null 2>&1 &"
-  done
+  start_ranks || return 1
   drafter_line | $KEEP send drafter
   ( nohup bash "$SELF" -c "$CONF" watch < /dev/null 2>&1 | nohup $KEEP send watch > /dev/null 2>&1 & )
   echo "started; waiting for the server (up to ${READY_TIMEOUT}s)"
-  local t0 el up; t0=$(date +%s)
+  # rank 0's log read every second; every rank's process checked over ssh 10 s after the last check (the first 20 s
+  # not counted), and the time shown once a minute
+  local t0 el up next=10 minute=0; t0=$(date +%s)
   while ! $KEEP cat rank0 2>/dev/null | grep -q "serving .* at http://"; do
-    sleep 10; el=$(( $(date +%s) - t0 ))
-    up=0; for n in "${NODES[@]}"; do [ "$(alive "$n")" = 1 ] && up=$((up + 1)); done
-    if [ $up -lt $WORLD ] && [ $el -gt 20 ]; then
-      gone_ranks
-      fail_up "a rank stopped ($up/$WORLD running)"; return 1
+    sleep 1; el=$(( $(date +%s) - t0 ))
+    if [ $el -ge $next ]; then
+      up=0; for n in "${NODES[@]}"; do [ "$(alive "$n")" = 1 ] && up=$((up + 1)); done
+      if [ $up -lt $WORLD ] && [ $el -gt 20 ]; then
+        gone_ranks
+        fail_up "a rank stopped ($up/$WORLD running)"; return 1
+      fi
+      next=$(( $(date +%s) - t0 + 10 ))
     fi
     [ $el -gt "$READY_TIMEOUT" ] && { fail_up "not ready after ${READY_TIMEOUT}s"; return 1; }
-    [ $((el % 60)) -lt 10 ] && echo "  ${el}s"
+    [ $((el / 60)) -gt $minute ] && { minute=$((el / 60)); echo "  ${el}s"; }
   done
   echo "ready after $(( $(date +%s) - t0 ))s: $($KEEP cat rank0 | grep -m1 'serving .* at http://' | sed 's/.*serving/serving/')"
   echo "drafter: $(drafter_line)"
@@ -882,7 +925,7 @@ cmd_start() {                                      # the engine through the laun
   echo "start: through the launcher, with $([ -n "$plan" ] && echo "the plan of $(basename "$plan" .bits | sed 's/^plan-//')" || echo "every expert at 3 bits")${DRAFTER_KIND_ARG:+ and the drafter $DRAFTER_KIND_ARG}"
   t0=$(date +%s)
   while true; do
-    sleep 10; el=$(( $(date +%s) - t0 ))
+    sleep 1; el=$(( $(date +%s) - t0 ))
     read -r st ph err < <(lstatus)
     [ "$st $ph" != "$last" ] && { echo "  ${el}s: $st$([ "$ph" != - ] && echo " ($ph)")"; last="$st $ph"; }
     case $st in

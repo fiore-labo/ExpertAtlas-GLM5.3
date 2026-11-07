@@ -435,7 +435,7 @@ class Quick:
         say("[5/6] start: the engine is loading (minutes; the dashboard shows it too)")
         t0 = last = time.time()
         while True:
-            time.sleep(10)
+            time.sleep(1)  # the status read each second (the time shown every 30 s)
             st = self.call("GET", "/v1/launch/status")[1]
             s = st.get("state")
             if s == "running" and not st.get("phase"):

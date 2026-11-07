@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! Runs a parsed template the way Jinja2's compiled Python does: frames, statements, expressions, macro calls.
 const std = @import("std");
 const ast = @import("ast.zig");
@@ -127,24 +128,37 @@ fn execIf(c: *Ctx, act: *Activation, n: *const ast.If) Error!Flow {
 }
 
 fn execFor(c: *Ctx, act: *Activation, f: *const ast.For) Error!void {
-    var items = try access.iterate(&c.rt, try eval(c, act, f.iter));
-    if (f.filter) |t| {
-        const tf = try enter(c, act, f.test_frame);
-        var kept: std.ArrayList(Value) = .empty;
-        for (items) |item| {
-            try assignByName(c, tf, f.target, item);
-            if (v.truthy(try eval(c, tf, t))) try kept.append(c.rt.a, item);
-        }
-        items = kept.items;
-    }
     const loop = try c.rt.a.create(v.Loop);
-    loop.* = .{ .items = items };
+    loop.* = .{ .items = &.{} };
+    if (f.filter == null and f.iter.* == .call and f.iter.call.callee.* == .name) {
+        // a call by name, evaluated as a call is (the name, then the arguments, once each): the builtin range counts
+        // its numbers (Loop.range) instead of building them, anything else is called and iterated as before
+        const cl = f.iter.call;
+        const callee = try eval(c, act, cl.callee);
+        const a = try args(c, act, cl.args);
+        if (callee == .func and callee.func == .range) {
+            const spec = try methods.rangeSpec(&c.rt, a[0], a[1]);
+            loop.range = .{ .start = spec.r[0], .step = spec.r[2], .n = spec.n };
+        } else loop.items = try access.iterate(&c.rt, try call(c, callee, a[0], a[1]));
+    } else {
+        var items = try access.iterate(&c.rt, try eval(c, act, f.iter));
+        if (f.filter) |t| {
+            const tf = try enter(c, act, f.test_frame);
+            var kept: std.ArrayList(Value) = .empty;
+            for (items) |item| {
+                try assignByName(c, tf, f.target, item);
+                if (v.truthy(try eval(c, tf, t))) try kept.append(c.rt.a, item);
+            }
+            items = kept.items;
+        }
+        loop.items = items;
+    }
     var completed = false;
-    for (items, 0..) |item, i| {
+    for (0..loop.len()) |i| {
         loop.index0 = i;
         const body = try enter(c, act, f.body_frame);
         if (f.uses_loop) body.slots[f.loop_name.slot] = .{ .loop = loop };
-        try assign(c, body, f.target, item);
+        try assign(c, body, f.target, loop.item(i));
         switch (try exec(c, body, f.body)) {
             .brk => break,
             .cont => continue,
