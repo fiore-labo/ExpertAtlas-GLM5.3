@@ -72,8 +72,7 @@ sit together at the top level.
   in the archive and the image; `STRUCTURED=0` turns it off ([FEATURES](glm53/release/FEATURES.md#13-structured-output)).
 - A structured request decodes without the drafter, so more slowly. Plain requests are as on r3.3.2-102: the same
   tokens and the same speed.
-- Nothing to change from r3.3.2-102: the weights and the settings are the same. A build from source also needs Rust
-  1.95.0 ("Build from source").
+- A build from source also needs Rust 1.95.0 ("Build from source").
 
 ## New in r3.3.2-102
 
@@ -88,7 +87,6 @@ sit together at the top level.
   (+12 % for four conversations writing prose on eight nodes, 2 % slower for code on four), and a confidence of 0.6.
   MTP, the default drafter, ran faster than either in the same measurement (73.1 tok/s).
   `TF_GLM53_MULTI_DRAFT_ROWS=8 TF_GLM53_DFLASH_CONF=0.4` in `EXTRA_ENV` brings the earlier behaviour back.
-- Nothing to change from r3.3.1-102: the weights and the settings are the same.
 
 ## New in r3.3.1-102
 
@@ -101,7 +99,6 @@ sit together at the top level.
 - **Fixed: a stop with requests queued or running** took 36 to 37 s in r3.3-102 and left the other ranks' GPUs
   busy (P0, about 11 W) with no process. Now it ends the requests and tells every rank: 6 s under load as when idle,
   and every GPU goes back to idle (P8).
-- Nothing to change from r3.3-102: the weights and the settings are the same.
 
 ## New in r3.3-102
 
