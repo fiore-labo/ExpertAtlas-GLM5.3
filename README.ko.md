@@ -35,6 +35,13 @@ GB10을 1개씩 탑재한 NVIDIA DGX Spark 4대 또는 8대에서 텐서 병렬 
 - 사고(thinking)가 지나치게 길어지지 않게 합니다. 상한은 `max_tokens`(1회 응답의 상한)에 대한 비율로 정하고, 긴 사고는 중간이나 끝에서 정리할 수 있습니다. 요청마다 설정할 수도, 엔진 실행 중에 설정할 수도 있습니다.
 - `/metrics`(Prometheus 텍스트)와 `/health`는 실행 중인 요청도 집계하므로, 모니터는 요청이 실행되는 동안에도 prefill과 decode 속도, 캐시 적중, 드래프트 채택을 읽을 수 있습니다. `METRICS_LISTEN`을 설정하면 다른 호스트의 모니터를 위해 이 두 가지를 별도의 주소에서 읽기 전용으로 제공합니다.
 
+## r3.3.2-102에서 바뀐 점
+
+- **수정:** 값에 `</arg_value>`나 `</tool_call>`가 들어 있는 GLM 도구 호출(값이 코드이거나 도구 호출 예시를 담은 글일 때)을 값 전체까지 읽습니다. 호출은 하나만 실행되고 글에는 아무것도 새지 않습니다. 이전에는 값이 중간에 잘리고 그 안의 예시가 실행될 수 있었습니다. DSML 태그로 시작하지만 너무 짧은 도구 호출 블록 때문에 서버가 panic하여 엔진이 멈추는 일이 없어졌습니다. 도구 결과가 많은 긴 대화에서 채팅 템플릿 렌더링 메모리가 대화 길이의 제곱으로 늘어나는 일도 없어졌습니다. 3,000턴에서 738 MB였던 것이 85 MB입니다.
+- **더 빠른 시작:** 모든 rank를 동시에 시작하고, 엔진 준비 완료를 1초 안에 알아챕니다. 스위치의 8대에서 시작 전체가 115초에서 86초로 줄었습니다.
+- **DFlash2의 기본값:** `MULTI`에서 다른 대화와 함께 도는 대화의 윈도를 2개 대화부터 4행으로 했고(8대에서 글을 쓰는 4개 대화는 +12 %, 4대의 코딩은 2 % 느림), 신뢰도를 0.6으로 했습니다. 기본 드래프터 MTP는 같은 측정에서 둘보다 빨랐습니다(73.1 tok/s). 이전 동작으로 되돌리려면 `EXTRA_ENV`에 `TF_GLM53_MULTI_DRAFT_ROWS=8 TF_GLM53_DFLASH_CONF=0.4`를 씁니다.
+- r3.3.1-102에서 바꿀 것은 없습니다. 가중치와 설정은 같습니다.
+
 ## r3.3.1-102에서 바뀐 점
 
 - **할 일이 없는 동안 엔진이 쉽니다.** 할 일이 없는 상태가 1초 이어지면(`EXTRA_ENV`의 `TF_GLM53_IDLE_PARK_MS`) 모든 rank가 쉽니다. 다른 rank는 rank 0과의 연결 위에서 잠들고, RoCE 프록시 스레드는 모두 멈춥니다. 요청, 엑스퍼트 비트 교체, 정지가 오면 0.6~2.0 ms 만에 깨어나며, 짧은 요청의 첫 토큰은 이전과 같은 속도로 나옵니다. 링에서 측정한 결과, 쉬는 동안 각 노드의 엔진은 코어 하나의 1 % 미만, GPU는 0 %였습니다. 쉬지 않으면 다른 rank의 GPU는 96 %입니다. 그 노드들의 SoC 온도는 `ENGINE_CORES=os`에서 64~85 °C에서 50~54 °C로 내려갔습니다. 상태는 `/health`의 `idle`에 나오고, 패널의 RDMA 칸은 idle로 표시됩니다([CONFIG](glm53/release/CONFIG.md)).
@@ -137,12 +144,12 @@ Fiore-lab의 것과 구조가 같고 같은 방식으로 로드됩니다.
 릴리스는 컨테이너 이미지와, 같은 파일을 담은 아카이브의 두 가지 형태로 배포합니다. 권장하는 방법은 이미지입니다. 가중치를 준비해 두면 첫 번째 노드에서 다음 한 줄로 엔진이 시작됩니다.
 
 ```sh
-docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.1-102 up
+docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.2-102 up
 ```
 
 마지막에 주소와 함께 `READY`가 표시됩니다. API는 `http://FIRST-NODE:8000/v1`, 컨트롤 패널은 `http://FIRST-NODE:8010/panel`입니다. 부족한 것이 있으면 `STOP`으로 끝나고, 할 일과 다음에 실행할 줄을 알려 줍니다. 절차와 모든 옵션은 [QUICKSTART](glm53/release/QUICKSTART.md)(영어)에 있습니다.
 
-같은 결과를 수동으로 얻으려면, 이미지의 경우 모든 노드에서 `docker pull`하고 `mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out`을 실행한 뒤, `glm53.conf`에 `RUNTIME=docker`와 `IMAGE`를 설정합니다([packaging/RUNTIME.md](packaging/RUNTIME.md) "Running in containers", 영어). Docker를 쓰지 않는 경우: 릴리스 아카이브 `tensorfold-r3.3.1-102-linux-aarch64.tar.gz`를 내려받아 함께 들어 있는 `RUNTIME.md`(이 저장소에서는 [packaging/RUNTIME.md](packaging/RUNTIME.md), 영어)를 따르세요. 어느 쪽이든 `glm53.conf.example`(8대) 또는 `glm53.t4.conf.example`(4대, [glm53/release/T4.md](glm53/release/T4.md) 참고, 영어)를 `glm53.conf`로 복사하고 요구하는 항목을 채운 다음 `./tf-glm53 deploy`와 `./tf-glm53 up`(컨트롤 패널을 시작합니다)을 실행하고, 거기서 엔진을 시작합니다. `./tf-glm53 start`는 직전 시작의 계획으로 시작하고, `./tf-glm53 down`은 정지합니다.
+같은 결과를 수동으로 얻으려면, 이미지의 경우 모든 노드에서 `docker pull`하고 `mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out`을 실행한 뒤, `glm53.conf`에 `RUNTIME=docker`와 `IMAGE`를 설정합니다([packaging/RUNTIME.md](packaging/RUNTIME.md) "Running in containers", 영어). Docker를 쓰지 않는 경우: 릴리스 아카이브 `tensorfold-r3.3.2-102-linux-aarch64.tar.gz`를 내려받아 함께 들어 있는 `RUNTIME.md`(이 저장소에서는 [packaging/RUNTIME.md](packaging/RUNTIME.md), 영어)를 따르세요. 어느 쪽이든 `glm53.conf.example`(8대) 또는 `glm53.t4.conf.example`(4대, [glm53/release/T4.md](glm53/release/T4.md) 참고, 영어)를 `glm53.conf`로 복사하고 요구하는 항목을 채운 다음 `./tf-glm53 deploy`와 `./tf-glm53 up`(컨트롤 패널을 시작합니다)을 실행하고, 거기서 엔진을 시작합니다. `./tf-glm53 start`는 직전 시작의 계획으로 시작하고, `./tf-glm53 down`은 정지합니다.
 
 서버는 기본적으로 모든 주소(`HOST=0.0.0.0`)에서 OpenAI chat API와, Claude Code를 위한 Anthropic Messages API를 제공합니다. API에도 컨트롤 패널에도 키가 없으므로 접근할 수 있는 누구나 사용할 수 있습니다. 노드를 닫힌 네트워크 안에 두거나 앞에 TLS와 접근 제어를 두세요(`HOST=127.0.0.1`과 `LAUNCHER_HOST=127.0.0.1`이면 첫 번째 노드에서만 사용할 수 있습니다).
 
@@ -185,7 +192,7 @@ Zig 0.17.0이 `PATH`에 있고(또는 `build_libs.sh`에는 `ZIG=`로 그 경로
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so
-zig build dist -Dversion=r3.3.1-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.3.2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 

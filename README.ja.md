@@ -36,6 +36,13 @@
 - 思考が長くなりすぎないようにします。上限は `max_tokens`（1 回の応答の上限）に対する割合で決め、長い思考は途中や終わりに整理できます。リクエストごとにも、エンジンの動作中にも設定できます。
 - `/metrics`（Prometheus のテキスト）と `/health` は実行中のリクエストの分も数えるので、モニタはリクエストの実行中にも prefill と decode の速さ、キャッシュのヒット、ドラフトの受理を読めます。`METRICS_LISTEN` を設定すると、別のホストのモニタ向けに、この 2 つを専用のアドレスで読み取り専用で開きます。
 
+## r3.3.2-102 で変わったこと
+
+- **直した不具合:** 値に `</arg_value>` や `</tool_call>` を含む GLM のツール呼び出し (値がコードや、ツール呼び出しの例を含む文章のとき) を、値の全部まで読みます。呼び出しは 1 つで、文章には何も漏れません。前は値が途中で切れ、中の例が実行されることがありました。DSML のタグで始まる短すぎるツール呼び出しの固まりで、サーバーが panic してエンジンが落ちることはなくなりました。ツールの結果が多い長い会話で、チャットテンプレートの描画のメモリが会話の長さの 2 乗で増えることもなくなりました。3,000 ターンで 738 MB だったものが 85 MB です。
+- **起動が速くなりました。** 全ランクを同時に起動し、エンジンの準備完了に 1 秒以内に気づきます。スイッチの 8 台で、起動全体が 115 秒から 86 秒になりました。
+- **DFlash2 の既定値:** `MULTI` で、ほかの会話と一緒に回る会話のウィンドウを 2 会話から 4 行にし (8 台で文章を書く 4 会話は +12 %、4 台のコーディングは 2 % 遅い)、信頼度を 0.6 にしました。既定のドラフター MTP は、同じ測定でどちらより速い結果でした (73.1 tok/s)。前の動きに戻すには、`EXTRA_ENV` に `TF_GLM53_MULTI_DRAFT_ROWS=8 TF_GLM53_DFLASH_CONF=0.4` を書きます。
+- r3.3.1-102 からは変えることはありません。重みも設定も同じです。
+
 ## r3.3.1-102 で変わったこと
 
 - **処理することがないあいだ、エンジンが休止します。** 処理することがない状態が 1 秒続くと (`EXTRA_ENV` の `TF_GLM53_IDLE_PARK_MS`)、全ランクが休止します。ほかのランクは rank 0 との接続で眠り、RoCE の通信スレッドはすべて止まります。リクエスト、エキスパートのビットの入れ替え、停止が来ると 0.6〜2.0 ms で起き、短いリクエストの最初のトークンは前と同じ速さで出ます。リングで測ると、休止中は各ノードのエンジンが 1 コアの 1 % 未満、GPU が 0 % でした。休止しないと、ほかのランクの GPU は 96 % です。そのノードの SoC は、`ENGINE_CORES=os` で 64〜85 °C から 50〜54 °C に下がりました。状態は `/health` の `idle` に出て、パネルの RDMA の欄は「休止」になります ([CONFIG](glm53/release/CONFIG.ja.md))。
@@ -138,12 +145,12 @@ Fiore-lab のものと形が同じで、同じように読み込まれます。
 リリースは、コンテナイメージと、同じファイルを持つアーカイブの 2 つの形で配布します。おすすめはイメージです。重みを置いてあれば、1 台目のノードで次の 1 行を実行するとエンジンが起動します。
 
 ```sh
-docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.1-102 up
+docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.2-102 up
 ```
 
 最後に `READY` とアドレスが出ます。API は `http://FIRST-NODE:8000/v1`、コントロールパネルは `http://FIRST-NODE:8010/panel` です。足りないものがあると `STOP` で止まり、することと次に実行する行を示します。手順と全オプションは [QUICKSTART](glm53/release/QUICKSTART.ja.md) にあります。
 
-同じことを手で行う場合、イメージなら、全ノードで `docker pull` し、`mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out` を実行して、`glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定します（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3.3.1-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。どちらも、`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーして必要な項目を記入し、`./tf-glm53 deploy` と `./tf-glm53 up`（コントロールパネルを起動します）を実行して、パネルでエンジンを起動します。`./tf-glm53 start` は直前の起動の計画で起動し、`./tf-glm53 down` で停止します。
+同じことを手で行う場合、イメージなら、全ノードで `docker pull` し、`mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out` を実行して、`glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定します（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3.3.2-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。どちらも、`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーして必要な項目を記入し、`./tf-glm53 deploy` と `./tf-glm53 up`（コントロールパネルを起動します）を実行して、パネルでエンジンを起動します。`./tf-glm53 start` は直前の起動の計画で起動し、`./tf-glm53 down` で停止します。
 
 サーバーは既定で全アドレス（`HOST=0.0.0.0`）で OpenAI chat API と、Claude Code 向けの Anthropic Messages API を提供します。API にもコントロールパネルにもキーはないので、届く人なら誰でも使えます。ノードを閉じたネットワーク内に留めるか、前段に TLS とアクセス制御を置いてください（`HOST=127.0.0.1` と `LAUNCHER_HOST=127.0.0.1` にすると 1 台目のノードからだけになります）。
 
@@ -186,7 +193,7 @@ Zig 0.17.0 が `PATH` 上にあり（または `build_libs.sh` には `ZIG=` で
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so
-zig build dist -Dversion=r3.3.1-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.3.2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 

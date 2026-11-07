@@ -17,6 +17,7 @@ const rope = @import("rope.zig");
 const dw = @import("draft_weights.zig");
 const drafter_mod = @import("drafter.zig");
 const mtp_mod = @import("mtp.zig");
+const multi_width = @import("multi_width.zig");
 const prompt_experts = @import("prompt_experts.zig");
 const roce = @import("roce.zig");
 const native_ops = @import("native_ops.zig");
@@ -79,11 +80,14 @@ pub const Options = struct {
     /// draft の確率の積がこれを下回った所でラウンドの連鎖を止める (mtp.Cut)。rank 0 の値を全ランクが使う (スロットの語、
     /// lockstep.draftWords)
     mtp_conf: f64 = 0.7,
-    /// TF_GLM53_DFLASH_CONF: DFlash2's chain confidence, a round's drafts cut where it falls under it (0: every draft
-    /// the depth allows, as gr8 runs DFlash2). Rank 0's is every rank's (the slot words, lockstep.draftWords)
-    /// TF_GLM53_DFLASH_CONF: DFlash2 の連鎖の信頼度。下回った所でラウンドの draft を切る (0 は深さいっぱい、gr8 の
-    /// DFlash2 と同じ)。rank 0 の値を全ランクが使う (スロットの語、lockstep.draftWords)
-    dflash_conf: f64 = 0.4,
+    /// TF_GLM53_DFLASH_CONF (default 0.6 since 11-07, before 0.4; on the ring, 10-30, the best or 0.4 % from it for
+    /// ja, code and en, +2 to 3 % over 0.4 on one conversation): DFlash2's chain confidence, a round's drafts cut where
+    /// it falls under it (0: every draft the depth allows, as gr8 runs DFlash2). Rank 0's is every rank's (the slot
+    /// words, lockstep.draftWords)
+    /// TF_GLM53_DFLASH_CONF (11-07 から既定 0.6、それまで 0.4。リング 10-30 で ja・code・en とも最良か最良と 0.4 %
+    /// 差、1 会話で 0.4 より +2〜3 %): DFlash2 の連鎖の信頼度。下回った所でラウンドの draft を切る (0 は深さいっぱい、
+    /// gr8 の DFlash2 と同じ)。rank 0 の値を全ランクが使う (スロットの語、lockstep.draftWords)
+    dflash_conf: f64 = 0.6,
     /// TF_GLM53_DFLASH_HEAD4=1: DFlash2's head on 4-bit records of lm_head (drafter.Drafter.head4)
     /// TF_GLM53_DFLASH_HEAD4=1: DFlash2 の head を lm_head の 4 bit の記録で計算する (drafter.Drafter.head4)
     dflash_head4: bool = false,
@@ -192,7 +196,7 @@ pub fn withEnv(o: Options) Options {
     r.mtp = std.mem.eql(u8, F.get("TF_GLM53_DRAFTER") orelse "", "mtp");
     r.mtp_k = @intCast(std.math.clamp(F.num("TF_GLM53_MTP_K", 3), 1, mtp_mod.max_rows - 1));
     r.mtp_conf = std.math.clamp(std.fmt.parseFloat(f64, F.get("TF_GLM53_MTP_CONF") orelse "0.7") catch 0.7, 0, 1);
-    r.dflash_conf = std.math.clamp(std.fmt.parseFloat(f64, F.get("TF_GLM53_DFLASH_CONF") orelse "0.4") catch 0.4, 0, 1);
+    r.dflash_conf = std.math.clamp(std.fmt.parseFloat(f64, F.get("TF_GLM53_DFLASH_CONF") orelse "0.6") catch 0.6, 0, 1);
     r.dflash_head4 = std.mem.eql(u8, F.get("TF_GLM53_DFLASH_HEAD4") orelse "0", "1");
     r.ring = std.mem.eql(u8, F.get("TF_GLM53_PREFILL_REDUCE") orelse "ring", "ring");
     r.topk_words = !std.mem.eql(u8, F.get("TF_GLM53_TOPK_WORDS") orelse "1", "0");
@@ -318,13 +322,14 @@ pub const ConfPad = enum { none, max, full };
 pub const Multi = struct {
     n: usize,
     rows: usize, // a conversation's window: vrows with a drafter, else 1 / 会話のウィンドウ: drafter があれば vrows、なければ 1
-    // TF_GLM53_MULTI_DRAFT_ROWS (2 .. rows, default rows): a drafted conversation's window when three or more are in a
-    // round, so the window stays under the two-shot reduce (DFlash2: 4 rows each, 16 in all); the same on every rank
-    // (the round's conversations come from rank 0's event)
-    // TF_GLM53_MULTI_DRAFT_ROWS (2 .. rows、既定は rows): 3 つ以上の会話のラウンドでの、draft する会話のウィンドウ。
-    // ウィンドウを 2 段の reduce の手前に保つ (DFlash2 なら 4 行ずつで計 16 行)。全ランクで同じ (ラウンドの会話は
-    // rank 0 の出来事から来る)
-    rows3: usize,
+    // TF_GLM53_MULTI_DRAFT_ROWS (2 .. rows; without a drafter 1): a drafted conversation's window when two or more are
+    // in a round (multi_width.width); by default 4 with DFlash2, so four stay under the two-shot reduce (16 rows), and
+    // rows with MTP. The same on every rank (the round's conversations come from rank 0's event). Until 11-07 it held
+    // from three conversations on, by default rows
+    // TF_GLM53_MULTI_DRAFT_ROWS (2 .. rows、drafter なしは 1): 2 つ以上の会話のラウンドでの、draft する会話のウィンドウ
+    // (multi_width.width)。既定は DFlash2 で 4 (4 会話でも 2 段の reduce の手前の 16 行)、MTP は rows。全ランクで同じ
+    // (ラウンドの会話は rank 0 の出来事から来る)。11-07 までは 3 会話から、既定は rows
+    beside: usize,
     // TF_GLM53_MTP_CONF_PAD (ConfPad, default none): the windows beside others while MTP's cut is on; the same on every
     // rank (the start's environment, and the cut is rank 0's)
     // TF_GLM53_MTP_CONF_PAD (ConfPad、既定 none): MTP の打ち切りが有効なときのほかと並ぶウィンドウ。全ランクで同じ
@@ -528,7 +533,7 @@ pub const Engine = struct {
     drafter: ?*drafter_mod.Drafter = null,
     // DFlash2's chain confidence (Options.dflash_conf); a follower takes rank 0's from each request's slot words
     // DFlash2 の連鎖の信頼度 (Options.dflash_conf)。follower は要求ごとにスロットの語から rank 0 の値を取る
-    dflash_conf: f64 = 0.4,
+    dflash_conf: f64 = 0.6,
     // TF_GLM53_DRAFTER=mtp: its caches are State entry layers.len
     // TF_GLM53_DRAFTER=mtp: そのキャッシュは State のエントリ layers.len
     mtp: ?mtp_mod.Mtp = null,
@@ -2341,10 +2346,10 @@ pub const Engine = struct {
         const rows: usize = if (e.drafter != null) vrows else if (e.mtp) |*mt| 1 + mt.k else 1;
         const R: u32 = @intCast(n * rows);
         if (R > forward.multi_rows) return error.MultiTooWide;
-        const rows3: usize = if (std.c.getenv("TF_GLM53_MULTI_DRAFT_ROWS")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch return error.MultiDraftRows else rows;
+        const beside: usize = if (std.c.getenv("TF_GLM53_MULTI_DRAFT_ROWS")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch return error.MultiDraftRows else multi_width.besideDefault(e.drafter != null, rows);
         // 2 .. rows with a drafter; without one (rows 1) only 1
         // drafter があれば 2 .. rows、なければ (rows 1) 1 だけ
-        if (rows3 > rows or rows3 < @min(rows, 2)) return error.MultiDraftRows;
+        if (beside > rows or beside < @min(rows, 2)) return error.MultiDraftRows;
         const conf_pad = std.meta.stringToEnum(ConfPad, std.mem.span(std.c.getenv("TF_GLM53_MTP_CONF_PAD") orelse "none")) orelse return error.MtpConfPad;
         var first_moe: ?*const moe.Routed = null;
         for (e.layers) |*L| if (L.experts) |*x| {
@@ -2363,7 +2368,7 @@ pub const Engine = struct {
         b.dmid = try cuda.DeviceBuffer.alloc(e.d, (row / e.world + 15) / 16 * 16);
         if (e.drafter != null) b.taps = try cuda.DeviceBuffer.alloc(e.d, @as(usize, R) * e.n_taps * e.cfg.hidden * 2);
         m.* = .{
-            .n = n, .rows = rows, .rows3 = rows3, .conf_pad = conf_pad, .convs = undefined, .b = b,
+            .n = n, .rows = rows, .beside = beside, .conf_pad = conf_pad, .convs = undefined, .b = b,
             .xs = try moe.Scratch.init(e.d, first_moe orelse return error.NoMoeLayer, R, @intCast(e.cfg.top_k)),
             .streams = undefined, .events = undefined,
             // a ring of four relays the one-shot only (roce_proxy.c ABI 6): no two-shot share mode there
@@ -2713,9 +2718,9 @@ pub const Engine = struct {
         // TF_GLM53_MULTI_MTP=batch: every conversation's MTP drafts first, in one pass a step
         // TF_GLM53_MULTI_MTP=batch: 先に全会話の MTP の draft を段ごとに 1 回で
         const mtp_batch = e.mtp != null and m.mtp_stage != null;
-        // a drafted conversation's window this round (TF_GLM53_MULTI_DRAFT_ROWS from three conversations on)
-        // このラウンドの、draft する会話のウィンドウ (3 会話からは TF_GLM53_MULTI_DRAFT_ROWS)
-        const width: usize = if (nl >= 3) m.rows3 else m.rows;
+        // a drafted conversation's window this round (TF_GLM53_MULTI_DRAFT_ROWS from two conversations on)
+        // このラウンドの、draft する会話のウィンドウ (2 会話からは TF_GLM53_MULTI_DRAFT_ROWS)
+        const width = multi_width.width(nl, m.rows, m.beside);
         for (live[0..nl], 0..) |j, i| {
             const cv = &m.convs[ks[j]];
             room[i] = @min(depth_max, width - 1, cv.want - cv.n - 1, e.capacity - cv.P - 1);

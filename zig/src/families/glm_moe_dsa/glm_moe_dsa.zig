@@ -21,6 +21,7 @@ pub const load_progress = @import("load_progress.zig");
 pub const load_pipe = @import("load_pipe.zig");
 pub const lockstep = @import("lockstep.zig");
 pub const pace = @import("pace.zig");
+pub const multi_width = @import("multi_width.zig");
 pub const slots = @import("slots.zig");
 pub const slots_serve = @import("slots_serve.zig");
 pub const pool_serve = @import("pool_serve.zig");
@@ -46,6 +47,7 @@ test {
     _ = engine;
     _ = lockstep;
     _ = pace;
+    _ = multi_width;
     _ = q4;
     _ = draft_weights;
     _ = qmm;

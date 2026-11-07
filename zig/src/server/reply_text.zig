@@ -1,5 +1,7 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! Reply text as it streams: think blocks, tool markup held back, Harmony channels, stop strings.
 const std = @import("std");
+const glm_rescue = @import("glm_rescue.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Markers = struct { open: []const u8, close: []const u8 };
@@ -103,6 +105,11 @@ pub fn hideToolCalls(a: Allocator, text: []const u8, finished: bool) Allocator.E
 pub fn hideInto(a: Allocator, out: *std.ArrayList(u8), text: []const u8, finished: bool) Allocator.Error![]const u8 {
     out.clearRetainingCapacity();
     var pos: usize = 0;
+    // a GLM call read again pairs the text's value tags once per call here; the table goes when the call returns, so a
+    // streamed reply does not keep one per delta
+    var scratch: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer scratch.deinit();
+    var matches: glm_rescue.Matches = .{};
     while (true) {
         var start: ?usize = null;
         var which: usize = 0;
@@ -126,6 +133,12 @@ pub fn hideInto(a: Allocator, out: *std.ArrayList(u8), text: []const u8, finishe
         const opener = calls[which][0];
         const end = findTag(text, start.? + opener.len, calls[which][1]) orelse return out.items;
         pos = end + calls[which][1].len;
+        // a GLM value that holds the closer: hidden to the call's real end, or all while it may still come
+        if (which == 0) switch (try glm_rescue.rescue(scratch.allocator(), text, start.? + opener.len, end, finished, &matches, null)) {
+            .legacy => {},
+            .end => |e| pos = e,
+            .need_more => return out.items,
+        };
     }
 }
 

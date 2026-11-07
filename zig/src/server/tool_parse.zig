@@ -1,7 +1,8 @@
-// Modified by Fiore-lab from TensorFold 1.0.2: as in TensorFold at commit c126fe16 (NOTICE lists the changed files).
+// Modified by Fiore-lab from TensorFold 1.0.2: as in TensorFold at commit c126fe16, then GLM values that hold their closers (NOTICE lists the changed files).
 //! Tool calls in a finished reply, every family's markup, as OpenAI tool_calls (``tools.parse_tool_calls_from_content``).
 const std = @import("std");
 const json = @import("json.zig");
+const glm_rescue = @import("glm_rescue.zig");
 const ids = @import("ids.zig");
 const reply_text = @import("reply_text.zig");
 const tool_params = @import("tool_params.zig");
@@ -17,7 +18,8 @@ pub const wrapCalls = tool_streaming.wrapCalls;
 
 const Error = error{ Invalid, OutOfMemory };
 const Call = struct { name: []const u8, arguments: Value };
-const Envelope = struct { start: usize, end: usize, payload: []const u8, complete: bool = true };
+/// ``plain``: a ``<tool_call>`` block; ``depth``: one ``glm_rescue`` read again, its call as the model wrote it.
+const Envelope = struct { start: usize, end: usize, payload: []const u8, complete: bool = true, plain: bool = false, depth: ?glm_rescue.Call = null };
 
 pub const Parsed = struct { content: []const u8, calls: ?[]Value };
 
@@ -50,7 +52,7 @@ fn allSpace(s: []const u8) bool {
 }
 
 /// (start, end, payload) of each tool-call block in order; a block inside an earlier one is part of it.
-fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
+fn envelopes(a: Allocator, text: []const u8, rescue: bool) Allocator.Error![]Envelope {
     var found: std.ArrayList(Envelope) = .empty;
     var pos: usize = 0;
     while (findCI(text, "<tool_call>", pos)) |s| {
@@ -59,7 +61,7 @@ fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
             continue;
         };
         const e = findCI(text, "</tool_call>", s + 11) orelse break;
-        try found.append(a, .{ .start = s, .end = e + 12, .payload = strip(text[s + 11 .. e]) });
+        try found.append(a, .{ .start = s, .end = e + 12, .payload = strip(text[s + 11 .. e]), .plain = true });
         pos = e + 12;
     }
     pos = 0;
@@ -97,11 +99,57 @@ fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
     }.less);
     var kept: std.ArrayList(Envelope) = .empty;
     for (found.items) |env| if (kept.items.len == 0 or env.start >= kept.items[kept.items.len - 1].end) try kept.append(a, env);
-    return kept.items;
+    if (!rescue) return kept.items;
+    // a GLM call whose value holds its closers, read again over the list as it stands; what it spans was its value
+    var matches: glm_rescue.Matches = .{};
+    var out: std.ArrayList(Envelope) = .empty;
+    var i: usize = 0;
+    while (i < kept.items.len) : (i += 1) {
+        var env = kept.items[i];
+        if (env.plain) {
+            var call: glm_rescue.Call = undefined;
+            switch (try glm_rescue.rescue(a, text, env.start + 11, env.end - 12, true, &matches, &call)) {
+                .end => |end| if (end != env.end or !(try strictGlm(a, env.payload))) {
+                    env = .{ .start = env.start, .end = end, .payload = strip(text[env.start + 11 .. end - 12]), .plain = true, .depth = call };
+                    while (i + 1 < kept.items.len and kept.items[i + 1].start < end) i += 1;
+                },
+                else => {},
+            }
+        }
+        try out.append(a, env);
+    }
+    return out.items;
+}
+
+/// The call the first closer ends reads whole as it is (one-call mode), so a re-read of the same bytes keeps it.
+fn strictGlm(a: Allocator, block: []const u8) Allocator.Error!bool {
+    const c = glmCall(a, block, null, true) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Invalid => return false,
+    };
+    return c != null;
+}
+
+/// A call ``glm_rescue`` read again: values as written, decoded as ``glmCall`` decodes them.
+fn depthCall(a: Allocator, text: []const u8, d: glm_rescue.Call, schemas: *const tool_params.Schemas) Allocator.Error!Call {
+    const name = strip(text[d.name.start..d.name.end]);
+    const arguments = try json.newObject(a);
+    for (d.pairs) |p| {
+        const key = strip(text[p.key.start..p.key.end]);
+        try arguments.put(a, key, try tool_params.decode(a, text[p.value.start..p.value.end], try tool_params.schemaOf(schemas, name, key, a), false));
+    }
+    return .{ .name = name, .arguments = .{ .object = arguments } };
 }
 
 /// ``parse_tool_calls_from_content``: the reply's content and its calls (null when it makes none).
 pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?usize) Allocator.Error!Parsed {
+    return parseWith(a, text, tools, max_calls, .{});
+}
+
+/// ``rescue = false`` reads every block as the first closer ends it (the tests' reference for what did not change).
+pub const Options = struct { rescue: bool = true };
+
+pub fn parseWith(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?usize, opts: Options) Allocator.Error!Parsed {
     if (tools.len == 0) return .{ .content = text, .calls = null };
     var known: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
     for (tools) |tool| {
@@ -110,7 +158,7 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
     }
     if (try bareCalls(a, text, &known, max_calls)) |calls| return .{ .content = "", .calls = calls };
     const schemas = try tool_params.schemas(a, tools);
-    const envs = try envelopes(a, text);
+    const envs = try envelopes(a, text, opts.rescue);
     if (envs.len == 0) return .{ .content = text, .calls = null };
     var calls: std.ArrayList(Value) = .empty;
     var residue: std.ArrayList(u8) = .empty;
@@ -124,7 +172,14 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
         }
         if (max_calls) |m| if (calls.items.len >= m) continue;
         const parsed: ?[]Call = blk: {
-            if (std.mem.startsWith(u8, env.payload, dsml_open)) {
+            if (env.depth) |d| {
+                const list = try a.alloc(Call, 1);
+                list[0] = try depthCall(a, text, d, &schemas);
+                break :blk list;
+            }
+            // a payload shorter than DSML's opener and closer together is no DSML block (its slice would start past its
+            // end: a panic in the server's safety-checked build), so it reads as any other block (mia-lab 0053)
+            if (std.mem.startsWith(u8, env.payload, dsml_open) and env.payload.len >= dsml_open.len + dsml_close.len) {
                 const inner = env.payload[dsml_open.len .. env.payload.len - dsml_close.len];
                 break :blk dsmlCalls(a, inner) catch |e| switch (e) {
                     error.OutOfMemory => return error.OutOfMemory,

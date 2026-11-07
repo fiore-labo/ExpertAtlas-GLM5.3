@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! The sandboxed environment's getattr and getitem, Python slicing, iteration and `in`.
 const std = @import("std");
 const v = @import("value.zig");
@@ -72,7 +73,7 @@ fn attribute(rt: *Rt, obj: Value, name: []const u8) Error!?Value {
 
 fn loopAttr(rt: *Rt, l: *v.Loop, name: []const u8) Error!?Value {
     const i: i64 = @intCast(l.index0);
-    const n: i64 = @intCast(l.items.len);
+    const n: i64 = @intCast(l.len());
     const eq = std.mem.eql;
     if (eq(u8, name, "index0")) return .{ .int = i };
     if (eq(u8, name, "index")) return .{ .int = i + 1 };
@@ -83,8 +84,8 @@ fn loopAttr(rt: *Rt, l: *v.Loop, name: []const u8) Error!?Value {
     if (eq(u8, name, "length")) return .{ .int = n };
     if (eq(u8, name, "depth")) return .{ .int = 1 };
     if (eq(u8, name, "depth0")) return .{ .int = 0 };
-    if (eq(u8, name, "previtem")) return if (i > 0) l.items[l.index0 - 1] else try rt.undef("there is no previous item", .{});
-    if (eq(u8, name, "nextitem")) return if (i + 1 < n) l.items[l.index0 + 1] else try rt.undef("there is no next item", .{});
+    if (eq(u8, name, "previtem")) return if (i > 0) l.item(l.index0 - 1) else try rt.undef("there is no previous item", .{});
+    if (eq(u8, name, "nextitem")) return if (i + 1 < n) l.item(l.index0 + 1) else try rt.undef("there is no next item", .{});
     if (eq(u8, name, "cycle") or eq(u8, name, "changed")) return try method(rt, .{ .loop = l }, name);
     return null;
 }

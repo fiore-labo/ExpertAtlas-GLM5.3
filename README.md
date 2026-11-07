@@ -59,6 +59,21 @@ sit together at the top level.
   speed, cache hits and draft acceptance while a request runs. `METRICS_LISTEN` serves the two read-only on an address
   of their own, for a monitor on another host.
 
+## New in r3.3.2-102
+
+- **Fixed:** GLM tool calls with `</arg_value>` or `</tool_call>` in a value (code, or a text that shows a tool call)
+  are read whole: one call runs and nothing leaks into the text, where before the value was cut and an example inside
+  it could run. A tool-call block that opens with DSML's tag but is too short no longer makes the server panic and
+  take the engine down. Rendering the chat template for a long conversation of tool results no longer takes memory
+  growing with its square: 3,000 turns took 738 MB and now take 85 MB.
+- **A faster start:** every rank starts at once and the engine's ready is seen within a second; on the switch's eight
+  nodes the whole start went from 115 s to 86 s.
+- **DFlash2's defaults:** with `MULTI`, a window of 4 rows for a conversation beside others, from two conversations
+  (+12 % for four conversations writing prose on eight nodes, 2 % slower for code on four), and a confidence of 0.6.
+  MTP, the default drafter, ran faster than either in the same measurement (73.1 tok/s).
+  `TF_GLM53_MULTI_DRAFT_ROWS=8 TF_GLM53_DFLASH_CONF=0.4` in `EXTRA_ENV` brings the earlier behaviour back.
+- Nothing to change from r3.3.1-102: the weights and the settings are the same.
+
 ## New in r3.3.1-102
 
 - **The engine rests while it has nothing to do.** After a second with nothing to do (`TF_GLM53_IDLE_PARK_MS` in
@@ -223,7 +238,7 @@ The release comes as a container image and as an archive with the same files; th
 the weights in place, one line on the first node starts the engine:
 
 ```sh
-docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.1-102 up
+docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.2-102 up
 ```
 
 It ends in `READY` with the addresses: the API at `http://FIRST-NODE:8000/v1` and the control panel at
@@ -233,7 +248,7 @@ It ends in `READY` with the addresses: the API at `http://FIRST-NODE:8000/v1` an
 To the same end by hand, with the image: `docker pull` it on every node, run
 `mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out`, and set
 `RUNTIME=docker` and `IMAGE` in `glm53.conf` ([packaging/RUNTIME.md](packaging/RUNTIME.md), "Running in containers").
-Without Docker: download the release archive `tensorfold-r3.3.1-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
+Without Docker: download the release archive `tensorfold-r3.3.2-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
 ([packaging/RUNTIME.md](packaging/RUNTIME.md) here). Either way, copy `glm53.conf.example` (eight nodes) or
 `glm53.t4.conf.example` (four nodes, see [glm53/release/T4.md](glm53/release/T4.md)) to `glm53.conf`, fill in what it
 asks for, then `./tf-glm53 deploy` and `./tf-glm53 up`, which starts the control panel, and start the engine there.
@@ -304,7 +319,7 @@ libibverbs headers (`libibverbs-dev`):
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so
-zig build dist -Dversion=r3.3.1-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.3.2-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 
