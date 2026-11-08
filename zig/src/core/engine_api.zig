@@ -274,6 +274,9 @@ pub const Info = struct {
     /// The engine observes loop_guard requests in its lane stream.
     loop_guard: bool = false,
     structures: bool = false,
+    /// Fiore-lab: the engine runs deterministic (TF_GLM53_DETERMINISTIC): the same requests in the same order give the
+    /// same tokens after every start. /health and each reply say so.
+    deterministic: bool = false,
     /// Prompt rows a prefill chunk at most, for the server's chunk starts (0: the engine cuts prompts itself).
     prefill_step: u32 = 0,
     /// A line the server prints once at startup (the engine's memory plan); empty: none.

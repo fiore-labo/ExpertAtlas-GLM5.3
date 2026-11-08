@@ -1,6 +1,6 @@
 [English](AI-GUIDE.md) | 日本語 | [简体中文](AI-GUIDE.zh-CN.md)
 
-# AI アシスタント向けガイド: DGX Spark で動かすフルサイズの GLM-5.3（リリース r3.3.3-102）
+# AI アシスタント向けガイド: DGX Spark で動かすフルサイズの GLM-5.3（リリース r3.3.4-102）
 
 このページは、システム全体を 1 か所にまとめたものです: これが何か、各部分が何をするか、どう使うか、何ができて何ができないか。利用者がこのリリースを理解する、インストールする、動かす、不具合を切り分けるのを手伝う AI アシスタント向けに書いていますが、人が読んでも同じ内容です。数値は他のページから取っています。詳細はそれらのページにあり、このページより詳しく書いています: `QUICKSTART.ja.md`（初めての起動）、`BEFORE-START.ja.md`（起動前に決めること）、`RUNTIME.ja.md`（動かし方。4 台と 8 台の両方）、`CONFIG.ja.md`（全設定）、`T4.ja.md`（4 台）、`RING.ja.md`（リングにつないだ 4 台）、`PANEL-GUIDE.ja.md`（コントロールパネルの画面）、`AGENT-API.ja.md`（ダッシュボードを使わない操作 API）、`ATLAS-TESTS.ja.md`（expert の並べ替えの測定）。ソースのリポジトリでは `RUNTIME.md` は `packaging/RUNTIME.md` で、ほかは `glm53/release/` にあります。どのページにも英語版（`.md`）と簡体字中国語版（`.zh-CN.md`）があります。
 
@@ -131,6 +131,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 | `TF_GLM53_BYTE_RESUME` | Byte Resume: `on`、`log`、`off` | `on` |
 | `ROCE_PROXY_CORES` | RoCE プロキシのスレッドがポーリングするコア: `a725`、`os` | `a725` |
 | `STRUCTURED` | 構造化出力（返事を JSON か JSON Schema に保つ）: `1` でオン、`0` でオフ | `1` |
+| `DETERMINISTIC` | 同じ要求を同じ順に送れば、起動し直しても同じ token: `1` でオン（`MULTI=0`、`CONTEXT_LENGTH` と `KV_SIZE` は設定のとおり）、`0` でオフ | `0` |
 | `EXTRA_ENV` | エンジンの変数（`TF_GLM53_MULTI` はここでなく `MULTI`） | 空 |
 | `LAUNCHER_HOST`、`LAUNCHER_PORT`、`ATLAS_DIR`、`RESERVE_GB` | コントロールパネル: アドレス、ポート、保存した配分の置き場所、OS に残すメモリ | 4 台の例: `0.0.0.0`、8010、`atlas/`、4 |
 
@@ -183,6 +184,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 - 応答の `message.reasoning_content` にモデルの推論、`message.content` に答えが入ります。`max_tokens` は両方を数えます。`chat_template_kwargs` は `{"enable_thinking": false}`（推論なし）と `reasoning_effort` を受け付けます。リクエスト自身の `thinking_budget`、`thinking_fold`、`thinking_fold_at_budget`、`thinking_fold_margin`、`thinking_fold_at_close`（トークン単位）は設定より優先します。`reasoning_details` は、context が持っている思考を次のターンのために運びます。
 - 400 で断るもの: 1 以外の `n`、`logprobs`、`guided_regex`・`guided_choice`・`guided_grammar`、`tool_choice` の `required` か名前を指定したツール、chat API での画像（`/v1/messages` では画像は注記になります。テキストのみ）、中間整理も予算の終わりの整理もオフのときに context の残りを超える `max_tokens` (中間整理がオンのときの条件は `CONFIG.ja.md` の `MAX_TOKENS`)。収まらないストリーミングのリクエストはエラーイベントで終わります。
 - 構造化出力（`FEATURES.ja.md` の「構造化出力」）: `response_format` の `json_object` か `json_schema`（vLLM の `guided_json` と `structured_outputs` も。`/v1/responses` では `text.format`、`/v1/messages` では `output_config.format`）で、答えを JSON のオブジェクトかスキーマに保ちます。思考あり（chat API の既定）では `max_tokens` が 545 以上要ります。400 で断るもの: `tools` と一緒、`stop` の文字列や `ignore_eos`、`MULTI`、文法が書いてあるより緩くしか守れないスキーマ（一覧は FEATURES）。drafter なしで decode します。`STRUCTURED=0` でオフです。
+- `DETERMINISTIC=1`（`FEATURES.ja.md` の「同じ答えを出すモード」）では、同じ要求を同じ順に送れば、起動し直しても温度によらず同じ token になります（`seed` のない要求は prompt から seed を決めます）。`/health` と各返事の `tensorfold` は `"deterministic": true` です。`tensorfold.token_sha` は返事の token のハッシュです。
 - 接続を切ったクライアントのリクエストは取り消されます。
 - キーはありません: API は既定で全アドレス（`HOST=0.0.0.0`）で待ち受けるので、届く人なら誰でも使えます（`HOST=127.0.0.1` にすると 1 台目のノードからだけになります）。サーバーは平文の HTTP なので、閉じたネットワーク内に留めるか前段に TLS とアクセス制御を置かない限り、文章は平文でネットワークを流れます。
 - カウンタからの速さ: decode の tokens/s = Δ`completion_tokens_total` / Δ`decode_seconds_total`、prefill の tokens/s = Δ`prefill_tokens_total` / Δ`prefill_seconds_total`、ドラフトのラウンドあたりに進んだトークン = Δ`completion_tokens_total` / Δ`rounds_total`（1 ならドラフトは 1 つも残っていない）、キャッシュのヒット率 = Δ`cached_tokens_total` / Δ`prompt_tokens_total`。カウンタは実行中のリクエストの分も含み、後戻りしません。
@@ -217,6 +219,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 - **精度**（公式の BF16 モデルを公式実装で FP32 計算したものからの KL ダイバージェンス）: 8 台で 2,048 トークンの文章で約 0.013（最も確率の高いトークンの一致は約 96 %）、8,192 トークンの文章で 0.012〜0.019。4 台では同じ文章で 0.019〜0.032。routed expert をすべて 1 つの幅にしたとき（位置 6,144〜8,190）: 2 ビット 0.0517、3 ビット 0.0203、4 ビット 0.0127、5 ビット 0.0114。
 - **ツールとストリーミング**: OpenAI 形式の関数呼び出しと、推論の差分つきのストリーミング応答。
 - **構造化出力**: 返事を JSON のオブジェクトか JSON Schema に保ちます。思考ありでも、なしでも。
+- **同じ答え**（`DETERMINISTIC=1`）: 2 回の起動で、8 台でも 4 台でも 23 の要求の token が 23 本とも同じでした。prefill は約 2 割遅く、decode はほぼ同じです。
 
 ## 10. できないこと
 
@@ -224,7 +227,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 - 既定でリクエストを並列に処理すること: 同時に実行するのは 1 件で、32 件まで待ち（チャットのタイトル作成と `"priority": "background"` のリクエストは最後）、それを超えると 503「the engine is busy; retry shortly」で断ります。サブエージェントを並列に動かすエージェントは、サブエージェントを別のモデルに向けた方がうまくいきます。`MULTI=4` を設定すると最大 4 つの会話を保ったまままとめて decode します（MTP 層、DFlash2、drafter なしのどれでも。3 台ではまだ使えません）。ノードのメモリを使い、既定では無効です。
 - リクエストの実行中に expert の幅を変えること（並べ替えはリクエストの終わりを待ちます）、起動後に KV キャッシュを増やすこと（起動時に確保します）。
 - 画像を読むこと（chat API は断り、`/v1/messages` は注記に変えます）、1 より大きい `n`、`logprobs`、ツール呼び出しの強制（`tool_choice` の `required` か名前を指定したツール）を受け付けること。構造化出力は JSON のオブジェクトと JSON Schema だけで（正規表現・選択肢・文法はなし）、ツールと一緒のときと `MULTI` では使えません。
-- 提供している設定で、temperature 0 の応答が実行ごとにビット単位で同じになると約束すること: いくつかのカーネルの足し合わせの順序が変わります（精度の測定には、採点用に作った決定的な設定を使っています）。
+- 既定の設定で、起動し直しても同じ返事を返すこと: カーネルのタイルを起動ごとに計り、いくつかの和は届いた順に足します。`DETERMINISTIC=1` なら、ツール呼び出しの id を除いて同じ返事になります（会話は 1 つずつ、prefill は約 2 割遅い）。（精度の測定には、採点用に作った決定的な設定を使っています。）
 - DFlash2 を同梱すること: 独自のライセンス（CC BY-NC-ND 4.0、非商用、研究と評価用）のもとで別にダウンロードします。使い方がそのライセンスの範囲かどうかは、運用する人が判断します。
 
 ## 11. 不具合の切り分け
@@ -253,6 +256,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 
 - `max_tokens` は推論のトークンも数えます。指定しないリクエストには `CONTEXT_LENGTH` の 70 % が使われます。思考の上限が残りを答えのために取っておくので、`max_tokens` が小さいと答えが短くなります。`THINKING_SHARE=0` では、応答が推論の途中で終わることがあります。
 - 思考ありの構造化のリクエストは `max_tokens` が 545 以上要ります（それより小さいと 400）。短い返事なら思考を切ってください（`chat_template_kwargs` の `{"enable_thinking": false}`）。`max_tokens` で切れた返事の JSON は終わっていません（`finish_reason` が `length`）。
+- `DETERMINISTIC=1` は `MULTI` を断り、空きメモリに合わせて context を縮めません。`CONTEXT_LENGTH` と `KV_SIZE` が収まらない起動は止まるので、値を下げてください。
 - エンジンの起動時の行は、drafter にかかわらず `drafts: on` と表示します。使っている drafter は `tf-glm53 status` が示します。
 - どの起動にも Base の重み（または完全なチェックポイント）と 3 ビットのバンクが要ります。
 - 並べ替えの測定は、BF16 モデルではなく、すべて 4 ビットのモデルに対するものです。`ATLAS-TESTS.ja.md` にどちらかを書いています。

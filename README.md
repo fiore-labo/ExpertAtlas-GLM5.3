@@ -57,9 +57,22 @@ sit together at the top level.
   per request or while the engine runs.
 - Structured output: a reply's answer held to JSON or to a JSON Schema (`response_format`), with the thinking on or
   off.
+- Same answers on request (`DETERMINISTIC=1`): the same requests in the same order give the same tokens after every
+  start.
 - `/metrics` (Prometheus text) and `/health` count the running request too, so a monitor reads prefill and decode
   speed, cache hits and draft acceptance while a request runs. `METRICS_LISTEN` serves the two read-only on an address
   of their own, for a monitor on another host.
+
+## New in r3.3.4-102
+
+- **Same answers (`DETERMINISTIC=1`, off by default).** On the same release, nodes and settings, the same requests sent
+  in the same order from a start give the same tokens after every start, at any temperature (a request without a
+  `seed` takes one from its prompt). The EXL3 linears take fixed tiles instead of timed ones, the prompt experts add
+  their slots in a fixed order, and the ranks compare their settings at the start. It runs one conversation at a time
+  (`MULTI=0`) and takes the context length and the KV size as set; prefill is about 20 % slower, decode about the same
+  ([FEATURES](glm53/release/FEATURES.md#14-same-answers-deterministic-mode)).
+- **Fixed:** cuBLAS uses the work area set aside for it, which it did not before. Twelve short prompts gave the same
+  tokens as on r3.3.3-102.
 
 ## New in r3.3.3-102
 
@@ -251,7 +264,7 @@ The release comes as a container image and as an archive with the same files; th
 the weights in place, one line on the first node starts the engine:
 
 ```sh
-docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.3-102 up
+docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.4-102 up
 ```
 
 It ends in `READY` with the addresses: the API at `http://FIRST-NODE:8000/v1` and the control panel at
@@ -261,7 +274,7 @@ It ends in `READY` with the addresses: the API at `http://FIRST-NODE:8000/v1` an
 To the same end by hand, with the image: `docker pull` it on every node, run
 `mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out`, and set
 `RUNTIME=docker` and `IMAGE` in `glm53.conf` ([packaging/RUNTIME.md](packaging/RUNTIME.md), "Running in containers").
-Without Docker: download the release archive `tensorfold-r3.3.3-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
+Without Docker: download the release archive `tensorfold-r3.3.4-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
 ([packaging/RUNTIME.md](packaging/RUNTIME.md) here). Either way, copy `glm53.conf.example` (eight nodes) or
 `glm53.t4.conf.example` (four nodes, see [glm53/release/T4.md](glm53/release/T4.md)) to `glm53.conf`, fill in what it
 asks for, then `./tf-glm53 deploy` and `./tf-glm53 up`, which starts the control panel, and start the engine there.
@@ -333,7 +346,7 @@ libibverbs headers (`libibverbs-dev`) and Rust 1.95.0 through rustup (`rustup to
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so, lib/libllguidance.so
-zig build dist -Dversion=r3.3.3-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.3.4-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 

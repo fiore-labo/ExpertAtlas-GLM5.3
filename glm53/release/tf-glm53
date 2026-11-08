@@ -96,6 +96,7 @@ KV=${KV:-fp8}              # the KV cache's format: fp8, or fp4 (four nodes)
 DRAFT_SAVES=${DRAFT_SAVES:-8}  # pool with DFlash2: the conversations whose drafter state is kept
 EXPERT_LIVE=${EXPERT_LIVE:-1}  # 1: rank 0 counts the experts each row picks, for the control panel (a start from the panel always does); 0: not
 STRUCTURED=${STRUCTURED:-1}    # 1: structured output (response_format json_object / json_schema; rank 0 loads lib/libllguidance.so); 0: such requests get 400
+DETERMINISTIC=${DETERMINISTIC:-0}  # 1: the same requests in the same order give the same tokens after every start (same release, nodes and settings; KV_SIZE and CONTEXT_LENGTH as set, MULTI=0); 0: the faster default
 LOG_LISTEN=${LOG_LISTEN:-}      # HOST:PORT: each node's log keeper also answers GET /streams and /logs there, read-only (a monitor)
 LOG_KEEP_MB=${LOG_KEEP_MB:-8}   # the MB each log (each rank's, the watcher's, the launcher's) keeps in memory
 ROWS=${ROWS:-8192}
@@ -274,6 +275,18 @@ for v in $EXTRA_ENV $LAUNCH_ENV; do
     case "${1:-}" in up|check|smoke|launcher) exit 2 ;; esac ;;
   esac
 done
+# DETERMINISTIC=1: nothing that varies by start or by arrival (the engine refuses those settings too)
+case $DETERMINISTIC in 0|1) ;; *) echo "DETERMINISTIC must be 0 or 1"; exit 2 ;; esac
+if [ "$DETERMINISTIC" = 1 ]; then
+  [ "$MULTI" -eq 0 ] || { echo "DETERMINISTIC=1 takes MULTI=0 (concurrent conversations are batched as they arrive)"; exit 2; }
+  for v in $EXTRA_ENV $LAUNCH_ENV; do
+    case ${v%%=*} in
+      TF_GLM53_TUNE|TF_GLM53_PE_F16|TF_GLM53_DETERMINISTIC|TF_EXL3_PROMPT_EXPERTS|NCCL_ALGO|NCCL_PROTO|NCCL_PAT_ENABLE|\
+      NCCL_NVLS_ENABLE|NCCL_MIN_NCHANNELS|NCCL_MAX_NCHANNELS)
+        echo "DETERMINISTIC=1: ${v%%=*} in EXTRA_ENV / LAUNCH_ENV would change what makes the replies repeat"; exit 2 ;;
+    esac
+  done
+fi
 if [ "$MULTI" -gt 0 ]; then
   [ "$CACHE" = pool ] || { echo "MULTI=$MULTI needs CACHE=pool"; exit 2; }
   [ "$WORLD" -ne 3 ] || { echo "MULTI=$MULTI is not offered on 3 nodes yet"; exit 2; }
@@ -350,6 +363,8 @@ rank_env() {
     e="$e NCCL_PROTO=Simple TF_GLM53_TOPOLOGY=ring4 B12X_ROCE_HCA=$IB_HCA B12X_ROCE_GID_INDEX=-1"
   else
     e="$e NCCL_IB_GID_INDEX=$gid NCCL_PROTO=Simple NCCL_MAX_NCHANNELS=2"
+    # DETERMINISTIC=1: NCCL's algorithm and channel count pinned as on the ring (the switch leaves them to NCCL)
+    [ "$DETERMINISTIC" = 1 ] && e="$e NCCL_ALGO=Ring NCCL_PAT_ENABLE=0 NCCL_NVLS_ENABLE=0 NCCL_MIN_NCHANNELS=2"
   fi
   e="$e NCCL_DEBUG=WARN TF_GLM53_RANK=$r TF_GLM53_WORLD=$WORLD"
   e="$e TF_GLM53_MASTER=${NODES[0]}:$MASTER_PORT TF_GLM53_STORED_WORLD=8 TF_GLM53_KV=$KV TF_GLM53_DCP=$DCP"
@@ -364,6 +379,7 @@ rank_env() {
   esac
   [ "$EXPERT_LIVE" = 1 ] && e="$e TF_GLM53_EXPERT_LIVE=1"
   [ "$STRUCTURED" = 1 ] && e="$e TF_GLM53_STRUCTURED=1 TF_GRAMMAR_LIB=$RUN_PKG/lib/libllguidance.so"
+  [ "$DETERMINISTIC" = 1 ] && e="$e TF_GLM53_DETERMINISTIC=1 TF_GLM53_TUNE=0"
   # the panel's entrance is the launcher: rank 0's own /panel sends the browser there, when the launcher runs and
   # listens on every address (the engine's counts are read by the launcher from inside the node)
   if [ "$r" -eq 0 ] && [ -n "$(launcher_pid)" ]; then

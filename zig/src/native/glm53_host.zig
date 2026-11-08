@@ -2874,6 +2874,85 @@ fn buildIdentity(gpa: std.mem.Allocator, io: std.Io) ![]u8 {
     return std.fmt.allocPrint(gpa, "{x}", .{d});
 }
 
+/// Fiore-lab: `base` (buildIdentity) with what a deterministic start also needs equal on every rank: the NCCL_*
+/// settings, the CUDA, cuBLAS, NCCL and RoCE proxy libraries mapped (path and size, from /proc/self/maps: a node's
+/// install time would differ where the files are the same) and the tiles of every tuned linear (Engine.tilesDigest).
+/// Said once in the log.
+/// Fiore-lab: `base` (buildIdentity) に、deterministic の起動で全ランクに同じであるべきものを足す: NCCL_* の設定、
+/// 読み込んだ CUDA・cuBLAS・NCCL・RoCE proxy のライブラリ (/proc/self/maps からパスと大きさ。同じファイルでも入れた時刻は
+/// ノードで違いうる)、調整の対象の
+/// linear すべてのタイル (Engine.tilesDigest)。ログに一度出す。
+fn detIdentity(gpa: std.mem.Allocator, io: std.Io, e: *const glm.engine.Engine, base: []const u8, rank: u32) ![]u8 {
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    h.update(base);
+    var vars: std.ArrayList([]const u8) = .empty;
+    defer vars.deinit(gpa);
+    var i: usize = 0;
+    while (std.c.environ[i]) |kv0| : (i += 1) {
+        const kv = std.mem.span(kv0);
+        // NCCL_IB_GID_INDEX names a node's own address (tf-glm53 finds it a node); it changes no sum
+        // NCCL_IB_GID_INDEX はノード自身のアドレスを指す (tf-glm53 がノードごとに見つける)。和は変えない
+        if (std.mem.startsWith(u8, kv, "NCCL_") and !std.mem.startsWith(u8, kv, "NCCL_IB_GID_INDEX=")) try vars.append(gpa, kv);
+    }
+    const lt = struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lt;
+    std.mem.sort([]const u8, vars.items, {}, lt);
+    for (vars.items) |v| {
+        h.update(v);
+        h.update("\n");
+    }
+    // read as a stream: /proc reports a size of 0, so a read of the stated size gets nothing
+    // ストリームとして読む: /proc は大きさを 0 と言うので、その大きさだけ読むと何も得られない
+    var mf = try std.Io.Dir.cwd().openFile(io, "/proc/self/maps", .{});
+    defer mf.close(io);
+    var mbuf: [4096]u8 = undefined;
+    var mr = mf.readerStreaming(io, &mbuf);
+    const maps = try mr.interface.allocRemaining(gpa, .limited(1 << 26));
+    defer gpa.free(maps);
+    var libs: std.ArrayList([]const u8) = .empty;
+    defer libs.deinit(gpa);
+    var lines = std.mem.splitScalar(u8, maps, '\n');
+    while (lines.next()) |line| {
+        const at = std.mem.indexOfScalar(u8, line, '/') orelse continue;
+        const path = line[at..];
+        const name = std.fs.path.basename(path);
+        const wanted = for ([_][]const u8{ "libcublas", "libnccl", "libcudart", "libcuda.so", "libroce_proxy" }) |w| {
+            if (std.mem.startsWith(u8, name, w)) break true;
+        } else false;
+        if (!wanted) continue;
+        if (for (libs.items) |x| {
+            if (std.mem.eql(u8, x, path)) break true;
+        } else false) continue;
+        try libs.append(gpa, path);
+    }
+    std.mem.sort([]const u8, libs.items, {}, lt);
+    // the libraries' part alone too, so that the log tells which part differs when the ranks disagree
+    // ライブラリの分だけのハッシュも取る。ランクが一致しない時、どの部分が違うかをログで分かるように
+    var hl = std.crypto.hash.sha2.Sha256.init(.{});
+    for (libs.items) |path| {
+        const st = std.Io.Dir.cwd().statFile(io, path, .{}) catch |err| {
+            std.log.err("glm53: deterministic: cannot stat {s} ({s})", .{ path, @errorName(err) });
+            return err;
+        };
+        const w = [_]u64{st.size};
+        for ([_]*std.crypto.hash.sha2.Sha256{ &h, &hl }) |x| {
+            x.update(path);
+            x.update(std.mem.sliceAsBytes(&w));
+        }
+    }
+    var dl: [32]u8 = undefined;
+    hl.final(&dl);
+    const tiles = try e.tilesDigest();
+    h.update(&tiles);
+    var d: [32]u8 = undefined;
+    h.final(&d);
+    std.log.info("glm53: rank {d}: deterministic: plan tiles {x}, {d} NCCL settings, {d} libraries {x} compared across the ranks", .{ rank, tiles[0..4], vars.items.len, libs.items.len, dl[0..4] });
+    return std.fmt.allocPrint(gpa, "{s} det {x}", .{ base, d });
+}
+
 fn envOr(name: [:0]const u8, default: []const u8) []const u8 {
     return if (std.c.getenv(name)) |v| std.mem.span(v) else default;
 }
@@ -3015,8 +3094,13 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: usize) !*Host {
     // 全ランクのチェックポイント・実行ファイル・エンジンの env を prewarm の前に比べる。設定の違うランクがあると
     // prewarm の collective 通信が止まるため
     h.ch = glm.lockstep.Channel.init(gpa, h.eng);
-    const ident0 = try buildIdentity(gpa, io);
+    const ident_base = try buildIdentity(gpa, io);
+    defer gpa.free(ident_base);
+    // Fiore-lab: a deterministic start also needs NCCL's settings, the libraries loaded and every linear's tiles equal
+    // Fiore-lab: deterministic の起動では、NCCL の設定・読み込んだライブラリ・linear すべてのタイルも同じであること
+    const ident0 = if (h.eng.deterministic) try detIdentity(gpa, io, h.eng, ident_base, rank) else try gpa.dupe(u8, ident_base);
     defer gpa.free(ident0);
+    h.info_.deterministic = h.eng.deterministic;
     // the expert plan's contents count too, not only its path (its banks' manifests were checked against it)
     // エキスパートの計画はパスだけでなく中身も比べる (バンクの manifest は計画と照らし済み)
     const ident = if (h.eng.plan) |p| try std.fmt.allocPrint(gpa, "{s} plan {x}", .{ ident0, p.digest }) else try gpa.dupe(u8, ident0);

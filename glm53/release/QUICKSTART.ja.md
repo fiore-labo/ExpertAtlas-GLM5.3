@@ -114,7 +114,7 @@ done
 docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 ```
 
-`IMAGE` はリリースのイメージ `ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.3-102` です。リリースを `~/expertatlas` に書き、ノード (リングかスイッチか) を見つけて確認し、ウェイトを探し、エンジンを起動して、1 回推論します。初回は数分かかります。
+`IMAGE` はリリースのイメージ `ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.4-102` です。リリースを `~/expertatlas` に書き、ノード (リングかスイッチか) を見つけて確認し、ウェイトを探し、エンジンを起動して、1 回推論します。初回は数分かかります。
 
 最後は次のどちらかになります。
 
@@ -176,7 +176,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
 | `MULTI`、`MULTI_WAIT` | `0`、`600` | 同時に推論する会話の数 (0〜4) と、要求がそれを待つ秒数 |
 | `RESERVE_GB` | `4` | 各ノードがシステムのために残すメモリ |
 
-エンジン設定の他の項目も、同じように指定できます。たとえば `MAX_TOKENS`、`THINKING_SHARE`、`THINKING_FOLD_PROMPT`、`NAME`、`HOST`、`STRUCTURED` (`0` で構造化出力をオフ) です。各項目の意味と、オプションにできない項目は `CONFIG.ja.md` にあります。そこの既定は `tf-glm53` のものなので、この行ではここの表の値が優先です。
+エンジン設定の他の項目も、同じように指定できます。たとえば `MAX_TOKENS`、`THINKING_SHARE`、`THINKING_FOLD_PROMPT`、`NAME`、`HOST`、`STRUCTURED` (`0` で構造化出力をオフ)、`DETERMINISTIC` (`1` で起動し直しても同じ答え) です。各項目の意味と、オプションにできない項目は `CONFIG.ja.md` にあります。そこの既定は `tf-glm53` のものなので、この行ではここの表の値が優先です。
 
 インストール:
 

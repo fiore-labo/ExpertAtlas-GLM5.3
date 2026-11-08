@@ -114,7 +114,7 @@ done
 docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 ```
 
-`IMAGE` 是发布的镜像 `ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.3-102`。这一行把发布内容写到 `~/expertatlas`，找到节点（环或交换机）并检查，查找权重，启动引擎并发送一次请求。首次启动需要几分钟。
+`IMAGE` 是发布的镜像 `ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.4-102`。这一行把发布内容写到 `~/expertatlas`，找到节点（环或交换机）并检查，查找权重，启动引擎并发送一次请求。首次启动需要几分钟。
 
 最后有两种结果。
 
@@ -176,7 +176,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host \
 | `MULTI`、`MULTI_WAIT` | `0`、`600` | 同时解码的对话数（0 至 4），以及请求等待它们的秒数 |
 | `RESERVE_GB` | `4` | 每个节点留给系统的内存 |
 
-引擎设置的其他项目也以同样方式指定，例如 `MAX_TOKENS`、`THINKING_SHARE`、`THINKING_FOLD_PROMPT`、`NAME`、`HOST`、`STRUCTURED`（`0` 关闭结构化输出）。每项的含义以及哪些项目不是选项，见 `CONFIG.zh-CN.md`。那里的默认值是 `tf-glm53` 的，对这一行以这里的表格为准。
+引擎设置的其他项目也以同样方式指定，例如 `MAX_TOKENS`、`THINKING_SHARE`、`THINKING_FOLD_PROMPT`、`NAME`、`HOST`、`STRUCTURED`（`0` 关闭结构化输出）、`DETERMINISTIC`（`1`：每次重新启动都给出相同的答案）。每项的含义以及哪些项目不是选项，见 `CONFIG.zh-CN.md`。那里的默认值是 `tf-glm53` 的，对这一行以这里的表格为准。
 
 安装：
 

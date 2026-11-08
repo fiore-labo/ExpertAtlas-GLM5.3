@@ -959,6 +959,7 @@ const Generation = struct {
         try runtime.put(a, "time_to_first_token", if (g.first_ns) |t| .{ .float = seconds(t - received) } else .null);
         try runtime.put(a, "sampling", .{ .string = if (exact) "exact" else "greedy" });
         try runtime.put(a, "drafts", .{ .bool = drafts });
+        try runtime.put(a, "deterministic", .{ .bool = g.srv.info.deterministic });
         const sha = tokenSha(g.collected.items);
         try runtime.put(a, "token_sha", .{ .string = try a.dupe(u8, &sha) });
         try runtime.put(a, "min_rows", try json.intValue(a, m.stats.min_rows));

@@ -39,6 +39,24 @@ fn linearsOf(L: *model.Layer, out: *std.ArrayList(*linear.Linear), gpa: std.mem.
 
 /// A layer's groups: the linears that can run as one launch.
 /// 層の組: 1 回の起動で走らせうる linear。
+/// Fiore-lab: every tuned linear's tiles (k, n, k2, cb, sk, wk) in layer order, hashed. The ranks of a deterministic
+/// start compare it: under plan() equal shapes give equal tiles.
+/// Fiore-lab: 調整の対象の linear すべてのタイル (k, n, k2, cb, sk, wk) を層の順にハッシュする。deterministic の起動で
+/// ランクどうしが比べる: plan() では同じ形なら同じタイル。
+pub fn tilesDigest(gpa: std.mem.Allocator, layers: []model.Layer) ![32]u8 {
+    var lins: std.ArrayList(*linear.Linear) = .empty;
+    defer lins.deinit(gpa);
+    for (layers) |*L| try linearsOf(L, &lins, gpa);
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    for (lins.items) |l| {
+        const w = [_]u32{ l.k, l.n, l.k2, l.cb, l.sk, l.wk };
+        h.update(std.mem.sliceAsBytes(&w));
+    }
+    var d: [32]u8 = undefined;
+    h.final(&d);
+    return d;
+}
+
 fn groupsOf(L: *model.Layer, out: *std.ArrayList([3]?*linear.Linear), gpa: std.mem.Allocator) !void {
     try out.append(gpa, .{ &L.q_a, &L.kv_a, null });
     try out.append(gpa, .{ &L.mlp.gate, &L.mlp.up, null });

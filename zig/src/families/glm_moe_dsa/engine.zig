@@ -64,6 +64,16 @@ const PromptCounts = struct { host: cuda.HostBuffer, start: cuda.Event, end: cud
 const prompt_counts_ring = 4;
 
 pub const Options = struct {
+    /// Fiore-lab: TF_GLM53_DETERMINISTIC=1: the same requests in the same order give the same tokens after every start:
+    /// the EXL3 linears on plan()'s tiles (never timed), prompt_experts' slots summed in slot order, no fp16 slot sums.
+    /// A setting that would undo that (det_conflict) stops the start.
+    /// Fiore-lab: TF_GLM53_DETERMINISTIC=1: 同じ要求を同じ順に流せば、どの起動でも同じ token: EXL3 の linear は plan() の
+    /// タイル (計時しない)、prompt_experts の slot は slot の順に足す、fp16 の slot の和は使わない。それを崩す設定
+    /// (det_conflict) があれば起動を止める。
+    deterministic: bool = false,
+    /// Fiore-lab: with deterministic, the setting in the way (null: none)
+    /// Fiore-lab: deterministic のとき、それを妨げる設定 (null: なし)
+    det_conflict: ?[]const u8 = null,
     // Fiore-lab: enabled on all ranks; only rank 0 receives the matcher hook.
     // Fiore-lab: 全 rank で有効化。matcher の hook は rank 0 だけ。
     structured: bool = false,
@@ -214,6 +224,17 @@ pub fn withEnv(o: Options) Options {
     r.topk_words = !std.mem.eql(u8, F.get("TF_GLM53_TOPK_WORDS") orelse "1", "0");
     r.topk_any = !std.mem.eql(u8, F.get("TF_GLM53_TOPK_ANY") orelse "1", "0");
     r.pe_f16 = !std.mem.eql(u8, F.get("TF_GLM53_PE_F16") orelse "1", "0");
+    r.deterministic = std.mem.eql(u8, F.get("TF_GLM53_DETERMINISTIC") orelse "0", "1");
+    if (r.deterministic) {
+        // Fiore-lab: nothing may bring back a choice that varies by start or by arrival
+        // Fiore-lab: 起動や到着で変わる選択を戻す設定は認めない
+        if (F.get("TF_GLM53_TUNE")) |v| if (!std.mem.eql(u8, v, "0")) {
+            r.det_conflict = "TF_GLM53_TUNE other than 0 (the EXL3 linears timed or read from a table)";
+        };
+        if (std.mem.eql(u8, F.get("TF_GLM53_PE_F16") orelse "0", "1")) r.det_conflict = "TF_GLM53_PE_F16=1 (fp16 slot sums by atomics)";
+        if (F.num("TF_GLM53_MULTI", 0) > 0) r.det_conflict = "TF_GLM53_MULTI above 0 (conversations batched as they arrive)";
+        r.pe_f16 = false;
+    }
     r.topk16 = !std.mem.eql(u8, F.get("TF_GLM53_TOPK16") orelse "1", "0");
     r.fuse = !std.mem.eql(u8, F.get("TF_GLM53_FUSE") orelse "1", "0");
     r.xgroup = !std.mem.eql(u8, F.get("TF_GLM53_XGROUP") orelse "1", "0");
@@ -614,6 +635,9 @@ pub const Engine = struct {
     pek: ?prompt_experts.Kernels = null,
     pes: prompt_experts.Scratch = undefined,
     pe_ok: []bool = &.{},
+    /// Fiore-lab: Options.deterministic, for the host and /health
+    /// Fiore-lab: Options.deterministic (host と /health のため)
+    deterministic: bool = false,
     ring: bool = false,
     topk_words: bool = true,
     topk_any: bool = true,
@@ -702,7 +726,17 @@ pub const Engine = struct {
     /// このランクの分担を読み込み (層ごとに、次の層の前にその層のファイルのページを返す)、バッファを用意する。
     /// `group` は全ランクが作った world の communicator。Engine は作られた場所に置いたままにする (forward の context が
     /// そこを指す)。
+    /// Fiore-lab: the tiles of every tuned linear, hashed (tune.tilesDigest), for the ranks' check of a deterministic start
+    /// Fiore-lab: 調整の対象の linear すべてのタイルのハッシュ (tune.tilesDigest)。deterministic の起動でランクが照らす
+    pub fn tilesDigest(e: *const Engine) ![32]u8 {
+        return tune.tilesDigest(e.gpa, e.layers);
+    }
+
     pub fn create(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, ctx: *const cuda.Context, group: *const cuda.tp.Group, o: Options) !*Engine {
+        if (o.det_conflict) |why| {
+            std.log.err("glm53: TF_GLM53_DETERMINISTIC=1 with {s}: refusing to start", .{why});
+            return error.DeterministicConflict;
+        }
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         const rank: u32 = @intCast(group.rank);
@@ -729,9 +763,13 @@ pub const Engine = struct {
         var handle: cuda.cublas.Handle = null;
         try blas.check(blas.api.cublasCreate_v2(&handle), "cublasCreate");
         const ws = try cuda.DeviceBuffer.alloc(d, cuda.cublas.torch_workspace);
-        try blas.check(blas.api.cublasSetWorkspace_v2(handle, ws.ptr, cuda.cublas.torch_workspace), "cublasSetWorkspace");
         const stream = try cuda.Stream.init(d, true);
+        // Fiore-lab: the stream first: cublasSetStream puts the handle back on cuBLAS's own workspace pool, so a
+        // workspace set before it would not hold (cuBLAS is used on this main stream only)
+        // Fiore-lab: stream を先に: cublasSetStream は handle を cuBLAS 自身の作業域の pool に戻すので、その前に置いた
+        // 作業域は効かない (cuBLAS はこの main ストリームでだけ使う)
         try blas.check(blas.api.cublasSetStream_v2(handle, stream.handle), "cublasSetStream");
+        try blas.check(blas.api.cublasSetWorkspace_v2(handle, ws.ptr, cuda.cublas.torch_workspace), "cublasSetWorkspace");
         memMark(ctx, rank, "cuBLAS workspace + stream", &mt);
 
         // TF_GLM53_LOAD_PROGRESS: every rank agrees after the plan's checks and after each layer (a failing rank stops
@@ -863,7 +901,9 @@ pub const Engine = struct {
         // TF_GLM53_TUNE (既定で有効): linear の形ごとに (K 分割数, warp 数) を計時で選び、次にグループを選ぶ。選んだ
         // タイルが split-K の作業領域の大きさを決めるので、バッファより先に行う
         const x3 = try exl3.Kernels.load(d);
-        const tmode = tune.modeFromEnv();
+        // Fiore-lab: deterministic: plan()'s tiles on every rank and start (shapes alone choose them)
+        // Fiore-lab: deterministic: どのランク・どの起動でも plan() のタイル (形だけで決まる)
+        const tmode: tune.Mode = if (o.deterministic) .plan else tune.modeFromEnv();
         const tr = try tune.run(gpa, io, d, &x3, stream, layers, tmode, rank);
         var zn: usize = forward.MAX_LIN_ROWS * 8 * 6144;
         // the MTP layer's linears keep plan()'s tiles (not tuned): its splits size the scratch too
@@ -1036,7 +1076,7 @@ pub const Engine = struct {
         memMark(ctx, rank, "DFlash2 drafter + taps", &mt);
         if (o.prompt_experts) if (first_moe) |fm| {
             e.pek = try prompt_experts.Kernels.load(d);
-            e.pes = try prompt_experts.Scratch.init(d, fm, @intCast(e.part_rows), @intCast(cfg.top_k));
+            e.pes = try prompt_experts.Scratch.init(d, fm, @intCast(e.part_rows), @intCast(cfg.top_k), o.deterministic);
             e.pe_ok = try gpa.alloc(bool, n);
             for (layers, 0..) |*L, i| e.pe_ok[i] = if (L.experts) |*x| try prompt_experts.supported(gpa, x) else false;
         };
@@ -1207,6 +1247,7 @@ pub const Engine = struct {
         e.xgroup = o.xgroup;
         e.topk_any = o.topk_any;
         e.pe_f16 = o.pe_f16;
+        e.deterministic = o.deterministic;
         e.topk16 = o.topk16;
         e.index_fp8 = o.index_fp8;
         e.peer_q = e.layers.len > 0 and e.layers[0].peer_q_b != null;

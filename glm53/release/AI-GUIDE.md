@@ -1,6 +1,6 @@
 English | [日本語](AI-GUIDE.ja.md) | [简体中文](AI-GUIDE.zh-CN.md)
 
-# A guide for AI assistants: full GLM-5.3 on DGX Spark (release r3.3.3-102)
+# A guide for AI assistants: full GLM-5.3 on DGX Spark (release r3.3.4-102)
 
 This page describes the whole system in one place: what it is, what each part does, how it is used, what it can do
 and what it cannot. It is written for AI assistants that help someone understand, install, run or troubleshoot this
@@ -208,6 +208,7 @@ details; the image can also be built from the archive with the fenced NCCL (`doc
 | `TF_GLM53_BYTE_RESUME` | Byte Resume: `on`, `log`, `off` | `on` |
 | `ROCE_PROXY_CORES` | the cores the RoCE proxy threads poll on: `a725`, `os` | `a725` |
 | `STRUCTURED` | structured output (a reply held to JSON or a JSON Schema): `1` on, `0` off | `1` |
+| `DETERMINISTIC` | the same tokens for the same requests in the same order after every start: `1` on (`MULTI=0`, `CONTEXT_LENGTH` and `KV_SIZE` as set), `0` off | `0` |
 | `EXTRA_ENV` | engine variables (not `TF_GLM53_MULTI`: that is `MULTI`) | empty |
 | `LAUNCHER_HOST`, `LAUNCHER_PORT`, `ATLAS_DIR`, `RESERVE_GB` | the control panel: its address, port, saved allocations, memory kept for the OS | four-node example: `0.0.0.0`, 8010, `atlas/`, 4 |
 
@@ -274,6 +275,9 @@ forever).
   at least 545. Refused with 400: beside `tools`, with `stop` strings or `ignore_eos`, with `MULTI`, and schemas the
   grammar would keep less strictly than they say (FEATURES lists them). It decodes without the drafter; `STRUCTURED=0`
   turns it off.
+- With `DETERMINISTIC=1` (`FEATURES.md`, "Same answers") the same requests in the same order give the same tokens
+  after every start, at any temperature (a request without a `seed` takes one from its prompt). `/health` and each
+  reply's `tensorfold` say `"deterministic": true`; `tensorfold.token_sha` is a hash of the reply's tokens.
 - A client that disconnects cancels its request.
 - No key: the API has none. By default it listens on every address (`HOST=0.0.0.0`), so anyone who can reach it can
   use it, and the server speaks plain HTTP, so text crosses the network in the clear unless the server stays on a
@@ -346,6 +350,8 @@ allocs/delete). `AGENT-API.md` gives what an agent needs of it; its fields may c
   3 bits 0.0203, 4 bits 0.0127, 5 bits 0.0114.
 - **Tools and streaming**: OpenAI-style function calls and streamed replies with reasoning deltas.
 - **Structured output**: replies held to a JSON object or a JSON Schema, with or without thinking.
+- **Same answers** (`DETERMINISTIC=1`): over two starts, 23 of 23 requests gave the same tokens on eight nodes and on
+  four; prefill about 20 % slower, decode about the same.
 
 ## 10. What it cannot do
 
@@ -361,8 +367,9 @@ allocs/delete). `AGENT-API.md` gives what an agent needs of it; its fields may c
 - Read images (the chat API refuses them, `/v1/messages` turns them into a note), or accept `n` > 1, `logprobs` or forced
   tool calls (`tool_choice` `required` or a named tool). Structured output takes a JSON object or a JSON Schema only (no
   regex, choice or grammar), not beside tools or with `MULTI`.
-- Promise bit-identical replies at temperature 0 from run to run in the served configuration: the summation order
-  of some kernels varies. (The accuracy measurements use a deterministic configuration made for scoring.)
+- Give the same replies from start to start by default: the kernels' tiles are timed at each start and some sums run
+  in arrival order. `DETERMINISTIC=1` gives them (one conversation at a time, prefill about 20 % slower), all but a
+  tool call's id. (The accuracy measurements use a deterministic configuration made for scoring.)
 - Include DFlash2: it is downloaded separately under its own licence (CC BY-NC-ND 4.0, non-commercial, research and
   evaluation); whether a use is covered is for its operator to judge.
 
@@ -398,6 +405,8 @@ Logs: in memory, in a log keeper on each node (`tools/logkeep.py`), nothing on d
 - A structured request with the thinking on needs `max_tokens` of at least 545 (400 below it): turn the thinking
   off (`chat_template_kwargs` `{"enable_thinking": false}`) for a short reply. A reply cut by `max_tokens` holds JSON
   not yet finished (`finish_reason` `length`).
+- `DETERMINISTIC=1` refuses `MULTI` and never cuts the context to the free memory: a start where `CONTEXT_LENGTH` and
+  `KV_SIZE` do not fit stops; lower them.
 - The engine's start-up line says `drafts: on` whatever the drafter; `tf-glm53 status` names the drafter in use.
 - Every start needs the Base weights (or a full checkpoint) and the 3-bit bank.
 - The re-sort's measurements are against the all-4-bit model, not the BF16 model; `ATLAS-TESTS.md` says which.

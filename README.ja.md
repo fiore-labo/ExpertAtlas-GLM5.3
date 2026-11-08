@@ -35,7 +35,13 @@
 - ラウンドごとにドラフトをモデルが検証します。ドラフトを作るのは、既定では GLM-5.3 自身の MTP 層、またはオプションの DFlash2 drafter です。どの場合も、応答はモデル自身が選んだものです。
 - 思考が長くなりすぎないようにします。上限は `max_tokens`（1 回の応答の上限）に対する割合で決め、長い思考は途中や終わりに整理できます。リクエストごとにも、エンジンの動作中にも設定できます。
 - 構造化出力: 返事の答えを JSON か JSON Schema に保ちます (`response_format`)。思考ありでも、なしでも使えます。
+- 同じ答えを出すモード (`DETERMINISTIC=1`): 同じ要求を同じ順に送れば、起動し直しても同じ token が返ります。
 - `/metrics`（Prometheus のテキスト）と `/health` は実行中のリクエストの分も数えるので、モニタはリクエストの実行中にも prefill と decode の速さ、キャッシュのヒット、ドラフトの受理を読めます。`METRICS_LISTEN` を設定すると、別のホストのモニタ向けに、この 2 つを専用のアドレスで読み取り専用で開きます。
+
+## r3.3.4-102 で変わったこと
+
+- **同じ答えを出すモード (`DETERMINISTIC=1`、既定でオフ):** 同じ版・同じノード・同じ設定なら、起動してから同じ要求を同じ順に送れば、起動し直しても温度によらず同じ token が返ります (`seed` のない要求は prompt から seed を決めます)。EXL3 の linear は計ったタイルでなく決まったタイルを使い、prompt の expert は slot を決まった順に足し、起動のときに全ランクが設定を照らし合わせます。会話は 1 つずつ (`MULTI=0`) で、context length と KV サイズは設定のとおりに使います。prefill は約 2 割遅く、decode はほぼ同じです ([FEATURES](glm53/release/FEATURES.ja.md#14-同じ答えを出すモード))。
+- **修正:** cuBLAS が、そのために取ってある作業域を使うようになりました (これまでは使っていませんでした)。短い 12 の prompt は r3.3.3-102 と同じ token でした。
 
 ## r3.3.3-102 で変わったこと
 
@@ -150,12 +156,12 @@ Fiore-lab のものと形が同じで、同じように読み込まれます。
 リリースは、コンテナイメージと、同じファイルを持つアーカイブの 2 つの形で配布します。おすすめはイメージです。重みを置いてあれば、1 台目のノードで次の 1 行を実行するとエンジンが起動します。
 
 ```sh
-docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.3-102 up
+docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.4-102 up
 ```
 
 最後に `READY` とアドレスが出ます。API は `http://FIRST-NODE:8000/v1`、コントロールパネルは `http://FIRST-NODE:8010/panel` です。足りないものがあると `STOP` で止まり、することと次に実行する行を示します。手順と全オプションは [QUICKSTART](glm53/release/QUICKSTART.ja.md) にあります。
 
-同じことを手で行う場合、イメージなら、全ノードで `docker pull` し、`mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out` を実行して、`glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定します（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3.3.3-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。どちらも、`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーして必要な項目を記入し、`./tf-glm53 deploy` と `./tf-glm53 up`（コントロールパネルを起動します）を実行して、パネルでエンジンを起動します。`./tf-glm53 start` は直前の起動の計画で起動し、`./tf-glm53 down` で停止します。
+同じことを手で行う場合、イメージなら、全ノードで `docker pull` し、`mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out` を実行して、`glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定します（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3.3.4-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。どちらも、`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーして必要な項目を記入し、`./tf-glm53 deploy` と `./tf-glm53 up`（コントロールパネルを起動します）を実行して、パネルでエンジンを起動します。`./tf-glm53 start` は直前の起動の計画で起動し、`./tf-glm53 down` で停止します。
 
 サーバーは既定で全アドレス（`HOST=0.0.0.0`）で OpenAI chat API と、Claude Code 向けの Anthropic Messages API を提供します。API にもコントロールパネルにもキーはないので、届く人なら誰でも使えます。ノードを閉じたネットワーク内に留めるか、前段に TLS とアクセス制御を置いてください（`HOST=127.0.0.1` と `LAUNCHER_HOST=127.0.0.1` にすると 1 台目のノードからだけになります）。
 
@@ -198,7 +204,7 @@ Zig 0.17.0 が `PATH` 上にあり（または `build_libs.sh` には `ZIG=` で
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so, lib/libllguidance.so
-zig build dist -Dversion=r3.3.3-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.3.4-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 

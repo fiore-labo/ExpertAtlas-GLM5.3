@@ -22,6 +22,7 @@
 11. [引擎核心与 RDMA 行](#11-引擎核心与-rdma-行)
 12. [显示设置](#12-显示设置)
 13. [结构化输出](#13-结构化输出)
+14. [确定性模式](#14-确定性模式)
 
 ## 1. 环与交换机，以及节点检查
 
@@ -304,3 +305,35 @@ print(json.loads(choice.message.content)["primes"])
     （rank 0 的日志：`structured output unavailable`），并返回同样的 400。
   - 在交换机的 8 个节点上确认过：JSON 对象和 schema、开启思考、流式、被 `max_tokens` 截断、客户端中断的流、三种 API，以及所有拒绝的情况，之后每个 rank
     都仍在运行。普通请求在 20 个 prompt 上给出与 r3.3.2-102 相同的 token。
+
+## 14. 确定性模式
+
+**做什么。** 设置 `DETERMINISTIC=1` 后，从启动起按相同顺序发送相同的请求，每次重新启动都得到相同的 token（相同的发布版、节点和设置）。
+任何温度下都成立：没有 `seed` 的请求在两种模式下都由 prompt 决定 seed，因此采样的回复也会重复。默认关闭。
+
+**为什么。** 默认情况下，有两件事可能在两次启动之间不同：引擎在每次启动时对 linear 的内核 tile 计时并选用最快的，长 prompt 的路由专家按计算完成的顺序
+相加结果。两者都可能改变数值的最后一位，偶尔因此改变一个 token。要比较两种设置、重复一次测试或重现一个回复，相同的请求必须得到相同的答案。
+
+**如何使用。** 在 `glm53.conf` 中设 `DETERMINISTIC=1`、在 `docker run` 行加 `-e DETERMINISTIC=1`，或使用引擎设置（Server）中的
+**Same answers (deterministic)**，从下一次启动起生效。之后 `/health` 返回 `"deterministic": true`，chat API 和 Responses API 上每个回复的
+`tensorfold` 对象也是如此；其中的 `token_sha`（回复 token 的哈希）可用来比较两次启动的回复。
+
+在此模式下，EXL3 的 linear 使用由形状决定的 tile，而不是计时选出的 tile；prompt 的路由专家按 slot 的顺序（而不是到达的顺序）相加
+每行的 slot，也不使用 fp16 的和。启动时每个 rank 比对其设置、tile、加载的库和 NCCL 的设置，只要有一项不同就停止启动。在交换机上，
+NCCL 与环上一样，使用 Ring 算法和 2 个通道。
+
+- **限制。**
+  - 一次一个对话：`MULTI` 为 1 或以上时拒绝启动。启动界面把并发推理的 2 到 4 显示为灰色并说明原因。
+  - 模式所固定的内容不能写在 `EXTRA_ENV` 和 `LAUNCH_ENV` 中：其中有 `TF_GLM53_TUNE`、`TF_GLM53_PE_F16`、`TF_GLM53_DETERMINISTIC`、`TF_EXL3_PROMPT_EXPERTS`、`NCCL_ALGO`、`NCCL_PROTO`、`NCCL_PAT_ENABLE`、`NCCL_NVLS_ENABLE`、`NCCL_MIN_NCHANNELS`、`NCCL_MAX_NCHANNELS` 中的任何一个时拒绝启动。引擎设置界面也不会把此模式与并发推理 2 或以上、
+    或与这些名称一起保存。
+  - `CONTEXT_LENGTH` 和 `KV_SIZE` 按设置使用。启动时既不按空闲内存缩短上下文长度，也不把剩余空间全部给 KV（两者都会随节点的空闲内存而变）：
+    放不下时停止启动。
+- **仍会不同的地方。**
+  - 工具调用的 id 是随机的，每次都不同。
+  - 在同一次启动中，再次询问已被逐出缓存的 prompt，回复可能与第一次不同：缓存块的分界会改变 prompt 的计算顺序。重新启动并按相同顺序发送，
+    这些请求会以相同的方式不同。
+- **代价**（交换机的 8 个节点）：prefill 约慢 20 %（4K token 3.31 s，通常 2.75 s；40K 29.1 s，通常 23.6 s），解码大致相同（45.3 与
+  45.9 tokens/s）。每个 rank 为 prompt 专家多占 384 MiB（`ROWS` 8,192、`SP_PARTS` 4；`SP_PARTS` 2 或 `ROWS` 16,384 时为 768 MiB），已计入 KV 计划。
+- **确认过**（各启动两次）：在交换机（8 个节点）上，23 个请求（短请求 12 个、4K 与 40K 的 prompt、工具、结构化 4 个、温度 1.0 的 4 个）的 token
+  23 个全部相同，KV 缓存在全部 232 处比较中相同；在环（4 个节点）上为 23/23 和 112/112。思考的中途整理、三轮对话（池的续接与 Byte Resume）和
+  KV 逐出：使用 MTP 和 DFlash2 均为 13/13，冷启动时也一样。

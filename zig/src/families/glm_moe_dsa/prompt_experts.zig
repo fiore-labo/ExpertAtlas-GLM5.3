@@ -1,9 +1,12 @@
 //! The routed experts of prompt chunks wider than forward.max_rows, on prompt_experts.cu (TF_EXL3_PROMPT_EXPERTS=1).
 //! The slots add with atomics in arrival order, so the bits may differ run to run (decode windows keep the
-//! row-invariant experts kernel). `run` rounds the fp32 sums through bf16.
+//! row-invariant experts kernel). With a pair plane (Fiore-lab: TF_GLM53_DETERMINISTIC, Scratch.plane) the down
+//! kernel writes each pair's row instead and tf_pe_combine sums the slots in slot order: the same bits every run.
+//! `run` rounds the fp32 sums through bf16.
 //! forward.max_rows より広い prompt チャンクの routed expert を prompt_experts.cu で (TF_EXL3_PROMPT_EXPERTS=1)。
 //! スロットは atomic で到着順に足すので、実行ごとにビットが変わりうる (decode window は行に依存しない experts
-//! カーネルのまま)。`run` は fp32 の和を bf16 に丸める。
+//! カーネルのまま)。pair の面 (Fiore-lab: TF_GLM53_DETERMINISTIC、Scratch.plane) があれば、down カーネルは代わりに
+//! pair ごとの行に書き、tf_pe_combine が slot の順に足す: 毎回同じビット。`run` は fp32 の和を bf16 に丸める。
 const std = @import("std");
 const cuda = @import("cuda");
 const moe = @import("moe.zig");
@@ -64,10 +67,11 @@ pub const Kernels = struct {
     down: cuda.Function,
     gateup_k10: cuda.Function,
     down_k10: cuda.Function,
+    combine: cuda.Function,
 
     pub fn load(d: *const cuda.Driver) !Kernels {
         var m = try cuda.Module.load(d, cuda.kernels.glm53_prompt_experts);
-        var k: Kernels = .{ .module = m, .route = try m.function(route_symbol), .gateup = try m.function(gateup_symbol), .down = try m.function(down_symbol), .gateup_k10 = try m.function("tf_pe_gu_k10"), .down_k10 = try m.function("tf_pe_dn_k10") };
+        var k: Kernels = .{ .module = m, .route = try m.function(route_symbol), .gateup = try m.function(gateup_symbol), .down = try m.function(down_symbol), .gateup_k10 = try m.function("tf_pe_gu_k10"), .down_k10 = try m.function("tf_pe_dn_k10"), .combine = try m.function("tf_pe_combine") };
         try k.gateup.allowDynamicShared(gu_smem);
         try k.down.allowDynamicShared(dn_smem);
         try k.gateup_k10.allowDynamicShared(gu_smem);
@@ -83,11 +87,22 @@ pub const Scratch = struct {
     items: Buf,
     count: Buf,
     xd: Buf,
+    /// Fiore-lab: [rows * slots, dims] fp32, a pass's pairs each in its own row, when the slots are summed in order
+    /// (TF_GLM53_DETERMINISTIC). Its bytes: planeBytes.
+    /// Fiore-lab: [rows * slots, dims] fp32。slot を順に足す時 (TF_GLM53_DETERMINISTIC)、1 パスの pair を 1 行ずつ。
+    /// バイト数は planeBytes。
+    plane: ?Buf = null,
     rows: u32,
     slots: u32,
     max_items: u32,
 
-    pub fn init(d: *const cuda.Driver, ex: *const moe.Routed, rows: u32, slots: u32) !Scratch {
+    /// Fiore-lab: the pair plane's bytes for scratch rows `rows` (the launcher's memory plan adds them).
+    /// Fiore-lab: scratch の行数 `rows` での pair の面のバイト数 (ランチャーのメモリの計画が足す)。
+    pub fn planeBytes(ex: *const moe.Routed, rows: u32, slots: u32) usize {
+        return @as(usize, @min(rows, chunk_rows)) * slots * ex.dims * 4;
+    }
+
+    pub fn init(d: *const cuda.Driver, ex: *const moe.Routed, rows: u32, slots: u32, planes: bool) !Scratch {
         const r = @min(rows, chunk_rows);
         const n: usize = @as(usize, r) * slots;
         const mi: u32 = @intCast(n / ipm + @min(n, ex.count));
@@ -98,6 +113,7 @@ pub const Scratch = struct {
             .items = try Buf.alloc(d, 3 * @as(usize, mi) * 4),
             .count = count,
             .xd = try Buf.alloc(d, n * ex.width * 2),
+            .plane = if (planes) try Buf.alloc(d, planeBytes(ex, rows, slots)) else null,
             .rows = r,
             .slots = slots,
             .max_items = mi,
@@ -129,6 +145,9 @@ fn autoNcb(R: u32, D: u32) u32 {
 /// `half_sums`: out は代わりに fp16 の和 (`out` の [R, D] fp16 に red.add.f16x2。do_round は false であること)。
 pub fn run(ks: *const Kernels, s: cuda.Stream, x: u64, xstride: u32, pick: u64, wts: u64, ex: *const moe.Routed, sc: *const Scratch, out: u64, R: u32, round: anytype, do_round: bool, half_sums: bool) !void {
     if (half_sums and do_round) return error.Invalid;
+    // Fiore-lab: the pair plane takes fp32 rows only (no fp16 sums)
+    // Fiore-lab: pair の面は fp32 の行だけ (fp16 の和はない)
+    if (half_sums and sc.plane != null) return error.Invalid;
     const ob: u64 = if (half_sums) 2 else 4; // bytes a value of out / out の値 1 つのバイト数
     const D = ex.dims;
     const I = ex.width;
@@ -186,7 +205,9 @@ pub fn run(ks: *const Kernels, s: cuda.Stream, x: u64, xstride: u32, pick: u64, 
             a.add(std.math.inf(f32));
             a.add(@as(c_int, act_f32));
             a.add(o);
-            a.add(@as(c_longlong, @intCast(@as(u64, n) * D * ob / 16)));
+            // out's zeroing for the red.add; with the pair plane tf_pe_combine writes every value of out
+            // red.add のための out のゼロ埋め。pair の面では tf_pe_combine が out の値をすべて書く
+            a.add(@as(c_longlong, if (sc.plane != null) 0 else @intCast(@as(u64, n) * D * ob / 16)));
             try cuda.launch.launch(gateup, .{ .grid = .{ .x = I / 128, .y = items, .z = 1 }, .block = .{ .x = gu_threads, .y = 1, .z = 1 }, .shared = gu_smem }, s, &a);
         }
         {
@@ -200,13 +221,27 @@ pub fn run(ks: *const Kernels, s: cuda.Stream, x: u64, xstride: u32, pick: u64, 
             a.add(ex.k2[2].ptr);
             a.add(ex.svh_d.ptr);
             a.add(wt);
-            a.add(o);
+            a.add(if (sc.plane) |pl| pl.ptr else o);
             a.add(@as(c_int, @intCast(I)));
             a.add(@as(c_int, @intCast(D)));
             a.add(@as(c_int, @intCast(S)));
             a.add(@as(c_int, @intCast(ncb)));
-            a.add(@as(c_int, @intFromBool(half_sums))); // fp16 sums (TF_GLM53_PE_F16) / fp16 の和 (TF_GLM53_PE_F16)
+            // mode: 0 red.add into fp32 out, 1 fp16 sums (TF_GLM53_PE_F16), 2 each pair's row of the plane
+            // mode: 0 は fp32 の out に red.add、1 は fp16 の和 (TF_GLM53_PE_F16)、2 は面の pair ごとの行
+            a.add(@as(c_int, if (sc.plane != null) 2 else @intFromBool(half_sums)));
             try cuda.launch.launch(down, .{ .grid = .{ .x = items, .y = D / 256 / ncb, .z = 1 }, .block = .{ .x = dn_threads, .y = 1, .z = 1 }, .shared = dn_smem }, s, &a);
+        }
+        // Fiore-lab: this pass's pairs summed into out in slot order, before the next pass writes the plane again
+        // Fiore-lab: このパスの pair を slot の順に out へ足す (次のパスが面を書き直す前に)
+        if (sc.plane) |pl| {
+            var a: cuda.Args = .{};
+            a.add(pl.ptr);
+            a.add(pk);
+            a.add(o);
+            a.add(@as(c_int, @intCast(D)));
+            a.add(@as(c_int, @intCast(S)));
+            a.add(@as(c_int, @intCast(ex.count)));
+            try cuda.launch.launch(ks.combine, .{ .grid = .{ .x = n, .y = (D / 4 + 255) / 256, .z = 1 }, .block = .{ .x = 256, .y = 1, .z = 1 } }, s, &a);
         }
         if (do_round) try round.roundBf16(s, o, @as(u64, n) * D);
     }

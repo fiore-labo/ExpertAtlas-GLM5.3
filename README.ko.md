@@ -34,7 +34,13 @@ GB10을 1개씩 탑재한 NVIDIA DGX Spark 4대 또는 8대에서 텐서 병렬 
 - 매 라운드 드래프트를 모델이 검증합니다. 드래프트는 기본적으로 GLM-5.3 자체의 MTP 레이어가 만들며, 선택 사항인 DFlash2 drafter를 쓸 수도 있습니다. 어느 경우든 응답은 모델 자신이 선택한 것입니다.
 - 사고(thinking)가 지나치게 길어지지 않게 합니다. 상한은 `max_tokens`(1회 응답의 상한)에 대한 비율로 정하고, 긴 사고는 중간이나 끝에서 정리할 수 있습니다. 요청마다 설정할 수도, 엔진 실행 중에 설정할 수도 있습니다.
 - 구조화 출력: 응답의 답을 JSON이나 JSON Schema에 맞게 묶어 둡니다(`response_format`). 사고를 켜든 끄든 쓸 수 있습니다.
+- 같은 답을 내는 모드(`DETERMINISTIC=1`): 같은 요청을 같은 순서로 보내면 다시 시작해도 같은 token이 돌아옵니다.
 - `/metrics`(Prometheus 텍스트)와 `/health`는 실행 중인 요청도 집계하므로, 모니터는 요청이 실행되는 동안에도 prefill과 decode 속도, 캐시 적중, 드래프트 채택을 읽을 수 있습니다. `METRICS_LISTEN`을 설정하면 다른 호스트의 모니터를 위해 이 두 가지를 별도의 주소에서 읽기 전용으로 제공합니다.
+
+## r3.3.4-102에서 바뀐 점
+
+- **같은 답을 내는 모드(`DETERMINISTIC=1`, 기본으로 꺼짐):** 같은 릴리스, 같은 노드, 같은 설정이라면 시작한 뒤 같은 요청을 같은 순서로 보내면 다시 시작해도 온도와 상관없이 같은 token이 돌아옵니다(`seed`가 없는 요청은 prompt에서 seed를 정합니다). EXL3 linear는 측정한 타일 대신 정해진 타일을 쓰고, prompt의 expert는 slot을 정해진 순서로 더하며, 시작할 때 모든 rank가 설정을 대조합니다. 대화는 한 번에 하나(`MULTI=0`)이고 context length와 KV 크기는 설정한 그대로 씁니다. prefill은 약 20 % 느리고 decode는 거의 같습니다([FEATURES](glm53/release/FEATURES.md#14-same-answers-deterministic-mode), 영어).
+- **수정:** cuBLAS가 자신을 위해 마련된 작업 영역을 쓰게 되었습니다(이전에는 쓰지 않았습니다). 짧은 prompt 12개는 r3.3.3-102와 같은 token을 냈습니다.
 
 ## r3.3.3-102에서 바뀐 점
 
@@ -149,12 +155,12 @@ Fiore-lab의 것과 구조가 같고 같은 방식으로 로드됩니다.
 릴리스는 컨테이너 이미지와, 같은 파일을 담은 아카이브의 두 가지 형태로 배포합니다. 권장하는 방법은 이미지입니다. 가중치를 준비해 두면 첫 번째 노드에서 다음 한 줄로 엔진이 시작됩니다.
 
 ```sh
-docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.3-102 up
+docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.4-102 up
 ```
 
 마지막에 주소와 함께 `READY`가 표시됩니다. API는 `http://FIRST-NODE:8000/v1`, 컨트롤 패널은 `http://FIRST-NODE:8010/panel`입니다. 부족한 것이 있으면 `STOP`으로 끝나고, 할 일과 다음에 실행할 줄을 알려 줍니다. 절차와 모든 옵션은 [QUICKSTART](glm53/release/QUICKSTART.md)(영어)에 있습니다.
 
-같은 결과를 수동으로 얻으려면, 이미지의 경우 모든 노드에서 `docker pull`하고 `mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out`을 실행한 뒤, `glm53.conf`에 `RUNTIME=docker`와 `IMAGE`를 설정합니다([packaging/RUNTIME.md](packaging/RUNTIME.md) "Running in containers", 영어). Docker를 쓰지 않는 경우: 릴리스 아카이브 `tensorfold-r3.3.3-102-linux-aarch64.tar.gz`를 내려받아 함께 들어 있는 `RUNTIME.md`(이 저장소에서는 [packaging/RUNTIME.md](packaging/RUNTIME.md), 영어)를 따르세요. 어느 쪽이든 `glm53.conf.example`(8대) 또는 `glm53.t4.conf.example`(4대, [glm53/release/T4.md](glm53/release/T4.md) 참고, 영어)를 `glm53.conf`로 복사하고 요구하는 항목을 채운 다음 `./tf-glm53 deploy`와 `./tf-glm53 up`(컨트롤 패널을 시작합니다)을 실행하고, 거기서 엔진을 시작합니다. `./tf-glm53 start`는 직전 시작의 계획으로 시작하고, `./tf-glm53 down`은 정지합니다.
+같은 결과를 수동으로 얻으려면, 이미지의 경우 모든 노드에서 `docker pull`하고 `mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out`을 실행한 뒤, `glm53.conf`에 `RUNTIME=docker`와 `IMAGE`를 설정합니다([packaging/RUNTIME.md](packaging/RUNTIME.md) "Running in containers", 영어). Docker를 쓰지 않는 경우: 릴리스 아카이브 `tensorfold-r3.3.4-102-linux-aarch64.tar.gz`를 내려받아 함께 들어 있는 `RUNTIME.md`(이 저장소에서는 [packaging/RUNTIME.md](packaging/RUNTIME.md), 영어)를 따르세요. 어느 쪽이든 `glm53.conf.example`(8대) 또는 `glm53.t4.conf.example`(4대, [glm53/release/T4.md](glm53/release/T4.md) 참고, 영어)를 `glm53.conf`로 복사하고 요구하는 항목을 채운 다음 `./tf-glm53 deploy`와 `./tf-glm53 up`(컨트롤 패널을 시작합니다)을 실행하고, 거기서 엔진을 시작합니다. `./tf-glm53 start`는 직전 시작의 계획으로 시작하고, `./tf-glm53 down`은 정지합니다.
 
 서버는 기본적으로 모든 주소(`HOST=0.0.0.0`)에서 OpenAI chat API와, Claude Code를 위한 Anthropic Messages API를 제공합니다. API에도 컨트롤 패널에도 키가 없으므로 접근할 수 있는 누구나 사용할 수 있습니다. 노드를 닫힌 네트워크 안에 두거나 앞에 TLS와 접근 제어를 두세요(`HOST=127.0.0.1`과 `LAUNCHER_HOST=127.0.0.1`이면 첫 번째 노드에서만 사용할 수 있습니다).
 
@@ -197,7 +203,7 @@ Zig 0.17.0이 `PATH`에 있고(또는 `build_libs.sh`에는 `ZIG=`로 그 경로
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so, lib/libllguidance.so
-zig build dist -Dversion=r3.3.3-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.3.4-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 

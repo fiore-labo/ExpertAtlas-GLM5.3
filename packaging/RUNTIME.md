@@ -472,7 +472,7 @@ run `docker` on every node (the `docker` group). `tf-glm53`, the control panel's
 first node's host, as with the archive; the weights and the expert banks stay on the hosts.
 
 ```sh
-I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.3-102
+I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.4-102
 docker pull $I                                                # on every node
 mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out $I install /out
 cd glm53 && cp glm53.conf.example glm53.conf                  # or glm53.t4.conf.example; set RUNTIME=docker, IMAGE=$I
@@ -482,7 +482,7 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # or glm53.t4.conf
 - `install` writes the release's files (the same as the unpacked archive) to the directory. `./tf-glm53 pull` runs
   `docker pull IMAGE` on every node.
 - The image can be built from the archive instead: in a freshly unpacked archive,
-  `docker build --build-context fenced=DIR -f docker/Dockerfile -t glm53-tensorfold:r3.3.3-102 .`, with the fenced NCCL in
+  `docker build --build-context fenced=DIR -f docker/Dockerfile -t glm53-tensorfold:r3.3.4-102 .`, with the fenced NCCL in
   `DIR` (`RING.md`; the build fails without it). The build refuses any file the archive's
   `SHA256SUMS` does not list, so nothing of an installation goes into the image. Copy it to the other nodes with
   `docker save` and `docker load`.

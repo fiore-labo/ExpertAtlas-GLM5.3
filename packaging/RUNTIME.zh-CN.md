@@ -254,7 +254,7 @@ done
 本发布也以容器镜像形式提供：`/opt/glm53` 中是归档的文件，另有服务器运行所需的内容（cuBLAS 13、libibverbs 及其 provider、带 AArch64 fence 的 NCCL 2.30.7）。在 `glm53.conf` 中设置 `RUNTIME=docker` 和 `IMAGE` 后，`tf-glm53` 会通过 ssh 在每个节点上把各 rank 作为 `IMAGE` 的容器启动。这时每个节点需要的是 Docker 和 NVIDIA Container Toolkit（DGX OS 两者都有），而不是 cuBLAS、libibverbs 和 NCCL；运行 `tf-glm53` 的用户必须能在每个节点上运行 `docker`（`docker` 组）。`tf-glm53`、控制面板的启动器和设置与使用归档时一样留在第一个节点的主机上；权重和专家 bank 也留在主机上。
 
 ```sh
-I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.3-102
+I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.4-102
 docker pull $I                                                # 在每个节点上
 mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out $I install /out
 cd glm53 && cp glm53.conf.example glm53.conf                  # 或 glm53.t4.conf.example；设置 RUNTIME=docker 和 IMAGE=$I
@@ -262,7 +262,7 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # 或 glm53.t4.con
 ```
 
 - `install` 把本发布的文件（与解开的归档相同）写到该目录。`./tf-glm53 pull` 在每个节点上执行 `docker pull IMAGE`。
-- 镜像也可以由归档构建：在刚解开的归档中执行 `docker build --build-context fenced=DIR -f docker/Dockerfile -t glm53-tensorfold:r3.3.3-102 .`，`DIR` 中放带 fence 的 NCCL（`RING.zh-CN.md`；没有它构建会失败）。只要有归档 `SHA256SUMS` 未列出的文件，构建就会失败，因此安装环境中的设置或日志不会进入镜像。用 `docker save` 和 `docker load` 复制到其他节点。
+- 镜像也可以由归档构建：在刚解开的归档中执行 `docker build --build-context fenced=DIR -f docker/Dockerfile -t glm53-tensorfold:r3.3.4-102 .`，`DIR` 中放带 fence 的 NCCL（`RING.zh-CN.md`；没有它构建会失败）。只要有归档 `SHA256SUMS` 未列出的文件，构建就会失败，因此安装环境中的设置或日志不会进入镜像。用 `docker save` 和 `docker load` 复制到其他节点。
 - `tf-glm53 check` 在每个节点上检查：`IMAGE` 存在且层与第一个节点相同；容器能访问 GPU（`--gpus all`）；镜像中是与本目录相同的发布（否则为 `NG: image-not-this-release`）。
 - 每个 rank 的容器获得 GPU、`/dev/infiniband`、主机网络和 IPC、`--ulimit memlock=-1 --ulimit nofile=1048576:1048576`、`--oom-score-adj 1000`、主机用户和一个 init。以相同路径挂载：只读的 `WEIGHTS`、`DRAFTER`（DFlash2）以及该节点上 `expert-plan/banks.json` 中的每个 bank；可写的 `launch/`。Docker 不保存容器的日志（`--log-driver none`）：其输出进入节点的日志保管进程。容器名为 `glm53-p<PORT>-r<rank>`，停止后即删除。`tf-glm53 down`、`status`、监视进程和控制面板对它们的处理与从主机运行的 rank 相同。
 - 引擎在交换机和环上都读取 `/opt/nccl-fenced` 的 NCCL。

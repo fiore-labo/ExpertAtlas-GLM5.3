@@ -23,6 +23,7 @@ differ with the nodes, the prompt and the settings: take them as a guide.
 11. [Engine cores and the RDMA line](#11-engine-cores-and-the-rdma-line)
 12. [Display settings](#12-display-settings)
 13. [Structured output](#13-structured-output)
+14. [Same answers (deterministic mode)](#14-same-answers-deterministic-mode)
 
 ## 1. Ring or switch, and the node check
 
@@ -381,3 +382,46 @@ print(json.loads(choice.message.content)["primes"])
   - Checked on the switch's eight nodes: JSON objects and schemas, with the thinking, streamed, cut by `max_tokens`, a
     stream the client dropped, on the three APIs, and every refusal, with every rank running after it. Plain requests
     gave the same tokens as on r3.3.2-102 for 20 prompts.
+
+## 14. Same answers (deterministic mode)
+
+**What it does.** With `DETERMINISTIC=1`, the same requests sent in the same order from a start give the same tokens
+after every start, on the same release, nodes and settings. This holds at any temperature: a request without a `seed`
+gets one from its prompt (in either mode), so a sampled reply repeats too. It is off by default.
+
+**Why.** By default two things can differ from one start to the next: the engine times its linears' kernel tiles at
+each start and keeps the fastest, and a long prompt's routed experts add their results in the order they finish. Either
+can move the last bit of a number, and now and then that changes a token. To compare two settings, repeat a test or
+reproduce a reply, the same request has to give the same answer.
+
+**How.** `DETERMINISTIC=1` in `glm53.conf`, `-e DETERMINISTIC=1` on the `docker run` line, or **Same answers
+(deterministic)** in the engine settings (Server), from the next start. `/health` then says `"deterministic": true`,
+and so does each reply's `tensorfold` object on the chat and Responses APIs; its `token_sha`, a hash of the reply's
+tokens, compares the replies of two starts.
+
+In this mode the EXL3 linears take the tiles their shapes fix, never timed ones, and the prompt's routed experts add
+each row's slots in slot order, not as they arrive, and never as fp16 sums. At the start every rank compares its
+settings, its tiles, the libraries it loaded and NCCL's settings, and the start stops if one differs. On the switch,
+NCCL runs the Ring algorithm on two channels, as on the ring.
+
+- **Limits.**
+  - One conversation at a time: with `MULTI` 1 or more the start is refused. The launch screen greys concurrent
+    inference 2 to 4 and says why.
+  - `EXTRA_ENV` and `LAUNCH_ENV` may not set what the mode fixes: a start with any of `TF_GLM53_TUNE`, `TF_GLM53_PE_F16`, `TF_GLM53_DETERMINISTIC`, `TF_EXL3_PROMPT_EXPERTS`, `NCCL_ALGO`, `NCCL_PROTO`, `NCCL_PAT_ENABLE`, `NCCL_NVLS_ENABLE`, `NCCL_MIN_NCHANNELS`, `NCCL_MAX_NCHANNELS` in them is refused. The
+    engine settings screen does not save the mode beside concurrent inference 2 or more, or beside one of those names.
+  - `CONTEXT_LENGTH` and `KV_SIZE` are taken as set. A start never cuts the context length to the free memory or gives
+    the KV all the room left, since both would change with the nodes' free memory: when they do not fit, the start
+    stops.
+- **What still differs.**
+  - A tool call's id is random: a new one every time.
+  - Within one start, a prompt asked again after the cache dropped it can get a reply different from the first: where
+    the cache's blocks begin changes the order the prompt is computed in. Started again and sent in the same order,
+    the requests differ the same way.
+- **Cost** (the switch's eight nodes): prefill about 20 % slower (4K tokens in 3.31 s against 2.75 s, 40K in 29.1 s
+  against 23.6 s), decode about the same (45.3 against 45.9 tokens/s). Each rank holds 384 MiB more for the prompt
+  experts (`ROWS` 8,192 and `SP_PARTS` 4; 768 MiB with `SP_PARTS` 2 or `ROWS` 16,384), counted in the KV plan.
+- **Checked** with two starts each: on the switch (eight nodes) 23 requests (12 short ones, 4K and 40K prompts, tools,
+  4 structured, 4 at temperature 1.0) gave the same tokens, 23 of 23, and the KV cache was the same in all 232
+  comparisons; on the ring (four nodes) 23 of 23 and 112 of 112. Organizing the thinking midway, three-turn
+  conversations (the pool's continuation and Byte Resume) and KV eviction: 13 of 13 with MTP and with DFlash2, on a
+  cold start too.

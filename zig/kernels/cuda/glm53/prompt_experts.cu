@@ -716,7 +716,10 @@ struct DnEpi {
     const float* wts_sh;      // the item's routing weights (shared memory) / item の routing 重み (共有メモリ)
     float* out;
     const int* pair_sh;       // the item's rows of out (row * D), shared memory / item の out 行 (row * D)、共有メモリ
-    bool f16;                 // out is the fp16 accumulation buffer / out は fp16 の加算用バッファ
+    int mode;                 // 0: red.add into fp32 out; 1: into the fp16 accumulation buffer; 2: each pair's own fp32
+                              // row of out (out is the pair plane, tf_pe_combine sums the slots in order)
+                              // 0: fp32 の out に red.add、1: fp16 の加算用バッファに、2: pair ごとの fp32 の行 (out は pair の面で、
+                              // tf_pe_combine が slot を順に足す)
     int e, D, slots, cnt;
 };
 
@@ -781,7 +784,10 @@ __device__ __forceinline__ void dn_epilogue(const float (&acc)[2 * NB][4], float
 #pragma unroll
                 for (int blk = 0; blk < 2; ++blk) {
                     const float* u = v[ri * 2 + blk];
-                    if (p.f16)
+                    if (p.mode == 2)
+                        *reinterpret_cast<float4*>(p.out + orow + blk * 128) = make_float4(u[0] * sv[blk][0] * w, u[1] * sv[blk][1] * w,
+                               u[2] * sv[blk][2] * w, u[3] * sv[blk][3] * w);
+                    else if (p.mode == 1)
                         red_add_f16x4(reinterpret_cast<half*>(p.out) + orow + blk * 128, u[0] * sv[blk][0] * w, u[1] * sv[blk][1] * w,
                                u[2] * sv[blk][2] * w, u[3] * sv[blk][3] * w);
                     else
@@ -891,7 +897,7 @@ __device__ __forceinline__ void prompt_down_body(
     const half* __restrict__ xd, const int* __restrict__ sorted, const int* __restrict__ items,
     const int* __restrict__ item_count, const int64_t* __restrict__ down_ptr, const int* __restrict__ k2s,
     const half* __restrict__ svh_d, const float* __restrict__ wts, float* __restrict__ out, int K, int D, int slots,
-    int ncb, int f16) {
+    int ncb, int mode) {
     extern __shared__ __align__(16) unsigned char smem_raw[];
     __shared__ int pair_sh[IPM];
     __shared__ float wts_sh[IPM];
@@ -902,11 +908,11 @@ __device__ __forceinline__ void prompt_down_body(
     const int e = items[3 * item], first = items[3 * item + 1], cnt = items[3 * item + 2];
     if (threadIdx.x < IPM) {
         const int pr = (int)threadIdx.x < cnt ? sorted[first + threadIdx.x] : 0;
-        pair_sh[threadIdx.x] = (pr / slots) * D;
+        pair_sh[threadIdx.x] = (mode == 2 ? pr : pr / slots) * D;
         wts_sh[threadIdx.x] = (int)threadIdx.x < cnt ? wts[pr] : 0.f;
     }
     const uint32_t* Td = reinterpret_cast<const uint32_t*>(down_ptr[e]);
-    const DnEpi ep{svh_d, wts_sh, out, pair_sh, f16 != 0, e, D, slots, cnt};
+    const DnEpi ep{svh_d, wts_sh, out, pair_sh, mode, e, D, slots, cnt};
     const int nb = (cnt + 15) >> 4;
     switch (k2s[e] * 16 + nb) {
 #define TF_PE_DN(K2_, NB_) \
@@ -939,16 +945,40 @@ __global__ void __launch_bounds__(NTHREADS, 1) prompt_down_kernel(
     const half* __restrict__ xd, const int* __restrict__ sorted, const int* __restrict__ items,
     const int* __restrict__ item_count, const int64_t* __restrict__ down_ptr, const int* __restrict__ k2s,
     const half* __restrict__ svh_d, const float* __restrict__ wts, float* __restrict__ out, int K, int D, int slots,
-    int ncb, int f16) {
-    prompt_down_body<CB, false>(xd, sorted, items, item_count, down_ptr, k2s, svh_d, wts, out, K, D, slots, ncb, f16);
+    int ncb, int mode) {
+    prompt_down_body<CB, false>(xd, sorted, items, item_count, down_ptr, k2s, svh_d, wts, out, K, D, slots, ncb, mode);
 }
 
 extern "C" __global__ void __launch_bounds__(NTHREADS, 1) tf_pe_dn_k10(
     const half* __restrict__ xd, const int* __restrict__ sorted, const int* __restrict__ items,
     const int* __restrict__ item_count, const int64_t* __restrict__ down_ptr, const int* __restrict__ k2s,
     const half* __restrict__ svh_d, const float* __restrict__ wts, float* __restrict__ out, int K, int D, int slots,
-    int ncb, int f16) {
-    prompt_down_body<1, true>(xd, sorted, items, item_count, down_ptr, k2s, svh_d, wts, out, K, D, slots, ncb, f16);
+    int ncb, int mode) {
+    prompt_down_body<1, true>(xd, sorted, items, item_count, down_ptr, k2s, svh_d, wts, out, K, D, slots, ncb, mode);
+}
+
+// Fiore-lab: the down kernel's pair plane (mode 2: [n * slots, D] fp32, each routed pair's own row) summed over each
+// row's slots in slot order into out [n, D] fp32: the same sum on every run, unlike the red.add of modes 0 and 1. A slot
+// whose pick is not an expert (as route skips it) is not read. One thread 4 columns; grid (n, ceil(D / 4 / 256)).
+// Fiore-lab: down kernel の pair の面 (mode 2: [n * slots, D] fp32、routed の pair ごとの行) を、行ごとに slot の順に
+// 足して out [n, D] fp32 に書く: mode 0 と 1 の red.add と違い、毎回同じ和。pick が expert でない slot (route が飛ばす
+// もの) は読まない。1 スレッドで 4 列、grid は (n, ceil(D / 4 / 256))。
+extern "C" __global__ void tf_pe_combine(const float* __restrict__ plane, const int* __restrict__ pick, float* __restrict__ out,
+                                         int D, int slots, int E) {
+    const int r = blockIdx.x;
+    const int c = (blockIdx.y * blockDim.x + threadIdx.x) * 4;
+    if (c >= D) return;
+    float4 acc = make_float4(0.f, 0.f, 0.f, 0.f);
+    for (int k = 0; k < slots; ++k) {
+        const int e = pick[r * slots + k];
+        if (e < 0 || e >= E) continue;
+        const float4 v = *reinterpret_cast<const float4*>(plane + ((size_t)r * slots + k) * D + c);
+        acc.x += v.x;
+        acc.y += v.y;
+        acc.z += v.z;
+        acc.w += v.w;
+    }
+    *reinterpret_cast<float4*>(out + (size_t)r * D + c) = acc;
 }
 
 #ifndef TF_ZIG  // host section / ホスト側

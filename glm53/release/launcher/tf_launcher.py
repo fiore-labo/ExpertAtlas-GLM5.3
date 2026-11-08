@@ -343,6 +343,7 @@ SETTINGS = {
     "ROCE_PROXY_CORES": ("a725", SET_ENUM("a725", "os"), "start"),
     "ENGINE_CORES": ("os", SET_ENUM("os", "a725"), "start"),
     "STRUCTURED": ("1", SET_BOOL, "start"),
+    "DETERMINISTIC": ("0", SET_BOOL, "start"),
     "ATLAS_GENERIC": ("1", SET_BOOL, "start"),
     "TF_GLM53_CANON_CLOSE": ("near", SET_ENUM("near", "all", "off"), "start"),
     "TF_GLM53_CANON_NEAR": ("4096", SET_INT(1, 1048576), "start"),
@@ -372,6 +373,9 @@ RING_ENV = ("NCCL_ALGO NCCL_PROTO NCCL_IB_HCA NCCL_IB_GID_INDEX NCCL_IB_ADDR_FAM
             "NCCL_PAT_ENABLE NCCL_NVLS_ENABLE NCCL_MIN_NCHANNELS NCCL_MAX_NCHANNELS NCCL_SOCKET_IFNAME TF_NCCL_LIB "
             "TF_ROCE_PROXY_LIB B12X_ROCE_HCA B12X_ROCE_GID_INDEX TF_GLM53_TOPOLOGY TF_GLM53_PREFILL_REDUCE TF_GLM53_MULTI_AR2 "
             "TF_GLM53_DCP TF_GLM53_WORLD TF_GLM53_RANK TF_GLM53_MASTER").split()
+# what DETERMINISTIC=1 pins that EXTRA_ENV may not set (tf-glm53's list)
+DET_ENV = ("TF_GLM53_TUNE TF_GLM53_PE_F16 TF_GLM53_DETERMINISTIC TF_EXL3_PROMPT_EXPERTS NCCL_ALGO NCCL_PROTO NCCL_PAT_ENABLE "
+           "NCCL_NVLS_ENABLE NCCL_MIN_NCHANNELS NCCL_MAX_NCHANNELS").split()
 # the sizes a rank holds besides its routed experts, by node count and drafter, the largest node measured: used until
 # this lane has a measured start with that drafter and node count (estimate: true). MTP holds its layer in the other
 # weights; DFlash2 its model and state in the work, on every rank alike. Node counts not listed take four nodes'.
@@ -403,7 +407,13 @@ DEFAULT_DRAFT_SAVES = 8
 ROW_BYTES = int(0.00041 * GiB)
 DRAFT_SAVE_BYTES = int(0.05 * GiB)
 # a measured start's sizes hold for a later plan only with the same of these
-START_SETTINGS = ("rows", "sp_parts", "draft_saves")
+START_SETTINGS = ("rows", "sp_parts", "draft_saves", "deterministic")
+# a setting a start recorded before it was one of START_SETTINGS: the value those starts ran with
+START_SETTING_BEFORE = {"deterministic": False}
+# DETERMINISTIC=1: the prompt experts' pair plane, [scratch rows x 8 slots, 6,144] fp32 a rank (prompt_experts.zig
+# Scratch.planeBytes): scratch rows = min(4096, the SP part's rows (engine.zig partRows: at least 2,048, a multiple of
+# the world))
+PLANE_SLOTS, PLANE_DIMS = 8, 6144
 PHASES = ["checking", "weights", "kv", "prewarm", "ready"]
 # the KV cache's bytes a row on one rank (forward.zig State.bytes): every cache layer's latent row (fp4 432 B, fp8 656 B)
 # and the full-indexer layers' index row (144 B); GLM-5.3 with DFlash2: 78 cache layers, 21 of them with an indexer.
@@ -553,7 +563,7 @@ def read_conf(conf, nodes_file=""):
     script = r'''. "$1" >/dev/null || exit 1
 if [ -n "$2" ] && [ -f "$2" ]; then . "$2" >/dev/null || exit 1; fi
 printf 'NODE=%s\n' "${NODES[@]}"
-for v in NAME HOST PORT ROWS SP_PARTS EXTRA_ENV LAUNCHER_PORT LAUNCHER_HOST KV DCP CONTEXT STORE CONTEXT_LENGTH KV_SIZE CACHE RESERVE_GB DRAFTER_KIND DRAFTER ATLAS_DIR ATLAS_GENERIC LAUNCH_DROP_CACHES LAUNCH_SNAPSHOTS RUNTIME IMAGE TOPOLOGY SOCKET_IFNAME IB_HCA WEIGHTS MULTI MULTI_WAIT DRAFT_SAVES; do printf '%s=%s\n' "$v" "${!v:-}"; done'''
+for v in NAME HOST PORT ROWS SP_PARTS EXTRA_ENV LAUNCHER_PORT LAUNCHER_HOST KV DCP CONTEXT STORE CONTEXT_LENGTH KV_SIZE CACHE RESERVE_GB DRAFTER_KIND DRAFTER ATLAS_DIR ATLAS_GENERIC LAUNCH_DROP_CACHES LAUNCH_SNAPSHOTS RUNTIME IMAGE TOPOLOGY SOCKET_IFNAME IB_HCA WEIGHTS MULTI MULTI_WAIT DRAFT_SAVES DETERMINISTIC; do printf '%s=%s\n' "$v" "${!v:-}"; done'''
     out = subprocess.run(["bash", "-c", script, "_", conf, nodes_file or ""], capture_output=True, text=True, check=True).stdout
     c = {"NODES": []}
     for line in out.splitlines():
@@ -799,6 +809,8 @@ class Launcher:
         # the positions CONF asks for: a request's context and the conversation store beside it; a start in a format
         # that cannot hold them all gets a shorter context (kv_choice)
         self.context, self.store = conf_kv(c)
+        # DETERMINISTIC=1: the same tokens after every start; the KV plan is CONF's as asked (never the rest, never cut)
+        self.deterministic = c.get("DETERMINISTIC") == "1"
         self.cache = c.get("CACHE") or "pool"  # tf-glm53's default
         # what a node keeps for the OS after a start (a plan may ask another: reserve_gib)
         self.reserve = int(float(c.get("RESERVE_GB") or RESERVE / GiB) * GiB)
@@ -1360,6 +1372,9 @@ class Launcher:
         ctx = self.max_context(fmt, room, drafter, keep, slope, p0)
         if not ctx:
             return None
+        # DETERMINISTIC=1: the context as asked or no start (a context cut to the free memory would move by start)
+        if self.deterministic and ctx < want:
+            return None
         ctx = min(ctx, want)
         if store == "max":
             return ctx, self.store_max(self.max_positions(fmt, room, drafter, slope, p0), ctx)
@@ -1382,7 +1397,7 @@ class Launcher:
         return int((room + slope * p0) // (self.position_bytes(drafter)[fmt] + slope))
 
     def start_settings(self):
-        return {"rows": self.rows, "sp_parts": self.sp_parts, "draft_saves": self.draft_saves}
+        return {"rows": self.rows, "sp_parts": self.sp_parts, "draft_saves": self.draft_saves, "deterministic": self.deterministic}
 
     def settings_extra(self, drafter, now):
         """What ROWS and DRAFT_SAVES (`now`) hold on a node beyond DEFAULTS. A lower value is not taken off: it only
@@ -1390,7 +1405,15 @@ class Launcher:
         more = max(0, now["rows"] - DEFAULT_ROWS.get(self.world, 8192)) * ROW_BYTES
         if drafter == "dflash2":
             more += max(0, now["draft_saves"] - DEFAULT_DRAFT_SAVES) * DRAFT_SAVE_BYTES
+        if now.get("deterministic"):
+            more += self.plane_bytes(now["rows"], now["sp_parts"])
         return more
+
+    def plane_bytes(self, rows, sp_parts):
+        """DETERMINISTIC=1: the prompt experts' pair plane a rank holds (PLANE_SLOTS, PLANE_DIMS)."""
+        part = -(-rows // max(1, sp_parts))
+        part = max(2048, -(-part // self.world) * self.world)
+        return min(part, 4096) * PLANE_SLOTS * PLANE_DIMS * 4
 
     @staticmethod
     def settings_of(body):
@@ -1473,6 +1496,8 @@ class Launcher:
         checked here first so the screen can grey a choice before a start."""
         if n < 1:
             return ""
+        if self.deterministic:
+            return "DETERMINISTIC=1 (one conversation at a time)"
         if self.cache != "pool":
             return f"CACHE={self.cache} (needs CACHE=pool)"
         if self.world == 3:
@@ -1524,6 +1549,9 @@ class Launcher:
         (multi_bytes) a node holds before the KV; `settings`: rows, sp_parts, draft_saves in place of CONF's."""
         fmt = kv or self.kv_format
         drafter = drafter or self.drafter_conf
+        # DETERMINISTIC=1: CONF's store, not the rest the nodes leave (that moves with their free memory)
+        if self.deterministic and store == "max":
+            store = None
         mn = self.multi_conf if multi is None else multi
         mw = self.multi_wait_conf if multi_wait is None else multi_wait
         m_idle, m_load, m_est = self.multi_bytes(mn, drafter)
@@ -1536,7 +1564,7 @@ class Launcher:
         last = self.last_start(drafter)
         # a start measured with another ROWS, SP_PARTS or DRAFT_SAVES (or before they were recorded) held other buffers:
         # the estimate, not its sizes
-        if last is not None and any(last.get(k) != v for k, v in now.items()):
+        if last is not None and any(last.get(k, START_SETTING_BEFORE.get(k)) != v for k, v in now.items()):
             last = None
         # the store taking the rest on an estimate keeps ESTIMATE_SLACK more (the sizes not yet measured)
         slack = (ESTIMATE_SLACK if last is None or last.get("world") != self.world else MEASURED_SLACK) if store == "max" else 0
@@ -2571,6 +2599,8 @@ class Launcher:
         rule(["MULTI"], multi == 0 or self.world != 3, f"MULTI={multi} is not offered on 3 nodes yet")
         rule(["MULTI", "DRAFTER_KIND", "DRAFT_SAVES"], multi == 0 or v["DRAFTER_KIND"] != "dflash2" or num("DRAFT_SAVES") > 0,
              f"MULTI={multi} with DFlash2 needs DRAFT_SAVES of 1 or more")
+        det = v.get("DETERMINISTIC") == "1"
+        rule(["DETERMINISTIC", "MULTI"], not det or multi == 0, "DETERMINISTIC=1 takes MULTI=0 (concurrent conversations are batched as they arrive)")
         rule(["DRAFTER_KIND"], v["DRAFTER_KIND"] != "dflash2" or bool(v["DRAFTER"]),
              "DRAFTER_KIND=dflash2 needs DRAFTER (the DFlash2 model's directory, on the [ WEIGHTS ] card)")
         pool = v["CACHE"] == "pool"
@@ -2592,6 +2622,8 @@ class Launcher:
         rule(["EXTRA_ENV"], not any(n in SET_CANON for n in names), "TF_GLM53_CANON_CLOSE, TF_GLM53_CANON_NEAR and TF_GLM53_BYTE_RESUME have keys of their own")
         bad = [n for n in names if n in RING_ENV]
         rule(["EXTRA_ENV", "TOPOLOGY"], not ring or not bad, f"TOPOLOGY=ring4: {', '.join(bad)} in EXTRA_ENV would change what the ring needs")
+        pin = [n for n in names if n in DET_ENV]
+        rule(["EXTRA_ENV", "DETERMINISTIC"], not det or not pin, f"DETERMINISTIC=1: {', '.join(pin)} in EXTRA_ENV would change what makes the replies repeat")
         return errs
 
     def es_post(self, body):
