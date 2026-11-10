@@ -310,6 +310,12 @@ pub const Conv = struct {
     // temperature > 0: keyed sampling (seed, position, id), the same draws as one request alone; null: greedy
     // temperature > 0: キー付きの抽選 (seed、位置、id)。単独の要求と同じ抽選。null なら greedy
     samp: ?Sampling = null,
+    // Fiore-lab: this segment is under a grammar (its admission header's bit; never drafted: one window row a round),
+    // and whether a masked pick found no allowed finite value (rank-identical). Both set anew by every multiStart.
+    // Fiore-lab: この区間は文法つき (受け付けのヘッダの bit。draft しないのでラウンドごとにウィンドウの 1 行)、と mask
+    // つきの pick が許された有限値を見つけなかったか (全ランクで同じ)。どちらも multiStart ごとに入れ直す。
+    grammar: bool = false,
+    grammar_failed: bool = false,
     // with the MTP layer: the conversation's decode state (its backlog, carry, drafts and rows' range)
     // MTP 層があるとき: 会話の decode の状態 (バックログ、carry、draft、行の範囲)
     mtp: ?mtp_mod.Dec = null,
@@ -512,6 +518,11 @@ pub const Engine = struct {
     mask_flags: ?cuda.DeviceBuffer = null,
     grammar: bool = false,
     grammar_failed: bool = false,
+    // Fiore-lab: some mask_on word may be 1 (a masked pick or a batched round set it): the next batched round without a
+    // grammar conversation clears them.
+    // Fiore-lab: mask_on のどこかが 1 かもしれない (mask つきの pick かまとめたラウンドが立てた): 文法の会話のない次の
+    // まとめたラウンドで消す。
+    mask_on_set: bool = false,
     gpa: std.mem.Allocator,
     io: std.Io,
     d: *const cuda.Driver,
@@ -2044,6 +2055,50 @@ pub const Engine = struct {
         e.grammar = on;
         e.grammar_failed = false;
         if (e.mask_on) |b| try b.fill32(0, e.stream.handle);
+        e.mask_on_set = false;
+    }
+
+    /// Fiore-lab: rank 0's pinned row where the host writes batched conversation k's mask before a round (the rows
+    /// after the admission's row 0, one a conversation); null on the other ranks or without masks.
+    /// Fiore-lab: まとめたラウンドの前にホストが会話 k の mask を書く、rank 0 の pin した行 (受け付けの行 0 より後ろ、
+    /// 会話ごとに 1 行)。ほかのランクや mask がないときは null。
+    pub fn maskStage(e: *Engine, k: usize) ?[]u32 {
+        const hb = e.mask_host orelse return null;
+        if (k >= multi_max) return null;
+        const row = forward.multi_rows - multi_max + k;
+        return hb.slice(u32)[row * structure.words ..][0..structure.words];
+    }
+
+    /// Fiore-lab: a batched round's masks, after its rows are laid out (`live`: the round's conversations as indices into
+    /// `ks`, `rows` and `gram` per live conversation). Without masks: nothing. With a grammar conversation: every rank
+    /// writes on[0 .. R) (1 at each grammar conversation's row), rank 0 copies each one's staged row (maskStage) to
+    /// that row of mask_dev, and every rank broadcasts those rows in the live order (the same count and order on every
+    /// rank: both come from the admission headers' bits and the agreed rows). Without one: on cleared if any was set.
+    /// Fiore-lab: 行の並びが決まった後の、まとめたラウンドの mask (`live` はこのラウンドの会話の ks の中の位置、`rows`・
+    /// `gram` は live の会話ごと)。mask がなければ何もしない。文法の会話があれば: 全ランクが on[0 .. R) を書き (各文法の
+    /// 会話の行に 1)、rank 0 が各会話の置き場の行 (maskStage) を mask_dev のその行へ写し、全ランクがその行を live の順に
+    /// broadcast する (本数も順番も全ランクで同じ: どちらも受け付けのヘッダの bit と合意した行から決まる)。なければ:
+    /// on が立っていれば消す。
+    fn multiMasks(e: *Engine, ks: []const u8, live: []const usize, rows: []const u32, gram: []const bool) !void {
+        const dev = e.mask_dev orelse return;
+        var on: [forward.multi_rows]u32 = undefined;
+        const lay = maskRowsOf(rows, gram, &on) orelse return error.GrammarRows;
+        if (lay.count == 0) {
+            if (e.mask_on_set) try e.mask_on.?.fill32(0, e.stream.handle);
+            e.mask_on_set = false;
+            return;
+        }
+        try e.mask_on.?.uploadAsync(0, std.mem.sliceAsBytes(on[0..lay.R]), e.stream.handle);
+        e.mask_on_set = true;
+        for (live, rows, gram, 0..) |j, _, g, i| {
+            if (!g) continue;
+            const off = lay.at[i] * structure.bytes;
+            if (e.rank == 0) {
+                const row = e.maskStage(ks[j]) orelse return error.GrammarUnavailable;
+                try dev.uploadAsync(off, std.mem.sliceAsBytes(row), e.stream.handle);
+            }
+            try e.group.lib.check(e.group.lib.api.ncclBroadcast(dev.ptr + off, dev.ptr + off, structure.words, .u32, 0, e.group.comm, e.stream.handle), "ncclBroadcast(grammar rows)");
+        }
     }
 
     fn fillMask(e: *Engine) void {
@@ -2062,6 +2117,7 @@ pub const Engine = struct {
         if (e.rank == 0) try b.uploadAsync(0, e.mask_host.?.slice(u8)[0..structure.bytes], e.stream.handle);
         try e.group.lib.check(e.group.lib.api.ncclBroadcast(b.ptr, b.ptr, structure.words, .u32, 0, e.group.comm, e.stream.handle), "ncclBroadcast(grammar)");
         try e.glue.setI32(e.stream, e.mask_on.?.ptr, 1);
+        e.mask_on_set = true;
     }
 
     /// A prompt chunk's start: stopAgreed with rank 0's `layers` (MidHook.first) in the same word (bits 8 ..); `yield`
@@ -2852,10 +2908,16 @@ pub const Engine = struct {
     /// the engine's prompt buffers and map (the other conversations wait), its first token, its decode state.
     /// 会話 k の prompt (pool_serve.admitMulti が e.start と drafter の再開を設定した後): エンジンの prompt 用のバッファと
     /// 表で prefill だけを行い (他の会話は待つ)、最初のトークンと decode の状態を作る。
-    pub fn multiStart(e: *Engine, k: usize, prompt: []const i64, max_tokens: usize, stop_eos: bool, drafted: bool, samp: ?Sampling, sink: ?Sink) !void {
+    pub fn multiStart(e: *Engine, k: usize, prompt: []const i64, max_tokens: usize, stop_eos: bool, drafted: bool, samp: ?Sampling, grammar: bool, sink: ?Sink) !void {
         const m = e.multi.?;
         const cv = &m.convs[k];
         if (prompt.len == 0 or prompt.len > e.promptLimit()) return error.PromptLength;
+        // Fiore-lab: a grammar conversation needs the masks and decodes one row a round (no drafts), as one request
+        // Fiore-lab: 文法の会話は mask が要り、ラウンドごとに 1 行で decode する (draft なし)。単独の要求と同じ
+        if (grammar and e.mask_dev == null) return error.GrammarUnavailable;
+        if (grammar and drafted) return error.GrammarDraftsUnsupported;
+        cv.grammar = grammar;
+        cv.grammar_failed = false;
         cv.live = true;
         cv.done = false;
         cv.prompt.clearRetainingCapacity();
@@ -2888,7 +2950,17 @@ pub const Engine = struct {
         const t0 = std.Io.Clock.awake.now(e.io);
         e.pc_conv = @intCast(@min(k, std.math.maxInt(u16)));
         defer e.pc_conv = 0;
+        // Fiore-lab: the prefill's first token takes the single path's masked pick (mask row 0, its on word); the
+        // rounds inside the prefill read their conversations' own bits, never e.grammar
+        // Fiore-lab: prefill の最初の token は単独の経路の mask つき pick (mask の行 0 と、その on 語)。prefill の中の
+        // ラウンドは各会話の bit を読み、e.grammar は読まない
+        try e.grammarSegment(grammar);
+        defer {
+            e.grammar = false;
+            e.grammar_failed = false;
+        }
         const first = try e.prefill(prompt, prop, sink);
+        cv.grammar_failed = grammar and e.grammar_failed;
         // the MTP layer's rows' range and carry, also when the prefill stopped before its first token (its commit
         // needs the range of the chunks done; a drafts-off request keeps the prompt's range only)
         // MTP 層の行の範囲と carry。最初のトークンの前に prefill が止まったときも (確定には終わったチャンクの範囲が
@@ -3034,6 +3106,11 @@ pub const Engine = struct {
             R += r;
         }
         try m.b.ids.uploadAsync(0, std.mem.sliceAsBytes(ids[0..R]), e.stream.handle);
+        // Fiore-lab: the grammar conversations' rows masked (their one row each), every other row's on word 0
+        // Fiore-lab: 文法の会話の行に mask (それぞれ 1 行)、ほかの行の on 語は 0
+        var gram: [multi_max]bool = @splat(false);
+        for (live[0..nl], 0..) |j, i| gram[i] = m.convs[ks[j]].grammar;
+        try e.multiMasks(ks, live[0..nl], rows[0..nl], gram[0..nl]);
         const slot = try e.multiGraph(key, seqs[0..nl]);
         try m.tev[0].record(e.stream);
         try m.execs[slot].launchOn(e.stream);
@@ -3047,6 +3124,24 @@ pub const Engine = struct {
             m.gpu_ns[1] += @intFromFloat(@as(f64, try cuda.Event.elapsedMs(m.tev[2], m.tev[3])) * 1e6);
             m.taps_pending = false;
         }
+        // Fiore-lab: a grammar conversation whose masked row has no allowed finite value (pickMasked's -1, the same
+        // verdict on every rank from the gathered flags) ends here, before any draw, emit or row is kept
+        // Fiore-lab: mask つきの行に許された有限値がない文法の会話 (pickMasked の -1。集めた flags から全ランクで同じ判定)
+        // は、抽選・emit・行の保持の前にここで終わる
+        var gfail: [multi_max]bool = @splat(false);
+        {
+            var o1: usize = 0;
+            for (live[0..nl], 0..) |j, i| {
+                const cv = &m.convs[ks[j]];
+                if (cv.grammar and picks[o1] < 0) {
+                    gfail[i] = true;
+                    cv.grammar_failed = true;
+                    cv.done = true;
+                    cv.st.finish = .cancelled;
+                }
+                o1 += rows[i];
+            }
+        }
         // temperature > 0: the conversation's rows drawn from the window's logits as generateDrafted draws them (row i
         // at position P + 1 + i, stopping after the first that differs from its draft), in place of the argmax picks
         // temperature > 0: 会話の行を、generateDrafted と同じくウィンドウの logits から抽選する (行 i は位置 P + 1 + i、
@@ -3055,6 +3150,10 @@ pub const Engine = struct {
             var o2: usize = 0;
             for (live[0..nl], 0..) |j, i| {
                 const cv = &m.convs[ks[j]];
+                if (gfail[i]) {
+                    o2 += rows[i];
+                    continue;
+                }
                 if (cv.samp) |s| {
                     var sp: [vrows]u32 = undefined;
                     const np = try e.sampleRows(try m.b.lpart.at(o2 * e.vshare * 4), rows[i], cv.P + 1, s, drafts[i][0..nd[i]], &sp);
@@ -3076,6 +3175,10 @@ pub const Engine = struct {
         for (live[0..nl], 0..) |j, i| {
             const k = ks[j];
             const cv = &m.convs[k];
+            if (gfail[i]) {
+                o += rows[i];
+                continue;
+            }
             const pk = picks[o..][0..rows[i]];
             var acc: usize = 0; // drafts equal to the picks before them / 手前の選択と一致した draft の数
             while (acc < nd[i] and acc + 1 < rows[i] and drafts[i][acc] == @as(u32, @intCast(pk[acc]))) acc += 1;
@@ -3443,4 +3546,40 @@ test "bucket rounds up to a power of two above the chunk" {
     try std.testing.expectEqual(@as(?u32, 4096), bucket(2049, 2048));
     try std.testing.expectEqual(@as(?u32, 4096), bucket(4096, 2048));
     try std.testing.expectEqual(@as(?u32, 8192), bucket(4097, 2048));
+}
+
+/// Fiore-lab: a batched window's mask layout: `rows` and `gram` per conversation in window order; `on` gets 1 at each
+/// grammar conversation's row (its only row) and 0 elsewhere in [0, R). null: a grammar conversation with other than
+/// one row, or the window past forward.multi_rows.
+/// Fiore-lab: まとめたウィンドウの mask の並び: `rows`・`gram` はウィンドウの順の会話ごと。`on` は各文法の会話の行
+/// (その唯一の行) に 1、[0, R) のほかは 0。null: 1 行でない文法の会話、または forward.multi_rows を超えるウィンドウ。
+pub const MaskRows = struct { R: usize, count: usize, at: [multi_max]usize };
+pub fn maskRowsOf(rows: []const u32, gram: []const bool, on: []u32) ?MaskRows {
+    if (rows.len != gram.len or rows.len > multi_max) return null;
+    var out: MaskRows = .{ .R = 0, .count = 0, .at = @splat(0) };
+    for (rows, gram, 0..) |r, g, i| {
+        if (g and r != 1) return null;
+        if (out.R + r > on.len) return null;
+        out.at[i] = out.R;
+        for (on[out.R..][0..r]) |*w| w.* = 0;
+        if (g) {
+            on[out.R] = 1;
+            out.count += 1;
+        }
+        out.R += r;
+    }
+    return out;
+}
+
+test "maskRowsOf: a grammar conversation's one row is on, every other row off, offsets past wider ones" {
+    var on: [32]u32 = @splat(7);
+    const lay = maskRowsOf(&.{ 8, 1, 4, 1 }, &.{ false, true, false, true }, &on).?;
+    try std.testing.expectEqual(@as(usize, 14), lay.R);
+    try std.testing.expectEqual(@as(usize, 2), lay.count);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 8, 9, 13 }, &lay.at);
+    for (on[0..14], 0..) |w, i| try std.testing.expectEqual(@as(u32, @intFromBool(i == 8 or i == 13)), w);
+    try std.testing.expect(maskRowsOf(&.{ 2, 1 }, &.{ true, false }, &on) == null);
+    try std.testing.expect(maskRowsOf(&.{ 20, 20 }, &.{ false, false }, &on) == null);
+    const none = maskRowsOf(&.{ 8, 8 }, &.{ false, false }, &on).?;
+    try std.testing.expectEqual(@as(usize, 0), none.count);
 }

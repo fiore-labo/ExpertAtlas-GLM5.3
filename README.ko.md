@@ -37,6 +37,14 @@ GB10을 1개씩 탑재한 NVIDIA DGX Spark 4대 또는 8대에서 텐서 병렬 
 - 같은 답을 내는 모드(`DETERMINISTIC=1`): 같은 요청을 같은 순서로 보내면 다시 시작해도 같은 token이 돌아옵니다.
 - `/metrics`(Prometheus 텍스트)와 `/health`는 실행 중인 요청도 집계하므로, 모니터는 요청이 실행되는 동안에도 prefill과 decode 속도, 캐시 적중, 드래프트 채택을 읽을 수 있습니다. `METRICS_LISTEN`을 설정하면 다른 호스트의 모니터를 위해 이 두 가지를 별도의 주소에서 읽기 전용으로 제공합니다.
 
+## r3.3.7-102에서 바뀐 점
+
+- **`MULTI`에서도 구조화 출력:** `MULTI`로 시작한 엔진에서도 구조화 요청(`response_format`, `text.format`,
+  `output_config.format`)을 400으로 거절하지 않습니다. 함께 decode하는 대화 중 하나가 되어, 라운드마다 윈도의 1행을
+  문법에 따라 decode하며 다른 대화의 draft 행과 나란히 갑니다. 구조화가 아닌 요청은 r3.3.6-102와 같이 decode합니다.
+  링의 4대·DFlash2에서 `MULTI=2`와 `MULTI=4`로 확인했습니다: 구조화와 일반 요청을 섞은 것(greedy와 sampled),
+  구조화 4개를 동시에, 사고 포함, 긴 prompt의 prefill 옆, 클라이언트가 끊은 스트림, `max_tokens`에서의 잘림.
+
 ## r3.3.6-102에서 바뀐 점
 
 - **Expert Atlas 자체 빌드로 만들었습니다:** 엔진과 서버는 Expert Atlas 자체 CUDA 빌드(`zig/build/expertatlas.zig`)로
@@ -63,7 +71,7 @@ GB10을 1개씩 탑재한 NVIDIA DGX Spark 4대 또는 8대에서 텐서 병렬 
 
 ## r3.3.3-102에서 바뀐 점
 
-- **구조화 출력(기본으로 켜짐):** 응답의 답을 JSON 객체나 JSON Schema에 맞게 묶어 둘 수 있습니다. `/v1/chat/completions`에서는 `response_format`(vLLM의 `guided_json`과 `structured_outputs`도), `/v1/responses`에서는 `text.format`, `/v1/messages`에서는 `output_config.format`으로 요청합니다. 모델은 token마다 문법이 허용하는 token 중에서만 고르므로, 답은 JSON으로 읽히고 스키마에 맞습니다(`max_tokens`로 잘린 경우는 제외). 사고를 켜면 모델은 먼저 자유롭게 사고합니다. 문법이 적힌 것보다 느슨하게만 지킬 수 있는 스키마는 절반만 지키는 대신 400으로 거절합니다. 도구와 함께이거나 `MULTI`일 때도 400입니다. 문법은 llguidance 1.9.1(MIT)이며 아카이브와 이미지에 들어 있습니다. `STRUCTURED=0`으로 끌 수 있습니다([FEATURES](glm53/release/FEATURES.md#13-structured-output), 영어).
+- **구조화 출력(기본으로 켜짐):** 응답의 답을 JSON 객체나 JSON Schema에 맞게 묶어 둘 수 있습니다. `/v1/chat/completions`에서는 `response_format`(vLLM의 `guided_json`과 `structured_outputs`도), `/v1/responses`에서는 `text.format`, `/v1/messages`에서는 `output_config.format`으로 요청합니다. 모델은 token마다 문법이 허용하는 token 중에서만 고르므로, 답은 JSON으로 읽히고 스키마에 맞습니다(`max_tokens`로 잘린 경우는 제외). 사고를 켜면 모델은 먼저 자유롭게 사고합니다. 문법이 적힌 것보다 느슨하게만 지킬 수 있는 스키마는 절반만 지키는 대신 400으로 거절합니다. 도구와 함께일 때도 400입니다. 문법은 llguidance 1.9.1(MIT)이며 아카이브와 이미지에 들어 있습니다. `STRUCTURED=0`으로 끌 수 있습니다([FEATURES](glm53/release/FEATURES.md#13-structured-output), 영어).
 - 구조화 요청은 drafter 없이 decode하므로 더 느립니다. 일반 요청은 r3.3.2-102와 같은 token, 같은 속도입니다.
 - 소스에서 빌드하려면 Rust 1.95.0도 필요합니다("소스에서 빌드").
 
@@ -174,12 +182,12 @@ Fiore-lab의 것과 구조가 같고 같은 방식으로 로드됩니다.
 릴리스는 컨테이너 이미지와, 같은 파일을 담은 아카이브의 두 가지 형태로 배포합니다. 권장하는 방법은 이미지입니다. 가중치를 준비해 두면 첫 번째 노드에서 다음 한 줄로 엔진이 시작됩니다.
 
 ```sh
-docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.6-102 up
+docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.7-102 up
 ```
 
 마지막에 주소와 함께 `READY`가 표시됩니다. API는 `http://FIRST-NODE:8000/v1`, 컨트롤 패널은 `http://FIRST-NODE:8010/panel`입니다. 부족한 것이 있으면 `STOP`으로 끝나고, 할 일과 다음에 실행할 줄을 알려 줍니다. 절차와 모든 옵션은 [QUICKSTART](glm53/release/QUICKSTART.md)(영어)에 있습니다.
 
-같은 결과를 수동으로 얻으려면, 이미지의 경우 모든 노드에서 `docker pull`하고 `mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out`을 실행한 뒤, `glm53.conf`에 `RUNTIME=docker`와 `IMAGE`를 설정합니다([packaging/RUNTIME.md](packaging/RUNTIME.md) "Running in containers", 영어). Docker를 쓰지 않는 경우: 릴리스 아카이브 `tensorfold-r3.3.6-102-linux-aarch64.tar.gz`를 내려받아 함께 들어 있는 `RUNTIME.md`(이 저장소에서는 [packaging/RUNTIME.md](packaging/RUNTIME.md), 영어)를 따르세요. 어느 쪽이든 `glm53.conf.example`(8대) 또는 `glm53.t4.conf.example`(4대, [glm53/release/T4.md](glm53/release/T4.md) 참고, 영어)를 `glm53.conf`로 복사하고 요구하는 항목을 채운 다음 `./tf-glm53 deploy`와 `./tf-glm53 up`(컨트롤 패널을 시작합니다)을 실행하고, 거기서 엔진을 시작합니다. `./tf-glm53 start`는 직전 시작의 계획으로 시작하고, `./tf-glm53 down`은 정지합니다.
+같은 결과를 수동으로 얻으려면, 이미지의 경우 모든 노드에서 `docker pull`하고 `mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out`을 실행한 뒤, `glm53.conf`에 `RUNTIME=docker`와 `IMAGE`를 설정합니다([packaging/RUNTIME.md](packaging/RUNTIME.md) "Running in containers", 영어). Docker를 쓰지 않는 경우: 릴리스 아카이브 `tensorfold-r3.3.7-102-linux-aarch64.tar.gz`를 내려받아 함께 들어 있는 `RUNTIME.md`(이 저장소에서는 [packaging/RUNTIME.md](packaging/RUNTIME.md), 영어)를 따르세요. 어느 쪽이든 `glm53.conf.example`(8대) 또는 `glm53.t4.conf.example`(4대, [glm53/release/T4.md](glm53/release/T4.md) 참고, 영어)를 `glm53.conf`로 복사하고 요구하는 항목을 채운 다음 `./tf-glm53 deploy`와 `./tf-glm53 up`(컨트롤 패널을 시작합니다)을 실행하고, 거기서 엔진을 시작합니다. `./tf-glm53 start`는 직전 시작의 계획으로 시작하고, `./tf-glm53 down`은 정지합니다.
 
 서버는 기본적으로 모든 주소(`HOST=0.0.0.0`)에서 OpenAI chat API와, Claude Code를 위한 Anthropic Messages API를 제공합니다. API에도 컨트롤 패널에도 키가 없으므로 접근할 수 있는 누구나 사용할 수 있습니다. 노드를 닫힌 네트워크 안에 두거나 앞에 TLS와 접근 제어를 두세요(`HOST=127.0.0.1`과 `LAUNCHER_HOST=127.0.0.1`이면 첫 번째 노드에서만 사용할 수 있습니다).
 
@@ -222,7 +230,7 @@ Zig 0.17.0이 `PATH`에 있고(또는 `build_libs.sh`에는 `ZIG=`로 그 경로
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so, lib/libllguidance.so
-zig build dist -Dversion=r3.3.6-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.3.7-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 
@@ -232,7 +240,7 @@ zig build dist -Dversion=r3.3.6-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-p
 
 - GB10 시스템 4대 또는 8대를 지원합니다. 2대와 3대 구성은 테스트 중입니다. 다른 GPU나 다른 랭크 수는 지원하지 않습니다.
 - 기본적으로 한 번에 요청 하나만 실행합니다. 다른 요청은 32개까지 도착한 순서대로 기다리고(채팅 제목을 만드는 요청은 맨 뒤), 32개를 넘으면 서버가 거절합니다(503, 스트리밍에서는 오류 이벤트). `MULTI`를 쓰면 최대 4개를 함께 decode하지만 노드 메모리가 더 듭니다. 그 밖의 경우, 서브에이전트를 병렬로 실행하는 에이전트라면 서브에이전트를 다른 모델에 연결하는 편이 좋습니다.
-- 구조화 출력은 JSON 객체와 JSON Schema만 됩니다(정규식, 선택지, 문법은 아직). 도구와 함께이거나 `MULTI`에서는 쓸 수 없습니다.
+- 구조화 출력은 JSON 객체와 JSON Schema만 됩니다(정규식, 선택지, 문법은 아직). 도구와 함께일 때는 쓸 수 없습니다.
 - 컨트롤 패널의 화면은 영어와 일본어만 있습니다.
 - 그 밖의 제한 사항은 `packaging/RUNTIME.md`에 있습니다.
 

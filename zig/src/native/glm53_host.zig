@@ -938,7 +938,9 @@ pub const Host = struct {
 
     fn maskFill(ctx: *anyopaque, row: []u32) bool {
         const h = self(ctx);
-        const job = h.running orelse return false;
+        // Fiore-lab: a batched admission's prefill (TF_GLM53_MULTI) asks for its first token's mask here too
+        // Fiore-lab: まとめた受け付けの prefill (TF_GLM53_MULTI) も最初の token の mask をここで求める
+        const job = h.running orelse h.prefilling orelse return false;
         const g = if (job.grammar) |*g| g else return false;
         const start = h.now();
         const ok = g.fill(row);
@@ -950,7 +952,6 @@ pub const Host = struct {
 
     fn structureRefusal(h: *Host, job: *Job) ?[]const u8 {
         if (job.request.structure == null) return null;
-        if (h.multi_n > 0) return "structured output does not support MULTI yet";
         if (job.request.drafts) return "structured output does not support drafts yet: it requires draft=false";
         if (job.grammar == null or h.grammar == null or h.grammar.?.tokenizer == null) return "structured output requires a compiled grammar and initialized tokenizer";
         if (job.request.eos.len == 0 or job.request.stop != null) return "structured output requires EOS stopping and no stop strings";
@@ -2544,6 +2545,12 @@ pub const Host = struct {
         const k = h.eng.multiFree() orelse return h.requeue(job);
         const mode: u8 = if (!r.drafts) 0 else if (h.eng.mtp != null) glm.lockstep.mode_mtp else if (h.eng.drafter != null) glm.lockstep.mode_dflash else 0;
         var header: glm.lockstep.Header = .{ .max_tokens = @intCast(@min(job.maxNow(), std.math.maxInt(i32))), .stop_eos = r.eos.len > 0, .mode = mode };
+        // Fiore-lab: the grammar's segment as serve decides it (the answer's start emitted once)
+        // Fiore-lab: 文法の区間は serve と同じに決める (答えの始まりは 1 回だけ出す)
+        if (job.grammar) |*g| {
+            if (g.segment(r.structure.?.after != null, job.think_shut, job.br_writing)) emit(job, .answer);
+            header.grammar = g.active;
+        }
         // a later segment of the same reply continues its own slot (Header.own_slot)
         // 同じ応答の 2 つ目以降の区間は自分のスロットを続ける (Header.own_slot)
         if (job.segs > 0) header.own_slot = job.pool_x;
@@ -2577,7 +2584,7 @@ pub const Host = struct {
         // again
         // ここからそのプランが pool を変える: その prefill の中で読む待ち行列の見積もり (yieldFor) は作り直す
         h.pool_gen +%= 1;
-        glm.lockstep.leadAdmit(&h.ch, h.eng, k, header, prompt, sinkOf(&h.outs[k]), .{ .ctx = @ptrCast(h), .f = liveFor, .release = releaseFor, .pace = &h.pace, .share = &h.share, .straight = job.short, .yield = yieldFor, .paused = &h.mid_paused_ns }) catch |err| {
+        glm.lockstep.leadAdmit(&h.ch, h.eng, k, header, prompt, sinkOf(&h.outs[k]), .{ .ctx = @ptrCast(h), .f = liveFor, .release = releaseFor, .pace = &h.pace, .share = &h.share, .straight = job.short, .yield = yieldFor, .paused = &h.mid_paused_ns, .prepare = prepareFor }) catch |err| {
             h.lock();
             h.prefilling = null;
             // back in the scheduler's hands (a cancel from now on is recorded for it)
@@ -2653,6 +2660,40 @@ pub const Host = struct {
 
     fn releaseFor(ctx: *anyopaque, k: usize) void {
         self(ctx).releaseConv(k);
+    }
+
+    fn prepareFor(ctx: *anyopaque, ks: []const u8, stops: []bool) void {
+        self(ctx).prepareRound(ks, stops);
+    }
+
+    /// Fiore-lab: just before a batched round is shared (rank 0's scheduler thread, once a round): each grammar
+    /// conversation's mask for its next token, from its matcher (every token of the round before is accepted by now),
+    /// into the engine's staging row. A mask it cannot compute stops that conversation in this round's event.
+    /// Fiore-lab: まとめたラウンドを配る直前 (rank 0 のスケジューラのスレッド、ラウンドごとに 1 回): 文法の会話ごとに、
+    /// 次の token の mask を matcher から作り、エンジンの置き場の行へ書く (前のラウンドの token はもう全部受理した)。作れ
+    /// なかった会話は、このラウンドの出来事で止める。
+    fn prepareRound(h: *Host, ks: []const u8, stops: []bool) void {
+        const m = h.eng.multi.?;
+        var states: [glm.engine.multi_max]?*structure.State = @splat(null);
+        var gram: [glm.engine.multi_max]bool = @splat(false);
+        var rows: [glm.engine.multi_max]?[]u32 = @splat(null);
+        var fresh: [glm.engine.multi_max]bool = @splat(false);
+        var any = false;
+        for (ks, 0..) |k, i| {
+            gram[i] = m.convs[k].grammar;
+            if (!gram[i]) continue;
+            any = true;
+            if (h.act[k]) |job| if (job.grammar) |*g| {
+                states[i] = g;
+            };
+            rows[i] = h.eng.maskStage(k);
+        }
+        if (!any) return;
+        const start = h.now();
+        const n = structure.stageRound(states[0..ks.len], gram[0..ks.len], rows[0..ks.len], stops, fresh[0..ks.len]);
+        const elapsed = h.now() - start;
+        if (elapsed > 10 * std.time.ns_per_ms) std.log.warn("glm53: grammar masks took {d} ms (batched)", .{@divTrunc(elapsed, std.time.ns_per_ms)});
+        if (n > 0) for (ks, fresh[0..ks.len]) |k, f| if (f) if (h.act[k]) |job| h.stopJob(job);
     }
 
     /// The prefill in flight, `left` rows from its end, gives way when TF_GLM53_MULTI_SHORT_PREEMPT is on, a short
@@ -2751,7 +2792,10 @@ pub const Host = struct {
             sinks[n] = sinkOf(&h.outs[k]);
             n += 1;
         };
-        if (n > 0) glm.lockstep.leadRound(&h.ch, h.eng, ks[0..n], stops[0..n], sinks[0..n]) catch |err| fatal("a batched round", err);
+        if (n > 0) {
+            h.prepareRound(ks[0..n], stops[0..n]);
+            glm.lockstep.leadRound(&h.ch, h.eng, ks[0..n], stops[0..n], sinks[0..n]) catch |err| fatal("a batched round", err);
+        }
         for (h.act[0..h.multi_n], 0..) |a, k| if (a != null and m.convs[k].done) h.releaseConv(k);
     }
 
@@ -2759,6 +2803,9 @@ pub const Host = struct {
     /// 会話 k が終わった: 全ランクで確定し、統計を付けて job を終える。
     fn releaseConv(h: *Host, k: usize) void {
         const job = h.act[k].?;
+        // Fiore-lab: the masked pick's verdict, read before the commit frees the conversation
+        // Fiore-lab: mask つき pick の判定。確定が会話を空ける前に読む
+        const numeric_failed = h.eng.multi.?.convs[k].grammar_failed;
         const st = glm.lockstep.leadRelease(&h.ch, h.eng, k) catch |err| fatal("releasing a conversation", err);
         h.pool_gen +%= 1;
         // a prefill that gave way to a short prompt: its chunks done are committed (as a stop in the prompt); the job
@@ -2782,10 +2829,18 @@ pub const Host = struct {
         // the summary beside the reply ended with its segment (max_tokens or the context left): closed as at its EOS
         // 応答の横での要約が区間とともに終わった (max_tokens か残りの文脈): EOS で終わった時と同じに閉じる
         if (job.br_writing and job.cut == null and !job.quiet) job.cut = .{ .fold = .branch_close };
+        // Fiore-lab: a grammar failure ends the reply (no next segment) through the one terminal path below, as serve's
+        // verdicts: the numeric one first, then the matcher's
+        // Fiore-lab: 文法の失敗は応答を終える (次の区間はない)。下の 1 本の終わりの道を通る。serve と同じ判定: 先に数値、
+        // 次に matcher
+        // Fiore-lab: a close at the length/context boundary must not re-admit a zero-token segment (as serve)
+        // Fiore-lab: 長さ・文脈の端で閉じた時、残り 0 token の区間を受け入れ直さない (serve と同じ)
+        const grammar_full = if (job.cut) |cut| cut.fold == .grammar and job.fits(cut) == null else false;
+        const may_go_on = if (job.grammar) |*g| structure.releaseGoesOn(g, numeric_failed, job.cut != null, grammar_full) else job.cut != null;
         // stopped for a notice or the budget's cut: it goes on from the queue's head (its progress stays out of the
         // totals until its last segment ends)
         // お知らせか予算の打ち切りのために止めた: 待ち行列の先頭から続ける (進み具合は最後の区間が終わるまで合計に入れない)
-        if (job.cut != null and h.goOn(job, st, k)) return;
+        if (may_go_on and h.goOn(job, st, k)) return;
         h.lock();
         h.act[k] = null;
         // its progress joins the totals as it leaves the live ones, under the same lock: status reads it in one or
@@ -2795,18 +2850,34 @@ pub const Host = struct {
             h.addFinished(&h.totals, job, start, h.now());
             h.totals.requests_total += 1;
         }
-        const cancelled = job.quiet and std.mem.indexOfScalar(api.Id, h.cancels.items, job.id) != null;
+        const listed = std.mem.indexOfScalar(api.Id, h.cancels.items, job.id) != null;
+        const cancelled = job.quiet and listed;
+        // Fiore-lab: a grammar reply's cancel as serve reads it (closing, or its cancel recorded), before the record goes
+        // Fiore-lab: 文法の応答の取り消しは serve と同じに読む (終了中、または取り消しの記録)。記録を落とす前に
+        const g_cancelled = job.grammar != null and (h.closing or listed);
         // its cancels are spent (run() clears the list a request; the batched scheduler drops a request's as it ends)
         // その取り消しは使い終わった (run() は要求ごとに消す。まとめるスケジューラは終わった要求の分を外す)
         h.dropCancels(job.id);
         const computed = job.done -| job.cached;
         h.unlock();
-        const reason: api.Reason = if (job.quiet) (if (cancelled) .cancelled else .stop) else switch (st.finish) {
+        var reason: api.Reason = if (job.quiet) (if (cancelled) .cancelled else .stop) else switch (st.finish) {
             .stop => .stop,
             .length => .length,
             .cancelled => .cancelled,
         };
-        h.finish(job, reason, statsOf(job, st, computed), "");
+        var message: []const u8 = "";
+        if (job.grammar) |*g| {
+            reason = switch (g.finishReason(st.finish == .length or grammar_full, g_cancelled)) {
+                .failed => .failed,
+                .cancelled => .cancelled,
+                .stop => .stop,
+                .length => .length,
+            };
+            if (reason == .failed) message = g.message();
+        }
+        // Fiore-lab: the job leaves the live ones above (act[k] null under the lock); finish destroys it, once
+        // Fiore-lab: job は上で使用中から外した (ロックの下で act[k] を null に)。finish が 1 回だけ壊す
+        h.finish(job, reason, statsOf(job, st, computed), message);
     }
 
     fn followMulti(h: *Host) void {

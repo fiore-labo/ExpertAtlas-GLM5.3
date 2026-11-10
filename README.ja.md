@@ -38,6 +38,15 @@
 - 同じ答えを出すモード (`DETERMINISTIC=1`): 同じ要求を同じ順に送れば、起動し直しても同じ token が返ります。
 - `/metrics`（Prometheus のテキスト）と `/health` は実行中のリクエストの分も数えるので、モニタはリクエストの実行中にも prefill と decode の速さ、キャッシュのヒット、ドラフトの受理を読めます。`METRICS_LISTEN` を設定すると、別のホストのモニタ向けに、この 2 つを専用のアドレスで読み取り専用で開きます。
 
+## r3.3.7-102 で変わったこと
+
+- **`MULTI` でも構造化出力:** `MULTI` で起動したエンジンでも、構造化の要求 (`response_format`、`text.format`、
+  `output_config.format`) を 400 で断らなくなりました。同時に decode する会話の 1 つになり、ラウンドごとにウィンドウの
+  1 行を文法に従って decode します。ほかの会話の draft の行と並びます。構造化でない要求は r3.3.6-102 と同じに decode
+  します。リングの 4 台・DFlash2 で `MULTI=2` と `MULTI=4` を確かめました: 構造化とふつうの要求を混ぜたもの (greedy
+  と sampled)、構造化 4 本を同時に、思考あり、長い prompt の prefill の横、クライアントが切ったストリーム、
+  `max_tokens` での打ち切り。
+
 ## r3.3.6-102 で変わったこと
 
 - **Expert Atlas 自身のビルドで作りました:** エンジンとサーバーは Expert Atlas 自身の CUDA ビルド
@@ -65,7 +74,7 @@
 
 ## r3.3.3-102 で変わったこと
 
-- **構造化出力 (既定でオン):** 返事の答えを JSON のオブジェクトか JSON Schema に保てます。`/v1/chat/completions` では `response_format` (vLLM の `guided_json` と `structured_outputs` も)、`/v1/responses` では `text.format`、`/v1/messages` では `output_config.format` で頼みます。モデルは token ごとに文法が許す token の中からだけ選ぶので、答えは JSON として読め、スキーマに合います (`max_tokens` で切れたときを除きます)。思考ありなら、モデルはまず自由に思考します。文法が書いてあるより緩くしか守れないスキーマは、半分だけ守る代わりに 400 で断ります。ツールと一緒のとき、`MULTI` のときも 400 です。文法は llguidance 1.9.1 (MIT) で、アーカイブとイメージに入っています。`STRUCTURED=0` でオフにできます ([FEATURES](glm53/release/FEATURES.ja.md#13-構造化出力))。
+- **構造化出力 (既定でオン):** 返事の答えを JSON のオブジェクトか JSON Schema に保てます。`/v1/chat/completions` では `response_format` (vLLM の `guided_json` と `structured_outputs` も)、`/v1/responses` では `text.format`、`/v1/messages` では `output_config.format` で頼みます。モデルは token ごとに文法が許す token の中からだけ選ぶので、答えは JSON として読め、スキーマに合います (`max_tokens` で切れたときを除きます)。思考ありなら、モデルはまず自由に思考します。文法が書いてあるより緩くしか守れないスキーマは、半分だけ守る代わりに 400 で断ります。ツールと一緒のときも 400 です。文法は llguidance 1.9.1 (MIT) で、アーカイブとイメージに入っています。`STRUCTURED=0` でオフにできます ([FEATURES](glm53/release/FEATURES.ja.md#13-構造化出力))。
 - 構造化のリクエストは drafter なしで decode するので、遅くなります。普通のリクエストは r3.3.2-102 と同じ token、同じ速さです。
 - ソースからのビルドには Rust 1.95.0 も要ります (「ソースからのビルド」)。
 
@@ -176,12 +185,12 @@ Fiore-lab のものと形が同じで、同じように読み込まれます。
 リリースは、コンテナイメージと、同じファイルを持つアーカイブの 2 つの形で配布します。おすすめはイメージです。重みを置いてあれば、1 台目のノードで次の 1 行を実行するとエンジンが起動します。
 
 ```sh
-docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.6-102 up
+docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.7-102 up
 ```
 
 最後に `READY` とアドレスが出ます。API は `http://FIRST-NODE:8000/v1`、コントロールパネルは `http://FIRST-NODE:8010/panel` です。足りないものがあると `STOP` で止まり、することと次に実行する行を示します。手順と全オプションは [QUICKSTART](glm53/release/QUICKSTART.ja.md) にあります。
 
-同じことを手で行う場合、イメージなら、全ノードで `docker pull` し、`mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out` を実行して、`glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定します（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3.3.6-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。どちらも、`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーして必要な項目を記入し、`./tf-glm53 deploy` と `./tf-glm53 up`（コントロールパネルを起動します）を実行して、パネルでエンジンを起動します。`./tf-glm53 start` は直前の起動の計画で起動し、`./tf-glm53 down` で停止します。
+同じことを手で行う場合、イメージなら、全ノードで `docker pull` し、`mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out` を実行して、`glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定します（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3.3.7-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。どちらも、`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーして必要な項目を記入し、`./tf-glm53 deploy` と `./tf-glm53 up`（コントロールパネルを起動します）を実行して、パネルでエンジンを起動します。`./tf-glm53 start` は直前の起動の計画で起動し、`./tf-glm53 down` で停止します。
 
 サーバーは既定で全アドレス（`HOST=0.0.0.0`）で OpenAI chat API と、Claude Code 向けの Anthropic Messages API を提供します。API にもコントロールパネルにもキーはないので、届く人なら誰でも使えます。ノードを閉じたネットワーク内に留めるか、前段に TLS とアクセス制御を置いてください（`HOST=127.0.0.1` と `LAUNCHER_HOST=127.0.0.1` にすると 1 台目のノードからだけになります）。
 
@@ -224,7 +233,7 @@ Zig 0.17.0 が `PATH` 上にあり（または `build_libs.sh` には `ZIG=` で
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so, lib/libllguidance.so
-zig build dist -Dversion=r3.3.6-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.3.7-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 
@@ -234,7 +243,7 @@ zig build dist -Dversion=r3.3.6-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-p
 
 - GB10 システム 4 台または 8 台に対応します。2 台と 3 台の構成はテスト中です。他の GPU や他のランク数には対応していません。
 - 既定では、同時に実行するリクエストは 1 件です。他のリクエストは 32 件まで到着順に待ち（チャットのタイトル作成は最後）、それを超えるとサーバーは断ります（503、ストリーミングではエラーイベント）。`MULTI` を使うと 4 件までまとめて decode できますが、ノードのメモリが要ります。それ以外の場合、サブエージェントを並列に動かすエージェントでは、サブエージェントを別のモデルに向けるほうが適しています。
-- 構造化出力は JSON のオブジェクトと JSON Schema だけです (正規表現・選択肢・文法はまだ)。ツールと一緒のときと `MULTI` では使えません。
+- 構造化出力は JSON のオブジェクトと JSON Schema だけです (正規表現・選択肢・文法はまだ)。ツールと一緒のときは使えません。
 - コントロールパネルの画面は英語と日本語だけです。
 - その他の制限は `packaging/RUNTIME.ja.md` に記載しています。
 

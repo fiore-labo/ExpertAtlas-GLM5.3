@@ -1,6 +1,6 @@
 English | [日本語](AI-GUIDE.ja.md) | [简体中文](AI-GUIDE.zh-CN.md)
 
-# A guide for AI assistants: full GLM-5.3 on DGX Spark (release r3.3.6-102)
+# A guide for AI assistants: full GLM-5.3 on DGX Spark (release r3.3.7-102)
 
 This page describes the whole system in one place: what it is, what each part does, how it is used, what it can do
 and what it cannot. It is written for AI assistants that help someone understand, install, run or troubleshoot this
@@ -272,9 +272,9 @@ forever).
 - Structured output (`FEATURES.md`, "Structured output"): `response_format` `json_object` or `json_schema` (also vLLM's
   `guided_json` and `structured_outputs`; `text.format` on `/v1/responses`, `output_config.format` on `/v1/messages`)
   holds the answer to a JSON object or to the schema. With the thinking on (the chat API's default) `max_tokens` must be
-  at least 545. Refused with 400: beside `tools`, with `stop` strings or `ignore_eos`, with `MULTI`, and schemas the
-  grammar would keep less strictly than they say (FEATURES lists them). It decodes without the drafter; `STRUCTURED=0`
-  turns it off.
+  at least 545. Refused with 400: beside `tools`, with `stop` strings or `ignore_eos`, and schemas the
+  grammar would keep less strictly than they say (FEATURES lists them). It decodes without the drafter (with `MULTI`,
+  beside the other conversations); `STRUCTURED=0` turns it off.
 - With `DETERMINISTIC=1` (`FEATURES.md`, "Same answers") the same requests in the same order give the same tokens
   after every start, at any temperature (a request without a `seed` takes one from its prompt). `/health` and each
   reply's `tensorfold` say `"deterministic": true`; `tensorfold.token_sha` is a hash of the reply's tokens.
@@ -366,7 +366,7 @@ allocs/delete). `AGENT-API.md` gives what an agent needs of it; its fields may c
   start (it is set aside at the start).
 - Read images (the chat API refuses them, `/v1/messages` turns them into a note), or accept `n` > 1, `logprobs` or forced
   tool calls (`tool_choice` `required` or a named tool). Structured output takes a JSON object or a JSON Schema only (no
-  regex, choice or grammar), not beside tools or with `MULTI`.
+  regex, choice or grammar), not beside tools.
 - Give the same replies from start to start by default: the kernels' tiles are timed at each start and some sums run
   in arrival order. `DETERMINISTIC=1` gives them (one conversation at a time, prefill about 20 % slower), all but a
   tool call's id. (The accuracy measurements use a deterministic configuration made for scoring.)

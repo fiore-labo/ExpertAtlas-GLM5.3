@@ -286,7 +286,6 @@ print(json.loads(choice.message.content)["primes"])
 - **以 400 拒绝的情况**，在回复的任何头部之前（流式也一样），每种都附带说明原因的消息：
   - 与 `tools`（非空列表）一起，或 `tool_choice` 为 `required` 或指定函数：尚不支持；
   - 与 `stop` 字符串（可能截断 JSON）或 `ignore_eos` 一起；
-  - 以 `MULTI` 启动的引擎：尚不支持；
   - `regex`、`choice` 和 `grammar`（`guided_regex`、`guided_choice`、`guided_grammar`，以及 `structured_outputs` 中的同类字段）：尚不支持，
     请使用 `json_object` 或 `json_schema`；
   - 语法只能比所写更宽松地遵守的 schema。服务器先检查 schema 并拒绝它，而不是返回不符合它的 JSON：JSON Schema 2020-12 以外的 `$schema`；
@@ -299,7 +298,7 @@ print(json.loads(choice.message.content)["primes"])
   - 被 `max_tokens` 截断的回复以 `finish_reason` `length` 结束，其答案是未完成的 JSON：解析前请检查 `finish_reason`。
   - JSON 中不出现 `\u` 转义：其他字符按原样写出，因此一个键只有一种写法；没有短转义（`\n`、`\r`、`\t`、`\b`、`\f`）的控制字符无法写出。两个
     token 之间的空白最多为一个换行和最多 64 个空格或制表符。
-  - 结构化请求在没有 drafter（MTP 或 DFlash2）的情况下 decode，因此比同样长度的普通请求慢。普通请求与以前相同：与 r3.3.2-102 相同的 token、相同的速度。
+  - 结构化请求在没有 drafter（MTP 或 DFlash2）的情况下 decode，因此比同样长度的普通请求慢。使用 `MULTI` 时，它是一起 decode 的对话之一（每轮占窗口的一行，与其他对话的 draft 行并列，自 r3.3.7-102 起）。普通请求与以前相同：与 r3.3.2-102 相同的 token、相同的速度。
   - 关闭方法：引擎设置（Server）中的 **Structured output**、`docker run` 行的 `-e STRUCTURED=0` 或 `glm53.conf` 中的 `STRUCTURED=0`，
     从下一次启动起生效；此类请求随后得到 400（`CONFIG.zh-CN.md`）。如果第一个节点无法加载 `lib/libllguidance.so`，引擎会在没有它的情况下启动
     （rank 0 的日志：`structured output unavailable`），并返回同样的 400。

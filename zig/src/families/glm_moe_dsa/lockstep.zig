@@ -645,6 +645,11 @@ pub const Live = struct {
     // この prefill がほかのために止まっていた時間 (ラウンド、取り分による待ち)。止まる所ごとに足す (rank 0 のスケジューラ
     // のスレッド): チャンク自体の時間は残り
     paused: ?*i96 = null,
+    // Fiore-lab: just before each round is shared (rank 0): the host stages the grammar conversations' masks and may
+    // set a conversation's stop (a mask it could not compute), which the round's event then carries to every rank
+    // Fiore-lab: 各ラウンドを配る直前 (rank 0): ホストが文法の会話の mask を置き場に書き、会話を止めてよい (mask を作れ
+    // なかった)。その停止はラウンドの出来事が全ランクへ運ぶ
+    prepare: ?*const fn (ctx: *anyopaque, ks: []const u8, stops: []bool) void = null,
 };
 
 const LeadMid = struct {
@@ -739,6 +744,7 @@ const LeadMid = struct {
             const pc = m.live.pace orelse break;
             if (!pc.behind(s) or m.e.stop_req.load(.monotonic)) break;
             const t0 = m.now();
+            if (m.live.prepare) |p| p(m.live.ctx, ks[0..n], stops[0..n]);
             try leadRound(m.ch, m.e, ks[0..n], stops[0..n], sinks[0..n]);
             for (ks[0..n]) |k| if (m.e.multi.?.convs[k].done) m.live.release(m.live.ctx, k);
             pc.addDecode(s, m.now() - t0);
@@ -849,7 +855,7 @@ pub fn leadAdmit(ch: *Channel, e: *engine.Engine, k: usize, h0: Header, prompt: 
     var lm: LeadMid = .{ .ch = ch, .e = e, .k = k, .live = live orelse .{ .ctx = undefined, .f = noLive, .release = noRelease } };
     e.mid = .{ .ctx = @ptrCast(&lm), .first = LeadMid.first, .f = LeadMid.run };
     defer e.mid = null;
-    try e.multiStart(k, prompt, @intCast(h.max_tokens), h.stop_eos, h.mode == mode_dflash or h.mode == mode_mtp, samplingOf(h), sink);
+    try e.multiStart(k, prompt, @intCast(h.max_tokens), h.stop_eos, h.mode == mode_dflash or h.mode == mode_mtp, samplingOf(h), h.grammar, sink);
 }
 
 fn noLive(_: *anyopaque, _: usize, _: []u8, _: []bool, _: []?engine.Sink) usize {
@@ -918,7 +924,7 @@ pub fn followMulti(ch: *Channel, e: *engine.Engine) !void {
                 var fm: FollowMid = .{ .ch = ch, .e = e, .k = k };
                 e.mid = .{ .ctx = @ptrCast(&fm), .first = FollowMid.first, .f = FollowMid.run };
                 defer e.mid = null;
-                try e.multiStart(k, prompt, @intCast(h.max_tokens), h.stop_eos, h.mode == mode_dflash or h.mode == mode_mtp, samplingOf(h), null);
+                try e.multiStart(k, prompt, @intCast(h.max_tokens), h.stop_eos, h.mode == mode_dflash or h.mode == mode_mtp, samplingOf(h), h.grammar, null);
             },
             ev_round => try followRound(e, w),
             ev_release => _ = try pool_serve.commitMulti(e, @intCast(w[1])),

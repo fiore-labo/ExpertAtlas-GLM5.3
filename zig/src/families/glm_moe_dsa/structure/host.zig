@@ -185,6 +185,47 @@ pub const State = struct {
     }
 };
 
+/// Fiore-lab: a batched round's masks staged before its event is shared (TF_GLM53_MULTI): for each conversation of the
+/// round (`states`, null for one without a grammar; `gram`, its admission's grammar bit), a grammar conversation not
+/// stopped gets its matcher's mask in `rows[i]` (the engine's staging row, null when there is none). One it cannot
+/// fill is stopped in `stops` and marked in `fresh`, so the round's event stops it on every rank; the caller stops its
+/// job. Returns how many were stopped here.
+/// Fiore-lab: まとめたラウンドの出来事を配る前に mask を置き場に書く (TF_GLM53_MULTI): ラウンドの会話ごとに
+/// (`states` は文法のない会話なら null、`gram` は受け付けの文法の bit)、止めていない文法の会話は matcher の mask を
+/// `rows[i]` (エンジンの置き場の行。なければ null) に受け取る。書けなかった会話は `stops` で止め、`fresh` に印を付ける。
+/// ラウンドの出来事が全ランクでそれを止め、呼び出し側が job を止める。ここで止めた数を返す。
+pub fn stageRound(states: []const ?*State, gram: []const bool, rows: []const ?[]u32, stops: []bool, fresh: []bool) usize {
+    std.debug.assert(states.len == gram.len and gram.len == rows.len and rows.len == stops.len and stops.len == fresh.len);
+    var n: usize = 0;
+    for (states, gram, rows, stops, fresh) |st, g, row, *stp, *fr| {
+        fr.* = false;
+        if (stp.* or !g) continue;
+        // a grammar row with no matcher must not run on a stale staged mask: stopped
+        // matcher のない文法の行は古い置き場の mask で走らせない: 止める
+        const ok = if (st) |s| (if (row) |r| s.fill(r) else blk: {
+            s.fail("structured output is unavailable");
+            break :blk false;
+        }) else false;
+        if (!ok) {
+            stp.* = true;
+            fr.* = true;
+            n += 1;
+        }
+    }
+    return n;
+}
+
+/// Fiore-lab: a batched conversation's end (releaseConv), before its cut is followed: the masked pick's numeric verdict
+/// recorded first (finishReason then puts it before the matcher's). Returns whether a cut may admit the next segment:
+/// never after a failure, nor for a grammar close with no room left (`grammar_full`).
+/// Fiore-lab: まとめた会話の終わり (releaseConv)、打ち切りに従う前: 先に mask つき pick の数値の判定を記録する
+/// (finishReason はそれを matcher の判定より前に置く)。打ち切りのあと次の区間を受け入れてよいかを返す: 失敗のあとと、
+/// 余地のない文法の閉じ (`grammar_full`) では不可。
+pub fn releaseGoesOn(s: *State, numeric_failed: bool, cut: bool, grammar_full: bool) bool {
+    if (numeric_failed) s.fail("grammar logits contain an allowed NaN or no allowed finite value");
+    return !s.failed() and !grammar_full and cut;
+}
+
 pub fn clearPadding(row: []u32, real_size: u32) void {
     const start = @min(real_size, row.len * 32);
     var id: usize = start;

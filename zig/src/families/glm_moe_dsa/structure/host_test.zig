@@ -153,3 +153,60 @@ test "structured host: finish: failed before cancellation and done, partial leng
     try t.expectEqual(.failed, s.finishReason(false, false));
     try t.expect(s.failed());
 }
+
+test "structured host: a batched round stages only grammar rows not stopped; a failed fill stops it before the event" {
+    const a = Fake.api();
+    var ok_m: Fake = .{};
+    var bad_m: Fake = .{ .mask_error = true };
+    var s_ok = ok_m.state(&a);
+    var s_bad = bad_m.state(&a);
+    var s_stopped = ok_m.state(&a);
+    var r0: [host.words]u32 = undefined;
+    var r1: [host.words]u32 = undefined;
+    var r2: [host.words]u32 = undefined;
+    var r3: [host.words]u32 = undefined;
+    // [plain, grammar ok, grammar failing, grammar already stopped, grammar without a staging row, grammar without a matcher]
+    const states = [_]?*host.State{ null, &s_ok, &s_bad, &s_stopped, &s_ok, null };
+    const gram = [_]bool{ false, true, true, true, true, true };
+    const rows = [_]?[]u32{ &r0, &r1, &r2, &r3, null, &r0 };
+    var stops = [_]bool{ false, false, false, true, false, false };
+    var fresh: [6]bool = undefined;
+    const fills_before = ok_m.fills;
+    const n = host.stageRound(&states, &gram, &rows, &stops, &fresh);
+    try t.expectEqual(@as(usize, 3), n);
+    try t.expectEqualSlices(bool, &.{ false, false, true, true, true, true }, &stops);
+    try t.expectEqualSlices(bool, &.{ false, false, true, false, true, true }, &fresh);
+    // the healthy one filled its own row once; the stopped one was not filled
+    try t.expectEqual(fills_before + 1, ok_m.fills);
+    try t.expect(llg.allowed(&r1, 10));
+    try t.expect(s_bad.failed());
+    try t.expect(s_ok.failed()); // the row without a staging buffer failed the same state (index 4 shares s_ok)
+}
+
+test "structured host: a batched release follows a cut only without a failure or a full grammar close" {
+    const a = Fake.api();
+    var f: Fake = .{};
+    var s = f.state(&a);
+    try t.expect(host.releaseGoesOn(&s, false, true, false));
+    try t.expect(!host.releaseGoesOn(&s, false, false, false));
+    try t.expect(!host.releaseGoesOn(&s, false, true, true));
+    // the numeric verdict first: recorded, no continuation, finishReason reports failed before cancelled
+    try t.expect(!host.releaseGoesOn(&s, true, true, false));
+    try t.expect(s.failed());
+    try t.expectEqualStrings("grammar logits contain an allowed NaN or no allowed finite value", s.message());
+    try t.expect(s.finishReason(false, true) == .failed);
+    // a matcher failure also blocks it and is kept over a later numeric one
+    var g: Fake = .{ .reject = true };
+    var s2 = g.state(&a);
+    s2.active = true;
+    try t.expect(s2.accept(10) == .failed);
+    try t.expect(!host.releaseGoesOn(&s2, true, true, false));
+    try t.expectEqualStrings("first line", s2.message());
+    // done > length; cancelled > done
+    var d: Fake = .{ .accepting = true };
+    var s3 = d.state(&a);
+    try t.expect(s3.accept(154820) == .done);
+    try t.expect(!host.releaseGoesOn(&s3, false, false, false));
+    try t.expect(s3.finishReason(true, false) == .stop);
+    try t.expect(s3.finishReason(true, true) == .cancelled);
+}

@@ -354,7 +354,6 @@ print(json.loads(choice.message.content)["primes"])
 - **Refused with 400**, before any header of the reply (a stream too), each with a message that says why:
   - with `tools` (a list that is not empty), or `tool_choice` `required` or a named function: not yet;
   - with `stop` strings (they could cut the JSON) or `ignore_eos`;
-  - on an engine started with `MULTI`: not yet;
   - `regex`, `choice` and `grammar` (`guided_regex`, `guided_choice`, `guided_grammar`, and the same under
     `structured_outputs`): not yet; use `json_object` or `json_schema`;
   - a schema the grammar would follow less strictly than it says. The server checks the schema first and refuses it,
@@ -374,7 +373,9 @@ print(json.loads(choice.message.content)["primes"])
     character without a short escape (`\n`, `\r`, `\t`, `\b`, `\f`) cannot be written. Between two tokens it has at
     most one line break and up to 64 spaces or tabs.
   - A structured request decodes without the drafter (MTP or DFlash2), so it decodes more slowly than a plain request
-    of the same length. Plain requests are as before: the same tokens and the same speed as on r3.3.2-102.
+    of the same length. With `MULTI` it is one of the conversations decoded together (one row of the window a round,
+    beside the others' drafted rows), from r3.3.7-102. Plain requests are as before: the same tokens and the same speed
+    as on r3.3.2-102.
   - To turn it off: **Structured output** in the engine settings (Server), `-e STRUCTURED=0` on the `docker run` line or
     `STRUCTURED=0` in `glm53.conf`, from the next start; such requests then get 400 (`CONFIG.md`). If the first node cannot load
     `lib/libllguidance.so`, the engine starts without it (rank 0's log: `structured output unavailable`) and they get

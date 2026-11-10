@@ -310,7 +310,6 @@ print(json.loads(choice.message.content)["primes"])
 - **400 で断るもの。** 返事のヘッダより前に断ります (ストリーミングでも同じ)。どれも理由をメッセージで返します。
   - `tools` (空でない一覧) と一緒のとき、`tool_choice` が `required` か名前を指定した関数のとき: まだ対応していません。
   - `stop` の文字列 (JSON を途中で切りうるため) や `ignore_eos` と一緒のとき。
-  - `MULTI` で起動したエンジン: まだ対応していません。
   - `regex`・`choice`・`grammar` (`guided_regex`・`guided_choice`・`guided_grammar`、`structured_outputs` の同じもの): まだ対応していません。
     `json_object` か `json_schema` を使ってください。
   - 文法が、書いてあるより緩くしか守れないスキーマ。サーバーは先にスキーマを確かめ、守っていない JSON を返す代わりに断ります: JSON Schema 2020-12
@@ -325,7 +324,7 @@ print(json.loads(choice.message.content)["primes"])
   - `max_tokens` で切れた返事は `finish_reason` が `length` で、答えは終わっていない JSON です。読む前に `finish_reason` を確かめてください。
   - JSON に `\u` のエスケープは出ません。ほかの文字はそのまま書くので、キーの綴りは 1 通りです。短いエスケープ (`\n`、`\r`、`\t`、`\b`、`\f`)
     のない制御文字は書けません。token の間の空白は、改行 1 つまでと、空白かタブ 64 個までです。
-  - 構造化のリクエストは drafter (MTP や DFlash2) なしで decode するので、同じ長さの普通のリクエストより遅くなります。普通のリクエストは前と同じで、
+  - 構造化のリクエストは drafter (MTP や DFlash2) なしで decode するので、同じ長さの普通のリクエストより遅くなります。`MULTI` では、同時に decode する会話の 1 つになります (ラウンドごとにウィンドウの 1 行。ほかの会話の draft の行と並びます。r3.3.7-102 から)。普通のリクエストは前と同じで、
     r3.3.2-102 と同じ token、同じ速さです。
   - オフにするには、エンジン設定の「サーバー」の **構造化出力**、`docker run` の行の `-e STRUCTURED=0`、`glm53.conf` の `STRUCTURED=0` のどれかを使います。
     次の起動から効き、そのようなリクエストは 400 になります (`CONFIG.ja.md`)。最初のノードが `lib/libllguidance.so` を読み込めないときは、
