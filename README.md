@@ -63,6 +63,19 @@ sit together at the top level.
   speed, cache hits and draft acceptance while a request runs. `METRICS_LISTEN` serves the two read-only on an address
   of their own, for a monitor on another host.
 
+## New in r3.3.6-102
+
+- **Built by Expert Atlas's own build.** The engine and the server come from Expert Atlas's own CUDA build
+  (`zig/build/expertatlas.zig`): the seven GLM-5.3 kernels, the GLM-5.3 engine, and the server over Expert Atlas's own
+  engine contract (`zig/src/expertatlas/`), with r3.3.5-102's sampler (the same draws). TensorFold 1.0.2's lane host and
+  its parts for other models are no longer built. In the same answers mode the tokens and the KV cache are the same as
+  r3.3.5-102's.
+- **A smaller source tree:** the repository leaves out the parts of TensorFold 1.0.2 that the build does not use (the
+  other model families, the Metal backend and the macOS build, the CUDA kernels other than GLM-5.3's, Nemotron's and the
+  older CLI's parts, the Python server tests, and the code only those parts used), 699 files. `NOTICE` and `THIRD_PARTY_NOTICES.md` say what is left out.
+- The archive and the image hold the same files as r3.3.5-102's but `LICENSES/MiaAI-Lab-MIT.txt`: the Flash Next code
+  it covers is not in them.
+
 ## New in r3.3.5-102
 
 - **Faster decode, the same tokens.** The Hadamard rotation before each rotated linear is done by the kernel that makes
@@ -277,7 +290,7 @@ The release comes as a container image and as an archive with the same files; th
 the weights in place, one line on the first node starts the engine:
 
 ```sh
-docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.5-102 up
+docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.6-102 up
 ```
 
 It ends in `READY` with the addresses: the API at `http://FIRST-NODE:8000/v1` and the control panel at
@@ -287,7 +300,7 @@ It ends in `READY` with the addresses: the API at `http://FIRST-NODE:8000/v1` an
 To the same end by hand, with the image: `docker pull` it on every node, run
 `mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out`, and set
 `RUNTIME=docker` and `IMAGE` in `glm53.conf` ([packaging/RUNTIME.md](packaging/RUNTIME.md), "Running in containers").
-Without Docker: download the release archive `tensorfold-r3.3.5-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
+Without Docker: download the release archive `tensorfold-r3.3.6-102-linux-aarch64.tar.gz` and follow its `RUNTIME.md`
 ([packaging/RUNTIME.md](packaging/RUNTIME.md) here). Either way, copy `glm53.conf.example` (eight nodes) or
 `glm53.t4.conf.example` (four nodes, see [glm53/release/T4.md](glm53/release/T4.md)) to `glm53.conf`, fill in what it
 asks for, then `./tf-glm53 deploy` and `./tf-glm53 up`, which starts the control panel, and start the engine there.
@@ -359,7 +372,7 @@ libibverbs headers (`libibverbs-dev`) and Rust 1.95.0 through rustup (`rustup to
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so, lib/libllguidance.so
-zig build dist -Dversion=r3.3.5-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.3.6-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 

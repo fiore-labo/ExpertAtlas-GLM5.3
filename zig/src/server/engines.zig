@@ -1,4 +1,5 @@
-//! The engines this binary opens for a checkpoint: the backend module built in (Metal, or none for the tests).
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
+//! The engines this binary opens for a checkpoint: the backend module built in (Fiore-lab: Expert Atlas's GLM-5.3 engine).
 const std = @import("std");
 const api = @import("engine_api");
 const native = @import("native_engines");

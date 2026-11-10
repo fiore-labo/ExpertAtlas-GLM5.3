@@ -1,5 +1,5 @@
 // Fiore-lab: TensorFold 1.0.2's zig/src/core/lanes/sampling.zig as it was (only these two lines added), the reference
-// sampling_match_test.zig checks sampling.cpp against; nothing else imports it.
+// sampling_match_test.zig checks sampling.cpp against (and expertatlas/sampling_match_test.zig, Expert Atlas's).
 //! The keyed host sampler (Python exact_sampling.py) bit for bit: libm's exp and log, numpy's sum order.
 const std = @import("std");
 const Allocator = std.mem.Allocator;

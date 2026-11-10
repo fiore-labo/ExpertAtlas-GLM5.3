@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! Prompt-cache states on disk (Imprint): a learned harness state outlives the server and serves later fresh sessions.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -297,13 +298,6 @@ pub fn readAt(fd: c_int, dest: []u8, at: u64) bool {
         done += @intCast(n);
     }
     return true;
-}
-
-/// This Mac's OS build (sysctl kern.osversion): its Metal compiler can change a kernel's bits.
-pub fn osBuild(buf: []u8) []const u8 {
-    var n: usize = buf.len;
-    if (std.c.sysctlbyname("kern.osversion", buf.ptr, &n, null, 0) != 0) return "";
-    return std.mem.sliceTo(buf[0..n], 0);
 }
 
 /// Where learned states live unless --learn-dir says: $HOME/.cache/tensorfold/learned.

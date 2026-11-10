@@ -152,7 +152,6 @@ pub const Metrics = struct {
         try histogram(w, "request_time_per_output_token_seconds", "Seconds from the first generated token to the last, divided by the tokens less one.", snap.tpot);
         try gauge(w, "decode_rounds_total", "counter", "Decode rounds used by finished requests.", snap.rounds);
         try histogram(w, "request_prefill_seconds", "Seconds a finished request's prompt pass took.", snap.prefill);
-        if (footprint()) |bytes| try gauge(w, "process_footprint_bytes", "gauge", "This process's physical footprint as the OS counts it, Metal buffers included; only where the platform reports one (macOS).", bytes);
         if (engine.memory(false)) |mem| {
             try gauge(w, "device_memory_bytes", "gauge", "Device memory the engine holds now: weights, caches and live streams; only where the backend counts it (CUDA).", mem.active);
             try gauge(w, "device_memory_peak_bytes", "gauge", "The most device memory the engine has held since start or the last /health?reset_peak=1.", mem.peak);
@@ -284,17 +283,6 @@ fn num(buf: []u8, value: f64) []const u8 {
 fn trimmed(buf: []u8, value: f64, comptime places: u8) []const u8 {
     const text = std.fmt.bufPrint(buf, "{d:." ++ std.fmt.comptimePrint("{d}", .{places}) ++ "}", .{value}) catch return "0";
     return std.mem.trimEnd(u8, std.mem.trimEnd(u8, text, "0"), ".");
-}
-
-extern "c" fn proc_pid_rusage(pid: c_int, flavor: c_int, buffer: *anyopaque) c_int;
-extern "c" fn getpid() c_int;
-
-/// The process's physical footprint where macOS reports one (rusage_info_v4).
-fn footprint() ?u64 {
-    if (builtin.os.tag != .macos) return null;
-    var info: [43]u64 = undefined;
-    if (proc_pid_rusage(getpid(), 4, &info) != 0) return null;
-    return info[9];
 }
 
 test "edges and numbers" {

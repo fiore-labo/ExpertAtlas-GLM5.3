@@ -14,20 +14,28 @@ Fiore-lab added the engine of full GLM-5.3 for DGX Spark (zig/src/families/glm_m
 zig/kernels/cuda/glm53/, zig/native/, zig/src/native/glm53_host.zig, zig/src/cuda/cublas.zig,
 zig/src/cuda/tp.zig, zig/src/server/panel.html, zig/tests/cuda/glm53_*.zig, zig/tests/cuda/roce_main.zig,
 zig/tests/cuda/tp_main.zig, zig/src/server/glm_rescue.zig, zig/src/server/schema_check.zig,
-zig/src/server/schema_check_test.zig, zig/src/server/structured_test.zig, glm53/), the keyed host sampler in
-better C (zig/src/core/lanes/sampling.cpp, zig/src/core/lanes/sampling_match_test.zig, zig/build/lanes.zig),
+zig/src/server/schema_check_test.zig, zig/src/server/structured_test.zig, glm53/), Expert Atlas's own build and
+engine contract (zig/build/expertatlas.zig, zig/src/expertatlas/, zig/src/native/expertatlas.zig), the keyed host
+sampler in better C (zig/src/core/lanes/sampling.cpp, zig/src/core/lanes/sampling_match_test.zig, zig/build/lanes.zig),
 vendored llguidance (third_party/llguidance/, its own license; THIRD_PARTY_NOTICES.md) and
 changed these TensorFold files, each of which says so in its first lines:
 
   build.zig
   tools/release/package.sh
+  tools/release/smoke.sh
+  tools/release/test_package.py
   tools/zig/test_lanes.sh
   zig/build/dist.zig
   zig/build/cuda.zig
+  zig/src/cli/cli.zig
+  zig/src/cli/hub.zig
   zig/src/core/direct_io.zig
   zig/src/core/engine_api.zig
   zig/src/core/lane_host_reuse_test.zig
   zig/src/core/lanes/sampling.zig
+  zig/src/core/prompt_imprint.zig
+  zig/src/core/root.zig
+  zig/src/core/safetensors.zig
   zig/src/core/template/access.zig
   zig/src/core/template/eval.zig
   zig/src/core/template/methods.zig
@@ -45,10 +53,13 @@ changed these TensorFold files, each of which says so in its first lines:
   zig/src/native/cuda.zig
   zig/src/server/anthropic.zig
   zig/src/server/anthropic_translate.zig
+  zig/src/server/auth.zig
   zig/src/server/chat.zig
   zig/src/server/cli.zig
+  zig/src/server/engines.zig
   zig/src/server/fields.zig
   zig/src/server/hf_text.zig
+  zig/src/server/live.zig
   zig/src/server/main.zig
   zig/src/server/messages.zig
   zig/src/server/metrics.zig
@@ -75,11 +86,21 @@ a value open), taken in unchanged apart from their first line; Fiore-lab then ch
 tool_parse_test.zig so that a GLM value holding </arg_value> or </tool_call> reads whole (glm_rescue.zig).
 
 zig/src/core/lanes/sampling_ref.zig is TensorFold 1.0.2's zig/src/core/lanes/sampling.zig, unchanged apart from its
-first two lines: the reference sampling_match_test.zig checks the better C sampler against.
+first two lines: the reference zig/src/core/lanes/sampling_match_test.zig and
+zig/src/expertatlas/sampling_match_test.zig check the better C samplers against.
 
 Fiore-lab's published tree leaves out TensorFold's documents; its README*.md (English, Japanese, Simplified Chinese
 and Korean), packaging/RUNTIME*.md (English, Japanese and Simplified Chinese) and the documents under glm53/ are
 Fiore-lab's, and Fiore-lab added the sections "Full GLM-5.3 in Zig" and "Unicode data" to THIRD_PARTY_NOTICES.md.
+
+The published tree also leaves out the parts of TensorFold 1.0.2 that Expert Atlas's own build does not build: the
+families other than glm_moe_dsa, the Metal backend and kernels, the CUDA kernels other than zig/kernels/cuda/glm53/,
+the lane host (except zig/src/core/lanes/sampling_ref.zig, the reference Expert Atlas's sampler is checked against)
+with the lanes' keyed sampler in better C, the cluster and fabric layers, TensorFold's CLI, engine registries and CUDA
+build, and their tests and tools. Of the changed files listed above, tools/zig/test_lanes.sh, zig/build/cuda.zig,
+zig/src/core/engine_api.zig, zig/src/core/lane_host_reuse_test.zig, zig/src/core/lanes/sampling.zig,
+zig/src/native/cuda.zig, zig/tests/server/build.sh and zig/tests/server/zig_test.sh are among them, and so is
+zig/build/lanes.zig of the additions. Its THIRD_PARTY_NOTICES.md keeps the sections for what it holds.
 
 The additions include code from TensorFold's Python engine and from b12x, some of it
 modified by Fiore-lab, as THIRD_PARTY_NOTICES.md lists. The additions are licensed under

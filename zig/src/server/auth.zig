@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! API keys held as SHA-256 digests with labels; a restricted key file reread on change or SIGHUP.
 const std = @import("std");
 const posix = std.posix;
@@ -265,20 +266,14 @@ const Meta = struct { mode: u32, size: u64, dev: u64, ino: u64, mtime_ns: i128 }
 
 /// `path` at the working directory, or the open `fd` itself when `path` is null.
 fn meta(fd: posix.fd_t, path: ?[*:0]const u8) ?Meta {
-    if (builtin.os.tag == .linux) {
-        const linux = std.os.linux;
-        var sx: linux.Statx = undefined;
-        const want: linux.STATX = .{ .TYPE = true, .MODE = true, .INO = true, .SIZE = true, .MTIME = true };
-        const rc = if (path) |p| std.c.statx(posix.AT.FDCWD, p, 0, want, &sx) else std.c.statx(fd, "", 0x1000, want, &sx); // AT_EMPTY_PATH
-        if (rc != 0) return null;
-        const dev = (@as(u64, sx.dev_major) << 32) | sx.dev_minor;
-        return .{ .mode = sx.mode, .size = sx.size, .dev = dev, .ino = sx.ino, .mtime_ns = @as(i128, sx.mtime.sec) * std.time.ns_per_s + sx.mtime.nsec };
-    }
-    var st: posix.Stat = undefined;
-    const rc = if (path) |p| posix.system.stat(p, &st) else posix.system.fstat(fd, &st);
-    if (posix.errno(rc) != .SUCCESS) return null;
-    const t = st.mtime();
-    return .{ .mode = @intCast(st.mode), .size = @intCast(st.size), .dev = @intCast(st.dev), .ino = @intCast(st.ino), .mtime_ns = std.math.lossyCast(i128, t.nsec) + @as(i128, t.sec) * std.time.ns_per_s };
+    // Fiore-lab: statx alone (Linux); TensorFold's stat fallback served macOS
+    const linux = std.os.linux;
+    var sx: linux.Statx = undefined;
+    const want: linux.STATX = .{ .TYPE = true, .MODE = true, .INO = true, .SIZE = true, .MTIME = true };
+    const rc = if (path) |p| std.c.statx(posix.AT.FDCWD, p, 0, want, &sx) else std.c.statx(fd, "", 0x1000, want, &sx); // AT_EMPTY_PATH
+    if (rc != 0) return null;
+    const dev = (@as(u64, sx.dev_major) << 32) | sx.dev_minor;
+    return .{ .mode = sx.mode, .size = sx.size, .dev = dev, .ino = sx.ino, .mtime_ns = @as(i128, sx.mtime.sec) * std.time.ns_per_s + sx.mtime.nsec };
 }
 
 test "the key file: refused while others can read it, read at 0600, reread after an edit" {

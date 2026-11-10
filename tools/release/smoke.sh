@@ -1,4 +1,6 @@
 #!/bin/sh
+# Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files): the macOS check is gone with the macOS archive,
+# and LICENSES/MiaAI-Lab-MIT.txt is not looked for (the published tree leaves out the Flash Next code it covers).
 # Run on each archive's OS and CPU. No Python, model, GPU, network or checkout is needed.
 set -eu
 [ "$#" -eq 2 ] || { echo 'usage: smoke.sh ARCHIVE MAJOR.MINOR.PATCH' >&2; exit 2; }
@@ -14,14 +16,7 @@ root="$scratch/unpacked/$(basename "$archive" .tar.gz)"
 (cd "$root"; $checker -c SHA256SUMS)
 [ -f "$root/LICENSE" ] && [ -f "$root/NOTICE" ]
 [ -f "$root/LICENSES/MIT.txt" ] && [ -f "$root/THIRD_PARTY_NOTICES.md" ]
-[ -f "$root/LICENSES/Apache-2.0.txt" ] && [ -f "$root/LICENSES/MiaAI-Lab-MIT.txt" ]
-if [ "$(uname -s)" = Darwin ]; then
-    nm -m "$root/bin/tensorfold-native" > "$scratch/memcpy-symbols.txt"
-    grep -q 'external _memcpy (from libSystem)' "$scratch/memcpy-symbols.txt" || {
-        echo 'tensorfold-native does not import memcpy from libSystem' >&2
-        exit 1
-    }
-fi
+[ -f "$root/LICENSES/Apache-2.0.txt" ]
 cd "$scratch/empty"
 actual=$(env -i PATH=/usr/bin:/bin HOME="$scratch/home" "$root/bin/tensorfold-native" --version)
 [ "$actual" = "tensorfold-native $version" ]

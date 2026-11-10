@@ -1,5 +1,6 @@
 // Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
-//! TensorFold's CUDA runtime: the driver, cuBLASLt and NCCL through dlopen, our kernels and Triton's, no Python.
+//! TensorFold's CUDA runtime: the driver, cuBLAS and NCCL through dlopen, our kernels, no Python.
+//! Fiore-lab: without cuBLASLt, Triton's AOT kernels and the segments, which GLM-5.3 does not use.
 
 pub const abi = @import("abi.zig");
 pub const Driver = @import("driver.zig").Driver;
@@ -18,20 +19,14 @@ pub const Args = launch.Args;
 pub const Config = launch.Config;
 pub const Dim3 = launch.Dim3;
 pub const graph = @import("graph.zig");
-pub const cublaslt = @import("cublaslt.zig");
 pub const cublas = @import("cublas.zig");
 pub const nccl = @import("nccl.zig");
 pub const tp = @import("tp.zig");
-pub const triton = @import("triton.zig");
-pub const aot = @import("aot.zig");
 pub const kernels = @import("kernels.zig");
-pub const segments = @import("segments.zig");
 
 test {
     _ = @import("memory.zig");
     _ = launch;
     _ = abi;
-    _ = aot;
-    _ = segments;
     _ = tp;
 }

@@ -37,7 +37,7 @@ NCCL_LIB=~/nccl-2.30.7/nvidia/nccl/lib/libnccl.so.2
 # node needs Docker and the NVIDIA container toolkit, and the libraries are the image's, so NCCL_LIB is not used).
 # RUNTIME.md, "Running in containers".
 #RUNTIME=docker
-#IMAGE=glm53-tensorfold:r3.3.5-102
+#IMAGE=glm53-tensorfold:r3.3.6-102
 
 # What a start reads besides the banks, fiore-lab/GLM-5.3-EXL3-Base on Hugging Face, the same path on every node. A
 # full checkpoint (fiore-lab/GLM-5.3-EXL3-8x-DGX-Sparks) serves as well: its routed experts are not read.

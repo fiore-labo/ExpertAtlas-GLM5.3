@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! The Hugging Face cache on disk: where checkpoints live, their sizes, and which Zig family serves them.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -8,23 +9,12 @@ pub const GiB: u64 = 1 << 30;
 /// One family the engine registry serves, with a display title.
 pub const Family = struct { model_type: []const u8, title: []const u8, formats: []const []const u8 };
 
-const titles = [_]struct { model_type: []const u8, title: []const u8 }{
-    .{ .model_type = "nemotron_h", .title = "Nemotron 3.5 Lightning" },
-    .{ .model_type = "qwen4_exp", .title = "Qwen3.8 Flash Next" },
-    .{ .model_type = "glm5_next", .title = "GLM-5.3-Flash" },
-    .{ .model_type = "qwen3_5", .title = "Qwen3.5-2B" },
-};
-
 /// The family that serves `model_type` from the engine registry, or null when Zig cannot serve it (the 0.6 line may).
 pub fn family(model_type: []const u8) ?Family {
     for (engines.families) |f| {
         if (!std.mem.eql(u8, f.model_type, model_type)) continue;
-        var title: []const u8 = f.model_type;
-        for (titles) |t| if (std.mem.eql(u8, t.model_type, model_type)) {
-            title = t.title;
-            break;
-        };
-        return .{ .model_type = f.model_type, .title = title, .formats = f.formats };
+        // Fiore-lab: TensorFold's titles named its other families; the registry serves glm_moe_dsa only
+        return .{ .model_type = f.model_type, .title = f.model_type, .formats = f.formats };
     }
     return null;
 }

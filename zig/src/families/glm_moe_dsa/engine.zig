@@ -36,7 +36,7 @@ const unpack_cache = @import("unpack_cache.zig");
 const slots_mod = @import("slots.zig");
 const tune = @import("tune.zig");
 const linear = @import("linear.zig");
-const lanes = @import("lanes");
+const sampling = @import("sampling"); // Expert Atlas's keyed sampling (expertatlas/sampling.zig)
 const expert_live = @import("expert_live.zig");
 const expert_swap = @import("expert_swap.zig");
 const expert_plan = @import("expert_plan.zig");
@@ -45,11 +45,11 @@ const load_pipe = @import("load_pipe.zig");
 pub const ExpertLive = expert_live.Live;
 /// A request's sampling: keyed draws by (seed, position, id), so drafted and serial replies match.
 /// 要求のサンプリング: (seed, 位置, id) をキーにした抽選なので、draft ありと逐次の応答は一致する。
-pub const Sampling = lanes.Sampling;
-const sampler = lanes.sampling;
+pub const Sampling = sampling.Sampling;
+const sampler = sampling;
 /// A prompt's reproducible seed (salt 0).
 /// prompt から再現できる seed (salt 0)。
-pub const seedFor = lanes.sampling.seedFor;
+pub const seedFor = sampling.seedFor;
 /// Candidates read past top_k (past 256 when top_k is 0), so ties at the edge resolve exactly.
 /// top_k (top_k が 0 なら 256) を超えて読む候補の数。境界の同点を正確に扱うため。
 const sample_margin = 8;

@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! The tensorfold checkpoint subcommands: `models` and `info` (pull adds downloading in its own commit).
 const std = @import("std");
 const models = @import("models.zig");
@@ -18,7 +19,7 @@ pub fn wants(args: []const []const u8) bool {
     return std.mem.eql(u8, cmd, "models") or std.mem.eql(u8, cmd, "info") or std.mem.eql(u8, cmd, "pull");
 }
 
-/// Runs a checkpoint subcommand; `argv` is argv[1..] as in cluster.cli.main.
+/// Runs a checkpoint subcommand; `argv` is argv[1..].
 pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
     const a = init.arena.allocator();
     var out_buf: [64 << 10]u8 = undefined;

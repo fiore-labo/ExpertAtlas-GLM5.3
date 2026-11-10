@@ -1,3 +1,4 @@
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 //! safetensors: the JSON header's names, dtypes, shapes and byte ranges (every backend's index), and read-only maps.
 
 const std = @import("std");
@@ -96,7 +97,7 @@ fn list(v: ?std.json.Value) ?[]const std.json.Value {
     return if (x == .array) x.array.items else null;
 }
 
-/// A non-negative JSON integer, as `zig/src/cluster/checkpoint.zig` reads one; one past i64 arrives as a number string.
+/// A non-negative JSON integer, as TensorFold's cluster checkpoint reader reads one; one past i64 arrives as a number string.
 fn uint(v: std.json.Value) ?usize {
     return switch (v) {
         .integer => |i| std.math.cast(usize, i),

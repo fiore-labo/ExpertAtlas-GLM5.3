@@ -38,6 +38,19 @@
 - 同じ答えを出すモード (`DETERMINISTIC=1`): 同じ要求を同じ順に送れば、起動し直しても同じ token が返ります。
 - `/metrics`（Prometheus のテキスト）と `/health` は実行中のリクエストの分も数えるので、モニタはリクエストの実行中にも prefill と decode の速さ、キャッシュのヒット、ドラフトの受理を読めます。`METRICS_LISTEN` を設定すると、別のホストのモニタ向けに、この 2 つを専用のアドレスで読み取り専用で開きます。
 
+## r3.3.6-102 で変わったこと
+
+- **Expert Atlas 自身のビルドで作りました:** エンジンとサーバーは Expert Atlas 自身の CUDA ビルド
+  (`zig/build/expertatlas.zig`) で作ります。GLM-5.3 のカーネル 7 本、GLM-5.3 のエンジン、Expert Atlas 自身のエンジンの
+  契約 (`zig/src/expertatlas/`) の上のサーバーで、サンプラーは r3.3.5-102 と同じもの (抽選の結果も同じ) です。
+  TensorFold 1.0.2 の lane host と、ほかのモデルのための部分は作らなくなりました。同じ答えのモードで、token と KV
+  キャッシュは r3.3.5-102 と同じです。
+- **ソースのツリーを小さく:** ビルドが使わない TensorFold 1.0.2 の部分 (ほかのモデルの family、Metal のバックエンドと
+  macOS のビルド、GLM-5.3 以外の CUDA カーネル、Nemotron と古い CLI の部分、Python のサーバーの試験、それらだけが使っていたコード) の 699 ファイルを
+  リポジトリに入れなくなりました。入れていないものは `NOTICE` と `THIRD_PARTY_NOTICES.md` に書いてあります。
+- アーカイブとイメージのファイルは、`LICENSES/MiaAI-Lab-MIT.txt` のほかは r3.3.5-102 と同じです。このライセンスが
+  対象とする Flash Next のコードは入っていません。
+
 ## r3.3.5-102 で変わったこと
 
 - **decode が速く、token は同じ:** 回転する linear の前の Hadamard 回転を入力を作るカーネル (rmsnorm、SwiGLU) が一緒に行い、attention の後の residual の足し算と rmsnorm を 1 つのカーネルにしました。温度が 0 より大きいときは、各ランクが行の候補を GPU で選び、それだけを集めます (これまでは語彙全体の logits を集めていました)。リングで decode の 1 ラウンドが前者で 0.3〜0.4 %、後者でさらに 0.4〜0.8 % 短くなり、token と KV キャッシュは前と同じでした (同じ答えを出すモードで比べました)。
@@ -163,12 +176,12 @@ Fiore-lab のものと形が同じで、同じように読み込まれます。
 リリースは、コンテナイメージと、同じファイルを持つアーカイブの 2 つの形で配布します。おすすめはイメージです。重みを置いてあれば、1 台目のノードで次の 1 行を実行するとエンジンが起動します。
 
 ```sh
-docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.5-102 up
+docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.6-102 up
 ```
 
 最後に `READY` とアドレスが出ます。API は `http://FIRST-NODE:8000/v1`、コントロールパネルは `http://FIRST-NODE:8010/panel` です。足りないものがあると `STOP` で止まり、することと次に実行する行を示します。手順と全オプションは [QUICKSTART](glm53/release/QUICKSTART.ja.md) にあります。
 
-同じことを手で行う場合、イメージなら、全ノードで `docker pull` し、`mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out` を実行して、`glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定します（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3.3.5-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。どちらも、`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーして必要な項目を記入し、`./tf-glm53 deploy` と `./tf-glm53 up`（コントロールパネルを起動します）を実行して、パネルでエンジンを起動します。`./tf-glm53 start` は直前の起動の計画で起動し、`./tf-glm53 down` で停止します。
+同じことを手で行う場合、イメージなら、全ノードで `docker pull` し、`mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out` を実行して、`glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定します（[packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)「コンテナで動かす」）。Docker を使わない場合は、リリースアーカイブ `tensorfold-r3.3.6-102-linux-aarch64.tar.gz` をダウンロードし、同梱の `RUNTIME.md`（このリポジトリでは [packaging/RUNTIME.ja.md](packaging/RUNTIME.ja.md)）に従ってください。どちらも、`glm53.conf.example`（8 台）または `glm53.t4.conf.example`（4 台。[glm53/release/T4.ja.md](glm53/release/T4.ja.md) を参照）を `glm53.conf` にコピーして必要な項目を記入し、`./tf-glm53 deploy` と `./tf-glm53 up`（コントロールパネルを起動します）を実行して、パネルでエンジンを起動します。`./tf-glm53 start` は直前の起動の計画で起動し、`./tf-glm53 down` で停止します。
 
 サーバーは既定で全アドレス（`HOST=0.0.0.0`）で OpenAI chat API と、Claude Code 向けの Anthropic Messages API を提供します。API にもコントロールパネルにもキーはないので、届く人なら誰でも使えます。ノードを閉じたネットワーク内に留めるか、前段に TLS とアクセス制御を置いてください（`HOST=127.0.0.1` と `LAUNCHER_HOST=127.0.0.1` にすると 1 台目のノードからだけになります）。
 
@@ -211,7 +224,7 @@ Zig 0.17.0 が `PATH` 上にあり（または `build_libs.sh` には `ZIG=` で
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so, lib/libllguidance.so
-zig build dist -Dversion=r3.3.5-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.3.6-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 

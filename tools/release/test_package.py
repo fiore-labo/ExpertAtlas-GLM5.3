@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files): LICENSES/MiaAI-Lab-MIT.txt is not compared
+# (the published tree leaves out the Flash Next code it covers).
 """CPU regression for repeated packaging; keeps its receipt directory for inspection."""
 import hashlib
 import os
@@ -57,6 +59,6 @@ assert "share/tensorfold/cuda/sm121/cubins/keep.cubin" in second
 assert not any("stale.cubin" in p or "/sm120/" in p for p in second), "stale cubin survived a smaller capture set"
 third = pack()
 assert not any(p.startswith("share/") for p in third), "capture files survived removal of the AOT input"
-for file in ["LICENSES/MIT.txt", "LICENSES/Apache-2.0.txt", "LICENSES/MiaAI-Lab-MIT.txt", "THIRD_PARTY_NOTICES.md"]:
+for file in ["LICENSES/MIT.txt", "LICENSES/Apache-2.0.txt", "THIRD_PARTY_NOTICES.md"]:
     assert third[file] == (root / file).read_bytes(), file
 print(f"PASS same-version full -> smaller -> no capture, all hashes and notice files; receipt {receipt}")

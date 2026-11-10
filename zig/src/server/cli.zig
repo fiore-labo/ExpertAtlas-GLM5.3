@@ -22,9 +22,9 @@ pub const Flag = struct {
     native_values: ?[]const []const u8 = null,
 };
 
-const backend_values: []const []const u8 = if (builtin.os.tag == .macos) &.{ "auto", "mlx" } else &.{ "auto", "cuda" };
+const backend_values: []const []const u8 = &.{ "auto", "cuda" };
 
-/// The CUDA build's own flags and variables (the Metal build refuses them).
+/// The CUDA build's own flags and variables (Fiore-lab: the only build; TensorFold's Metal build refused them).
 const cuda_build = builtin.os.tag == .linux;
 
 /// Every Python serve flag (``cli_args.build_parser``), the ones this binary serves marked native.
@@ -125,7 +125,7 @@ pub const Args = struct {
     metrics_open: bool = false,
     dashboard: bool = false,
     context: ?i64 = null,
-    speed_up: ?[]const u8 = null, // speed-up mode: this Mac's settings for the two-Mac link (Flash Next)
+    speed_up: ?[]const u8 = null, // speed-up mode (TensorFold's two-Mac link; accepted, unused by GLM-5.3)
     prompt_cache_gib: ?f64 = null, // kept prompt states' budget (0: none; null: what 70% of RAM leaves past the loaded server)
     prompt_cache_over_cap: bool = false, // a --prompt-cache-gib past that is kept, not refused
     learn: bool = false, // keep shared prompt states on disk (--learn-dir: where; it implies --learn)

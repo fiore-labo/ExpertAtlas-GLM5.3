@@ -6,7 +6,7 @@
 //! 作る必要があるので、ホスト側の処理は all-gather した値か複製された値だけを読む。
 const std = @import("std");
 const cuda = @import("cuda");
-const lanes = @import("lanes");
+const sampling = @import("sampling"); // Expert Atlas's keyed sampling (expertatlas/sampling.zig)
 const dw = @import("draft_weights.zig");
 const roce = @import("roce.zig");
 const qmm = @import("qmm.zig");
@@ -612,7 +612,7 @@ pub const Drafter = struct {
     /// pending トークン (位置 context_end) の後の位置に、最大 `depth` 個の draft を greedy に出す。`samp` (サンプリング
     /// の要求) では score / temperature にその位置での target の Gumbel 乱数 x noise_weight を足し、target が引く
     /// トークンへ draft を寄せる。
-    pub fn propose(e: *Drafter, pending: u32, depth_in: usize, confidence: f64, samp: ?lanes.Sampling, out: []u32) !usize {
+    pub fn propose(e: *Drafter, pending: u32, depth_in: usize, confidence: f64, samp: ?sampling.Sampling, out: []u32) !usize {
         const c = e.cfg;
         const depth = @min(depth_in, c.block - 1, out.len);
         if (depth < 1 or e.context_end == 0) return 0;
@@ -666,7 +666,7 @@ pub const Drafter = struct {
                 score[j] = (vals[order[j]] + edge_weight * dot) / temp;
                 var pick = score[j];
                 if (sampled) {
-                    const u = lanes.sampling.uniform(samp.?.seed, @intCast(e.context_end + 1 + d), @intCast(tok));
+                    const u = sampling.uniform(samp.?.seed, @intCast(e.context_end + 1 + d), @intCast(tok));
                     pick += noise_weight * -@log(-@log(u));
                 }
                 if (j == 0 or pick > best_pick) {

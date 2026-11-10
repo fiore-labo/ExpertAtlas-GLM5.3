@@ -1,5 +1,5 @@
 //! Two-or-more-rank NCCL check: `tf-tp-test RANK WORLD HOST:PORT`, one process a GPU; RESULT lines hash each output.
-//! tools/zig/tp_oracle.py runs the same collectives on the same inputs from Python; equal hashes mean equal sums.
+//! TensorFold's tools/zig/tp_oracle.py (not published here) runs the same collectives from Python; equal hashes mean equal sums.
 
 const std = @import("std");
 const cuda = @import("cuda");
