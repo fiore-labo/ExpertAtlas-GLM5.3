@@ -1750,3 +1750,43 @@ extern "C" __global__ void tf_glm53_slot_zero(long long* __restrict__ p, long lo
     for (long long i = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x; i < n; i += static_cast<long long>(gridDim.x) * blockDim.x)
         p[i] = 0;
 }
+
+// Fiore-lab, Expert Atlas: the keyed sampling's candidates chosen on the GPU (TF_GLM53_SAMPLE_PICK=gpu). Each rank
+// packs its share of a row's logits into int64 values that order like (logit descending, index ascending), the same
+// order as the host's candidate heap (equal logits: the lower id first; -0 and +0 equal), selects the row's k largest
+// with tf_glm53_topk_keys_select, and writes them with the global id in place of the index; the ranks all-gather only
+// those, and the host keeps the m best of them. Every rank's k best hold the row's m best (k = min(m, its share)).
+// Packing: the high 32 bits are the logit's bits made sign-ordered (negative: the magnitude bits flipped), the low 32
+// bits 0x7FFFFFFF - index. A NaN orders above everything (the host's heap has no order for it).
+// Fiore-lab, Expert Atlas: キー付きサンプリングの候補を GPU で選ぶ。各ランクは行の logits の分担を、(logit の降順,
+// index の昇順) に並ぶ int64 にパックし (ホストの候補ヒープと同じ順。等しい logit は id の小さいほうが前、-0 と +0 は
+// 等しい)、tf_glm53_topk_keys_select で上位 k 個を選び、index をグローバル id に替えて書く。ランク間で all-gather する
+// のはそれだけで、ホストはその中から上位 m 個を残す。各ランクの上位 k 個に、行の上位 m 個はすべて入る。
+
+// packed[r, i] for the R x T logits (one block a row).
+// R x T の logits の packed[r, i] (1 行 1 ブロック)。
+extern "C" __global__ void tf_glm53_sample_pack(const float* __restrict__ logits, long long* __restrict__ packed, int T) {
+    const float* row = logits + (long long)blockIdx.x * T;
+    long long* out = packed + (long long)blockIdx.x * T;
+    for (int i = threadIdx.x; i < T; i += blockDim.x) {
+        float x = row[i];
+        if (x == 0.0f) x = 0.0f;  // -0 as +0, as the host compares them / ホストの比較と同じく -0 は +0
+        const int b = __float_as_int(x);
+        const int ord = b >= 0 ? b : (b ^ 0x7FFFFFFF);
+        out[i] = (long long)(((unsigned long long)(unsigned int)ord << 32) | (unsigned long long)(0x7FFFFFFF - i));
+    }
+}
+
+// out[r, j] for j < k: the packed value of row r's j-th selected index (idx[r, j]) with the global id vocab_off + index.
+// out[r, j] (j < k): 行 r の j 番目に選ばれた index (idx[r, j]) の packed 値を、グローバル id vocab_off + index で。
+extern "C" __global__ void tf_glm53_sample_take(const long long* __restrict__ packed, const int* __restrict__ idx,
+                                                long long* __restrict__ out, int T, int k, int vocab_off) {
+    const long long* row = packed + (long long)blockIdx.x * T;
+    const int* pick = idx + (long long)blockIdx.x * k;
+    long long* o = out + (long long)blockIdx.x * k;
+    for (int j = threadIdx.x; j < k; j += blockDim.x) {
+        const int i = pick[j];
+        const unsigned long long high = (unsigned long long)row[i] & 0xFFFFFFFF00000000ULL;
+        o[j] = (long long)(high | (unsigned long long)(0x7FFFFFFF - (vocab_off + i)));
+    }
+}

@@ -242,6 +242,23 @@ ENGINE_WORLDS = (2, 4, 8)
 CONTEXT_LIMIT, CONTEXT_STEP, CONTEXT_MIN = 1048576, 16384, 65536
 ADDR = re.compile(r"[A-Za-z0-9][A-Za-z0-9.:_-]{0,252}")  # a node's address in NODES (a host name or an IP)
 EXAMPLE_ADDR = "192.0.2."  # the example conf's NODES before the first node check: a range reserved for examples (RFC 5737)
+
+
+def ssh_mux():
+    """ssh's options for one connection to a node, kept 60 s after its last use (OpenSSH's multiplexing): a node records
+    a login (sshd, PAM and logind: 8 lines in auth.log, syslog and the journal) once a connection, not once a command,
+    so the polling every 5 s is not a login every 5 s. The same path as tf-glm53's on(): one connection serves both. In
+    ~/.ssh, as a lane's directory can be too long for a unix socket's path (104 bytes, with the 17 of ssh's temporary
+    name); none (a connection a command) when ~/.ssh is not a directory this user writes or its path is too long."""
+    d = os.path.expanduser("~/.ssh")
+    if not (os.path.isdir(d) and os.access(d, os.W_OK)) or len(d) + len("/expertatlas-") + 40 + 17 >= 104:
+        return []
+    # ServerAlive: a connection whose node is gone ends in 15 s (the commands over it would wait for ever)
+    return ["-o", "ControlMaster=auto", "-o", f"ControlPath={d}/expertatlas-%C", "-o", "ControlPersist=60",
+            "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3"]
+
+
+SSH_MUX = ssh_mux()
 RESERVE = 4 * GiB  # what a node keeps for the OS after the start, by default (RESERVE_GB of CONF, or a plan's reserve_gib);
 # the engine's own admission gets the same (TF_GLM53_MEM_RESERVE_GIB)
 RESERVE_MIN_GIB, RESERVE_MAX_GIB = 2, 32
@@ -888,7 +905,7 @@ class Launcher:
         if node.startswith(EXAMPLE_ADDR):  # no node is there: not 8 s of waiting on every read until the node check
             return 255, ""
         try:
-            r = subprocess.run(["ssh", "-n", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes", node, cmd],
+            r = subprocess.run(["ssh", "-n", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes", *SSH_MUX, node, cmd],
                                capture_output=True, text=True, timeout=timeout)
             return r.returncode, r.stdout
         except subprocess.TimeoutExpired:
@@ -2401,7 +2418,7 @@ class Launcher:
     def ssh_in(self, node, cmd, data, timeout=30):
         """cmd on node over ssh with `data` on its standard input: (rc, the last line of its output or error)."""
         try:
-            r = subprocess.run(["ssh", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes", node, cmd], input=data,
+            r = subprocess.run(["ssh", "-o", "ConnectTimeout=8", "-o", "BatchMode=yes", *SSH_MUX, node, cmd], input=data,
                                capture_output=True, text=True, timeout=timeout)
             return r.returncode, (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
         except subprocess.TimeoutExpired:
@@ -2996,9 +3013,9 @@ class Launcher:
             return there
         def put(node):
             try:  # a hung node fails the copy instead of the start waiting for ever
-                if subprocess.run(["ssh", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", node, f"mkdir -p {os.path.dirname(there)}"], capture_output=True, timeout=60).returncode != 0:
+                if subprocess.run(["ssh", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *SSH_MUX, node, f"mkdir -p {os.path.dirname(there)}"], capture_output=True, timeout=60).returncode != 0:
                     return False
-                if subprocess.run(["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", out, f"{node}:{there}"], capture_output=True, timeout=120).returncode != 0:
+                if subprocess.run(["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", *SSH_MUX, out, f"{node}:{there}"], capture_output=True, timeout=120).returncode != 0:
                     return False
             except subprocess.TimeoutExpired:
                 return False

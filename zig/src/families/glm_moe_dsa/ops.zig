@@ -53,6 +53,14 @@ pub const Ops = struct {
         return o.k.rmsnorm(o.stream, x, x_stride, w, out, o_stride, rows, d, eps);
     }
 
+    /// `rmsnorm` of contiguous rows (with `br`, after the residual add) that also writes the rotated input of the
+    /// linears that read `out` (native.Kernels.rmsRot; the caller checks rmsRotOk).
+    /// 連続した行の `rmsnorm` (`br` があればその前に残差加算) で、`out` を読む linear の回転した入力も書く
+    /// (native.Kernels.rmsRot。呼び出し側が rmsRotOk を確かめる)。
+    pub fn rmsRot(o: Ops, x: u64, w: u64, out: u64, rows: u32, d: u32, eps: f32, br: ?native.Kernels.Branch, rots: []const native.Kernels.Rot) !void {
+        return o.k.rmsRot(o.stream, x, w, out, rows, d, eps, br, rots);
+    }
+
     /// Every gathered query head (G members x H) over this rank's keys of each row -> chunk partials PO / PM / PL.
     /// 集めた全 query head (G メンバー x H) を各行のこのランクの key に当て、チャンクごとの部分結果 PO / PM / PL へ。
     pub fn attnDcpAll(o: Ops, qall: u64, lc: u64, tok: u64, cnt: u64, pos: u64, po: u64, pm: u64, pl: u64, r: u32, h: u32, g: u32, nch: u32, chk: u32, kt: u32) !void {
@@ -168,6 +176,12 @@ pub const Ops = struct {
     /// `width` 個ずつの行で act = silu(g) * u。
     pub fn swiglu2(o: Ops, g: u64, u: u64, out: u64, r: u32, width: u32) !void {
         return o.k.swiglu2(o.stream, g, u, out, r, width);
+    }
+
+    /// `swiglu2` that also writes the down linear's rotated input of `out` (native.Kernels.swiglu2Rot).
+    /// down linear の `out` の回転した入力も書く `swiglu2` (native.Kernels.swiglu2Rot)。
+    pub fn swiglu2Rot(o: Ops, g: u64, u: u64, out: u64, r: u32, width: u32, rot: native.Kernels.Rot) !void {
+        return o.k.swiglu2Rot(o.stream, g, u, out, r, width, rot);
     }
 
     /// Sigmoid + bias top-8 of the router logits -> pick int32 / wts fp32 (normalized, scaled).

@@ -254,7 +254,7 @@ done
 リリースはコンテナイメージとしても配布します。中身は、`/opt/glm53` に置いたアーカイブのファイルと、サーバーの実行に要るもの（cuBLAS 13、libibverbs とそのプロバイダー、AArch64 の fence を入れた NCCL 2.30.7）です。`glm53.conf` に `RUNTIME=docker` と `IMAGE` を設定すると、`tf-glm53` は ssh で各ノードに入り、ランクを `IMAGE` のコンテナとして起動します。このとき各ノードに要るのは、cuBLAS・libibverbs・NCCL の代わりに Docker と NVIDIA Container Toolkit です（DGX OS には両方あります）。`tf-glm53` を動かすユーザーは、各ノードで `docker` を実行できる必要があります（`docker` グループ）。`tf-glm53`、コントロールパネルのランチャー、設定はアーカイブのときと同じく 1 台目のホストに置き、重みと expert のバンクもホストに置いたままです。
 
 ```sh
-I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.4-102
+I=ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.5-102
 docker pull $I                                                # 各ノードで
 mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out $I install /out
 cd glm53 && cp glm53.conf.example glm53.conf                  # または glm53.t4.conf.example。RUNTIME=docker と IMAGE=$I を設定
@@ -262,7 +262,7 @@ cd glm53 && cp glm53.conf.example glm53.conf                  # または glm53.
 ```
 
 - `install` は、リリースのファイル（展開したアーカイブと同じもの）をそのディレクトリに書きます。`./tf-glm53 pull` は各ノードで `docker pull IMAGE` を実行します。
-- イメージはアーカイブから作ることもできます。展開したばかりのアーカイブの中で `docker build --build-context fenced=DIR -f docker/Dockerfile -t glm53-tensorfold:r3.3.4-102 .` を実行します。`DIR` には fence を入れた NCCL を置きます（`RING.ja.md`。ないとビルドは失敗します）。アーカイブの `SHA256SUMS` に載っていないファイルがあるとビルドは失敗するので、インストール先の設定やログがイメージに入ることはありません。他のノードへは `docker save` と `docker load` で写します。
+- イメージはアーカイブから作ることもできます。展開したばかりのアーカイブの中で `docker build --build-context fenced=DIR -f docker/Dockerfile -t glm53-tensorfold:r3.3.5-102 .` を実行します。`DIR` には fence を入れた NCCL を置きます（`RING.ja.md`。ないとビルドは失敗します）。アーカイブの `SHA256SUMS` に載っていないファイルがあるとビルドは失敗するので、インストール先の設定やログがイメージに入ることはありません。他のノードへは `docker save` と `docker load` で写します。
 - `tf-glm53 check` は各ノードで、`IMAGE` が 1 台目と同じレイヤーであること、コンテナから GPU に届くこと（`--gpus all`）、イメージがこのディレクトリと同じリリースであること（違えば `NG: image-not-this-release`）を確かめます。
 - 各ランクのコンテナには、GPU、`/dev/infiniband`、ホストのネットワークと IPC、`--ulimit memlock=-1 --ulimit nofile=1048576:1048576`、`--oom-score-adj 1000`、ホストのユーザー、init を与えます。同じパスにマウントするのは、読み取り専用の `WEIGHTS`、`DRAFTER`（DFlash2）、そのノードにある `expert-plan/banks.json` のすべてのバンクと、書き込み可能な `launch/` です。Docker はコンテナのログを持ちません（`--log-driver none`）。出力はノードのログ係に入ります。コンテナの名前は `glm53-p<PORT>-r<ランク>` で、止まると削除されます。`tf-glm53 down`、`status`、監視プロセス、コントロールパネルは、ホストから動かすランクと同じように扱います。
 - エンジンは、スイッチでもリングでも `/opt/nccl-fenced` の NCCL を読みます。

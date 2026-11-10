@@ -9,6 +9,7 @@ const model = @import("model.zig");
 const linear = @import("linear.zig");
 const exl3 = @import("exl3.zig");
 const ops_mod = @import("ops.zig");
+const native_ops = @import("native_ops.zig");
 const experts = @import("experts.zig");
 const prompt_experts = @import("prompt_experts.zig");
 const moe = @import("moe.zig");
@@ -107,10 +108,13 @@ pub const Glue = struct {
     slot_copy: cuda.Function,
     slot_zero: cuda.Function,
     split_unpack: cuda.Function,
+    // Fiore-lab, Expert Atlas: the keyed sampling's candidates on the GPU (sampleCandidates)
+    sample_pack: cuda.Function,
+    sample_take: cuda.Function,
 
     pub fn load(d: *const cuda.Driver) !Glue {
         const m = try cuda.Module.load(d, cuda.kernels.glm53_glue);
-        return .{ .module = m, .gather_rows16 = try m.function("tf_glm53_gather_rows16"), .copy3_16 = try m.function("tf_glm53_copy3_16"), .copy3_32 = try m.function("tf_glm53_copy3_32"), .scatter3_16 = try m.function("tf_glm53_scatter3_16"), .scatter3_32 = try m.function("tf_glm53_scatter3_32"), .add_f32 = try m.function("tf_glm53_add_f32"), .topk_keys = try m.function("tf_glm53_topk_keys"), .row_argmax = try m.function("tf_glm53_row_argmax"), .row_lse = try m.function("tf_glm53_row_lse"), .pick_fn = try m.function("tf_glm53_pick"), .set_i32 = try m.function("tf_glm53_set_i32"), .topk_select = try m.function("tf_glm53_topk_keys_select"), .draft_rope = try m.function("tf_glm53_draft_rope"), .draft_invfreq = try m.function("tf_glm53_draft_invfreq"), .draft_ring = try m.function("tf_glm53_draft_ring"), .draft_advance = try m.function("tf_glm53_draft_advance"), .rank_sum_bf16 = try m.function("tf_glm53_rank_sum_bf16"), .draft_topk = try m.function("tf_glm53_draft_topk"), .topk_values = try m.function("tf_glm53_topk_values"), .topk_words = try m.function("tf_glm53_topk_words"), .topk_words_any = try m.function("tf_glm53_topk_words_any"), .dcp_select = try m.function("tf_glm53_dcp_select"), .dcp_own = try m.function("tf_glm53_dcp_own"), .round_bf16 = try m.function("tf_glm53_round_bf16"), .to_bf16 = try m.function("tf_glm53_to_bf16"), .add_to_bf16 = try m.function("tf_glm53_add_to_bf16"), .radd_to_bf16 = try m.function("tf_glm53_radd_to_bf16"), .topk_words_any16 = try m.function("tf_glm53_topk_words_any16"), .from_bf16 = try m.function("tf_glm53_from_bf16"), .tk_hist = try m.function("tf_glm53_tk_hist"), .tk_digit = try m.function("tf_glm53_tk_digit"), .tk_split = try m.function("tf_glm53_tk_split"), .tk_finish = try m.function("tf_glm53_tk_finish"), .slot_lanes = try m.function("tf_glm53_slot_lanes"), .slot_fold = try m.function("tf_glm53_slot_fold"), .slot_copy = try m.function("tf_glm53_slot_copy"), .slot_zero = try m.function("tf_glm53_slot_zero"), .split_unpack = try m.function("tf_glm53_split_unpack") };
+        return .{ .module = m, .gather_rows16 = try m.function("tf_glm53_gather_rows16"), .copy3_16 = try m.function("tf_glm53_copy3_16"), .copy3_32 = try m.function("tf_glm53_copy3_32"), .scatter3_16 = try m.function("tf_glm53_scatter3_16"), .scatter3_32 = try m.function("tf_glm53_scatter3_32"), .add_f32 = try m.function("tf_glm53_add_f32"), .topk_keys = try m.function("tf_glm53_topk_keys"), .row_argmax = try m.function("tf_glm53_row_argmax"), .row_lse = try m.function("tf_glm53_row_lse"), .pick_fn = try m.function("tf_glm53_pick"), .set_i32 = try m.function("tf_glm53_set_i32"), .topk_select = try m.function("tf_glm53_topk_keys_select"), .draft_rope = try m.function("tf_glm53_draft_rope"), .draft_invfreq = try m.function("tf_glm53_draft_invfreq"), .draft_ring = try m.function("tf_glm53_draft_ring"), .draft_advance = try m.function("tf_glm53_draft_advance"), .rank_sum_bf16 = try m.function("tf_glm53_rank_sum_bf16"), .draft_topk = try m.function("tf_glm53_draft_topk"), .topk_values = try m.function("tf_glm53_topk_values"), .topk_words = try m.function("tf_glm53_topk_words"), .topk_words_any = try m.function("tf_glm53_topk_words_any"), .dcp_select = try m.function("tf_glm53_dcp_select"), .dcp_own = try m.function("tf_glm53_dcp_own"), .round_bf16 = try m.function("tf_glm53_round_bf16"), .to_bf16 = try m.function("tf_glm53_to_bf16"), .add_to_bf16 = try m.function("tf_glm53_add_to_bf16"), .radd_to_bf16 = try m.function("tf_glm53_radd_to_bf16"), .topk_words_any16 = try m.function("tf_glm53_topk_words_any16"), .from_bf16 = try m.function("tf_glm53_from_bf16"), .tk_hist = try m.function("tf_glm53_tk_hist"), .tk_digit = try m.function("tf_glm53_tk_digit"), .tk_split = try m.function("tf_glm53_tk_split"), .tk_finish = try m.function("tf_glm53_tk_finish"), .slot_lanes = try m.function("tf_glm53_slot_lanes"), .slot_fold = try m.function("tf_glm53_slot_fold"), .slot_copy = try m.function("tf_glm53_slot_copy"), .slot_zero = try m.function("tf_glm53_slot_zero"), .split_unpack = try m.function("tf_glm53_split_unpack"), .sample_pack = try m.function("tf_glm53_sample_pack"), .sample_take = try m.function("tf_glm53_sample_take") };
     }
 
     fn grid(n2: u32, rows: u32) cuda.Config {
@@ -156,6 +160,36 @@ pub const Glue = struct {
         a.add(dst);
         a.add(@as(c_int, @intCast(width)));
         try cuda.launch.launch(g.gather_rows16, grid(width, rows), s, &a);
+    }
+
+    /// Fiore-lab, Expert Atlas (TF_GLM53_SAMPLE_PICK=gpu): the keyed sampling's candidates of `rows` rows of `t` fp32
+    /// logits (this rank's share, at `logits`): packed into `packed_rows` [rows, t] int64 so that they order like (logit
+    /// descending, index ascending), each row's `k` largest selected (`idx` [rows, k] int32 scratch) and written to `out`
+    /// [rows, k] int64 with the global id `vocab_off` + index (glue.cu: tf_glm53_sample_pack, _take). k <= 1024, k <= t.
+    /// Fiore-lab, Expert Atlas: キー付きサンプリングの候補。このランクの分担の logits を (logit の降順, index の昇順)
+    /// に並ぶ int64 にパックし、各行の上位 k 個を選び、グローバル id (vocab_off + index) で `out` に書く。
+    pub fn sampleCandidates(g: *const Glue, s: cuda.Stream, logits: u64, packed_rows: u64, idx: u64, out: u64, rows: u32, t: u32, k: u32, vocab_off: u32) !void {
+        std.debug.assert(k >= 1 and k <= 1024 and k <= t);
+        const grid_rows: cuda.launch.Dim3 = .{ .x = rows, .y = 1, .z = 1 };
+        var a: cuda.Args = .{};
+        a.add(logits);
+        a.add(packed_rows);
+        a.add(@as(c_int, @intCast(t)));
+        try cuda.launch.launch(g.sample_pack, .{ .grid = grid_rows, .block = .{ .x = 256, .y = 1, .z = 1 } }, s, &a);
+        var b: cuda.Args = .{};
+        b.add(packed_rows);
+        b.add(idx);
+        b.add(@as(c_int, @intCast(t)));
+        b.add(@as(c_int, @intCast(k)));
+        try cuda.launch.launch(g.topk_select, .{ .grid = grid_rows, .block = .{ .x = 1024, .y = 1, .z = 1 }, .shared = k * 4 }, s, &b);
+        var c: cuda.Args = .{};
+        c.add(packed_rows);
+        c.add(idx);
+        c.add(out);
+        c.add(@as(c_int, @intCast(t)));
+        c.add(@as(c_int, @intCast(k)));
+        c.add(@as(c_int, @intCast(vocab_off)));
+        try cuda.launch.launch(g.sample_take, .{ .grid = grid_rows, .block = .{ .x = 256, .y = 1, .z = 1 } }, s, &c);
     }
 
     /// Each row's k largest packed int64 scores as ascending int32 keys.
@@ -602,6 +636,10 @@ pub const Glue = struct {
 
 /// Work buffers for windows up to max_rows rows (a prompt chunk or a decode window uses their first rows).
 /// max_rows 行までのウィンドウ用の作業バッファ (prompt チャンクも decode ウィンドウも先頭の行を使う)。
+/// Buffers.rot_ready: the input `x` of `m` rows whose rotation by suh[0 .. n] lies in scratch.xh[0 .. n]; n 0 none.
+/// Buffers.rot_ready: `m` 行の入力 `x` を suh[0 .. n] で回転したものが scratch.xh[0 .. n] にある。n 0 はなし。
+pub const RotReady = struct { x: u64 = 0, m: u32 = 0, n: usize = 0, suh: [exl3.max_jobs]u64 = .{ 0, 0, 0 } };
+
 pub const Buffers = struct {
     ids: Buf, x: Buf, normed: Buf, qa: Buf, qn: Buf, kva: Buf, q: Buf, qlat: Buf, qrot: Buf, ol: Buf, o: Buf,
     pm: Buf, pl: Buf, ik: Buf, iw: Buf, iq: Buf, iq8: Buf, iqs: Buf, tok: Buf, g: Buf, u: Buf, act: Buf, part: Buf, red: Buf, gath: Buf,
@@ -611,6 +649,11 @@ pub const Buffers = struct {
     rows: u32,
     keys: usize, // the widest key range the indexer scores / indexer が点数を付ける最大のキー範囲
     scratch: linear.Scratch,
+    /// The producer-side rotation (Ctx.rot_pre): which linears' rotated input of which input the scratch's xh holds,
+    /// left by normRot / mlp's swiglu2Rot for the next lin / lins call alone (that call clears it, whatever it is).
+    /// 入力を作る側での回転 (Ctx.rot_pre): scratch の xh が、どの入力のどの linear の回転した入力を持っているか。
+    /// normRot / mlp の swiglu2Rot が次の lin / lins の呼び出しのためだけに残す (その呼び出しが何であれ消す)。
+    rot_ready: RotReady = .{},
     /// DFlash2: the residual after each tap layer, [rows, n_taps * D] bf16; set by the engine.
     /// DFlash2: 各 tap 層の後の residual、[rows, n_taps * D] bf16。engine が設定する。
     taps: ?Buf = null,
@@ -929,6 +972,13 @@ pub const Ctx = struct {
     fast: ?*const roce.Runtime = null,
     dfast: ?*const roce.Runtime = null,
     decode_bf16: bool = false,
+    /// TF_GLM53_ROT_PRE (default on): the rotation of an EXL3 linear's input done by the kernel that makes the input
+    /// (rmsnorm, the residual add + rmsnorm, swiglu2; native_ops rmsRot / swiglu2Rot, rot_in's bytes) where it takes
+    /// the shape, and the linear's rot_in skipped (Buffers.rot_ready). The same bits either way.
+    /// TF_GLM53_ROT_PRE (既定オン): EXL3 linear の入力の回転を、入力を作るカーネル (rmsnorm、残差加算 + rmsnorm、
+    /// swiglu2。native_ops の rmsRot / swiglu2Rot、rot_in と同じバイト) が形を受けられる所で行い、linear の rot_in を
+    /// 省く (Buffers.rot_ready)。どちらでもビットは同じ。
+    rot_pre: bool = false,
     /// A ring4 world's all-to-all relay area (Engine.relay; tp.Group.allToAllRelay), 0 elsewhere.
     /// ring4 の world の all-to-all の中継の領域 (Engine.relay、tp.Group.allToAllRelay)。それ以外は 0。
     relay: u64 = 0,
@@ -1034,8 +1084,11 @@ pub const Ctx = struct {
     /// The EXL3 linear: the row-invariant kernel up to 128 rows, else rotate the input, unpack the weights and GEMM.
     /// EXL3 の linear: 128 行までは行に依らないカーネル、それより多ければ入力の回転、重みの展開、GEMM。
     fn lin(c: *const Ctx, l: *const linear.Linear, x: u64, m: u32, out: u64, out_bf16: bool) !void {
+        const pre = c.rotTake(&.{l}, x, m);
         if (m <= MAX_LIN_ROWS) {
-            return linear.call(c.x3, c.stream, &c.b.scratch, &.{l}, x, .bf16, m, &.{out}, &.{if (out_bf16) exl3.DType.bf16 else exl3.DType.f32});
+            const dt = [_]exl3.DType{if (out_bf16) .bf16 else .f32};
+            if (pre) return linear.callRotated(c.x3, c.stream, &c.b.scratch, &.{l}, m, &.{out}, &dt);
+            return linear.call(c.x3, c.stream, &c.b.scratch, &.{l}, x, .bf16, m, &.{out}, &dt);
         }
         try c.x3.rotIn(c.stream, x, .bf16, &.{l.suh.ptr}, &.{c.b.xh.ptr}, m, l.k, false);
         if (c.ucache) |uc| {
@@ -1073,11 +1126,74 @@ pub const Ctx = struct {
     /// 同じ入力に対する複数の linear: 128 行までで、まとめられるなら 1 回の launch、そうでなければ 1 つずつ lin。
     fn lins(c: *const Ctx, ls: []const *const linear.Linear, x: u64, m: u32, outs: []const u64, bf16s: []const bool) !void {
         if (m <= MAX_LIN_ROWS and linear.groupable(ls)) {
+            const pre = c.rotTake(ls, x, m);
             var dts: [exl3.max_jobs]exl3.DType = undefined;
             for (bf16s, 0..) |b16, i| dts[i] = if (b16) .bf16 else .f32;
+            if (pre) return linear.callRotated(c.x3, c.stream, &c.b.scratch, ls, m, outs, dts[0..ls.len]);
             return linear.call(c.x3, c.stream, &c.b.scratch, ls, x, .bf16, m, outs, dts[0..ls.len]);
         }
+        c.b.rot_ready = .{};
         for (ls, outs, bf16s) |l, o, b16| try c.lin(l, x, m, o, b16);
+    }
+
+    /// Rot for the linears `ls` that read an input of R rows next, their rotated input into the scratch's xh: null
+    /// when the producer-side rotation does not take them (off, over MAX_LIN_ROWS rows, not one group).
+    /// 次に R 行の入力を読む linear `ls` の Rot (回転した入力は scratch の xh へ)。入力を作る側での回転が受けない
+    /// (オフ、MAX_LIN_ROWS 行超、1 つの組にならない) なら null。
+    fn rotFor(c: *const Ctx, ls: []const *const linear.Linear, R: u32, rots: *[exl3.max_jobs]native_ops.Kernels.Rot) ?[]const native_ops.Kernels.Rot {
+        if (!c.rot_pre or R < 1 or R > MAX_LIN_ROWS or !linear.groupable(ls)) return null;
+        for (ls, 0..) |l, i| rots[i] = .{ .suh = l.suh.ptr, .xh = c.b.scratch.xh[i].ptr };
+        return rots[0..ls.len];
+    }
+
+    /// The producer wrote `ls`' rotated input of `x` (R rows) into the scratch's xh: for the next lin / lins call.
+    /// 入力を作る側が `x` (R 行) の `ls` の回転した入力を scratch の xh に書いた: 次の lin / lins の呼び出しのために。
+    fn rotSet(c: *const Ctx, ls: []const *const linear.Linear, x: u64, R: u32) void {
+        var r: RotReady = .{ .x = x, .m = R, .n = ls.len };
+        for (ls, 0..) |l, i| r.suh[i] = l.suh.ptr;
+        c.b.rot_ready = r;
+    }
+
+    /// Whether this call's rotated input is the one the producer left (the same input, rows and layers in order); the
+    /// record cleared either way, so it serves the very next call alone.
+    /// この呼び出しの回転した入力が、入力を作る側が残したものか (同じ入力・行数・同じ順の層)。どちらでも記録は消す
+    /// ので、すぐ次の呼び出しにしか使われない。
+    fn rotTake(c: *const Ctx, ls: []const *const linear.Linear, x: u64, m: u32) bool {
+        const r = c.b.rot_ready;
+        c.b.rot_ready = .{};
+        if (r.n == 0 or r.n != ls.len or r.x != x or r.m != m) return false;
+        for (ls, 0..) |l, i| if (r.suh[i] != l.suh.ptr) return false;
+        return true;
+    }
+
+    /// rmsnorm of R contiguous rows of d (x -> out, as ops.rmsnorm with both strides d), with the rotated input of
+    /// `ls` (the linears that read `out` next) when the producer-side rotation takes it.
+    /// d 個の連続した R 行の rmsnorm (x -> out、両方の間隔を d にした ops.rmsnorm と同じ)。入力を作る側での回転が受け
+    /// られれば、`ls` (次に `out` を読む linear) の回転した入力も書く。
+    fn normRot(c: *const Ctx, x: u64, w: u64, out: u64, R: u32, d: u32, ls: []const *const linear.Linear) !void {
+        var rots: [exl3.max_jobs]native_ops.Kernels.Rot = undefined;
+        if (c.rotFor(ls, R, &rots)) |rs| if (native_ops.Kernels.rmsRotOk(x, w, out, d, null, rs)) {
+            try c.ops.rmsRot(x, w, out, R, d, c.cfg.eps, null, rs);
+            return c.rotSet(ls, out, R);
+        };
+        c.b.rot_ready = .{};
+        return c.ops.rmsnorm(x, d, w, out, d, R, d, c.cfg.eps);
+    }
+
+    /// The residual add (b.x += the gathered partial `a`) and the rmsnorm of b.x into b.normed: one kernel under
+    /// TF_GLM53_ROT_PRE when `a` is bf16 or one fp32 partial (several fp32 partials are slower in one block a row),
+    /// else residual_add and rmsnorm as before. The same bytes either way.
+    /// 残差加算 (b.x += 集めた部分和 `a`) と b.x の b.normed への rmsnorm: TF_GLM53_ROT_PRE で `a` が bf16 か fp32 の
+    /// 部分和 1 つなら 1 つのカーネル (fp32 の部分和が複数なら 1 行 1 ブロックでは遅い)、それ以外は今までどおり
+    /// residual_add と rmsnorm。どちらでも同じバイト。
+    fn resNorm(c: *const Ctx, a: anytype, w: u64, R: u32) !void {
+        const b = c.b;
+        const D: u32 = @intCast(c.cfg.hidden);
+        const br: native_ops.Kernels.Branch = .{ .xout = b.x.ptr, .g = a.ptr, .world = if (a.bf16) 1 else a.world, .bf16 = a.bf16 };
+        if (c.rot_pre and (a.bf16 or a.world == 1) and native_ops.Kernels.rmsRotOk(b.x.ptr, w, b.normed.ptr, D, br, &.{}))
+            return c.ops.rmsRot(b.x.ptr, w, b.normed.ptr, R, D, c.cfg.eps, br, &.{});
+        if (a.bf16) try c.ops.residualAddBf16(b.x.ptr, b.x.ptr, a.ptr, R, D) else try c.ops.residualAdd(b.x.ptr, b.x.ptr, a.ptr, R, D, a.world);
+        return c.ops.rmsnorm(b.x.ptr, D, w, b.normed.ptr, D, R, D, c.cfg.eps);
     }
 
     /// The partials' exact sum for prompt chunks of 64 rows or more: column shares to their owners, summed in rank
@@ -1193,7 +1309,12 @@ pub const Ctx = struct {
         const H = c.heads;
         const D: u32 = @intCast(cfg.hidden);
         try c.qaKva(L, R);
-        try c.ops.rmsnorm(b.qa.ptr, @intCast(cfg.q_lora), L.q_a_norm.ptr, b.qn.ptr, @intCast(cfg.q_lora), R, @intCast(cfg.q_lora), cfg.eps);
+        // q_b next (with wq_b when the indexer selects): the rotated input of qn for them
+        // 次は q_b (indexer が選ぶ時は wq_b と): その qn の回転した入力も
+        if (L.indexer != null and t != null)
+            try c.normRot(b.qa.ptr, L.q_a_norm.ptr, b.qn.ptr, R, @intCast(cfg.q_lora), &.{ &L.indexer.?.wq_b, &L.q_b })
+        else
+            try c.normRot(b.qa.ptr, L.q_a_norm.ptr, b.qn.ptr, R, @intCast(cfg.q_lora), &.{&L.q_b});
         try c.ops.kvWrite(b.kva.ptr, L.kv_a.n, L.kv_a_norm.ptr, kc, pos, b.inv.ptr, cfg.eps, R);
         var q_done = false;
         if (L.indexer) |ix| {
@@ -1781,11 +1902,12 @@ pub const Ctx = struct {
     fn layerMulti(c: *const Ctx, L: *const model.Layer, li: usize, seqs: []const WindowSeq, R: u32, comm: MultiComm) !void {
         const b = c.b;
         const D: u32 = @intCast(c.cfg.hidden);
-        try c.ops.rmsnorm(b.x.ptr, D, L.input_norm.ptr, b.normed.ptr, D, R, D, c.cfg.eps);
+        // q_a and kv_a next (attentionMulti / attentionPar): the rotated input of normed for them
+        // 次は q_a と kv_a (attentionMulti / attentionPar): その normed の回転した入力も
+        try c.normRot(b.x.ptr, L.input_norm.ptr, b.normed.ptr, R, D, &.{ &L.q_a, &L.kv_a });
         try c.attentionMulti(L, li, seqs, R, comm);
         const a = try c.gather(R);
-        if (a.bf16) try c.ops.residualAddBf16(b.x.ptr, b.x.ptr, a.ptr, R, D) else try c.ops.residualAdd(b.x.ptr, b.x.ptr, a.ptr, R, D, a.world);
-        try c.ops.rmsnorm(b.x.ptr, D, L.post_attn_norm.ptr, b.normed.ptr, D, R, D, c.cfg.eps);
+        try c.resNorm(a, L.post_attn_norm.ptr, R);
         try c.ffnPart(L, R);
         const f = try c.gather(R);
         if (f.bf16) try c.ops.residualAddBf16(b.x.ptr, b.x.ptr, f.ptr, R, D) else try c.ops.residualAdd(b.x.ptr, b.x.ptr, f.ptr, R, D, f.world);
@@ -1847,7 +1969,12 @@ pub const Ctx = struct {
         if (comm == .par) if (c.dgroup) |dg| return c.attentionPar(dg, L, li, seqs, R);
         const dg1: ?*const cuda.tp.Group = if (comm != .per) c.dgroup else null;
         try c.lins(&.{ &L.q_a, &L.kv_a }, b.normed.ptr, R, &.{ b.qa.ptr, b.kva.ptr }, &.{ true, true });
-        try c.ops.rmsnorm(b.qa.ptr, @intCast(cfg.q_lora), L.q_a_norm.ptr, b.qn.ptr, @intCast(cfg.q_lora), R, @intCast(cfg.q_lora), cfg.eps);
+        // q_b next (with wq_b in an index layer)
+        // 次は q_b (index 層では wq_b と)
+        if (L.indexer != null)
+            try c.normRot(b.qa.ptr, L.q_a_norm.ptr, b.qn.ptr, R, @intCast(cfg.q_lora), &.{ &L.indexer.?.wq_b, &L.q_b })
+        else
+            try c.normRot(b.qa.ptr, L.q_a_norm.ptr, b.qn.ptr, R, @intCast(cfg.q_lora), &.{&L.q_b});
         var o: u32 = 0;
         for (seqs) |s| {
             try c.ops.kvWrite(b.kva.ptr + @as(u64, o) * kva_n * 2, L.kv_a.n, L.kv_a_norm.ptr, s.kc[li].ptr, s.pos, b.inv.ptr, cfg.eps, s.rows);
@@ -2086,7 +2213,12 @@ pub const Ctx = struct {
         const ng = try c.xGroups(G, seqs, &xg, &xof);
         const keysl: usize = (b.keys + G - 1) / G;
         try c.lins(&.{ &L.q_a, &L.kv_a }, b.normed.ptr, R, &.{ b.qa.ptr, b.kva.ptr }, &.{ true, true });
-        try c.ops.rmsnorm(b.qa.ptr, @intCast(cfg.q_lora), L.q_a_norm.ptr, b.qn.ptr, @intCast(cfg.q_lora), R, @intCast(cfg.q_lora), cfg.eps);
+        // q_b next (with wq_b in an index layer)
+        // 次は q_b (index 層では wq_b と)
+        if (L.indexer != null)
+            try c.normRot(b.qa.ptr, L.q_a_norm.ptr, b.qn.ptr, R, @intCast(cfg.q_lora), &.{ &L.indexer.?.wq_b, &L.q_b })
+        else
+            try c.normRot(b.qa.ptr, L.q_a_norm.ptr, b.qn.ptr, R, @intCast(cfg.q_lora), &.{&L.q_b});
         if (L.indexer) |ix| {
             try c.ops.router(b.normed.ptr, D, ix.wk.ptr, b.rpart.ptr, b.ik.ptr, R, D, @intCast(cfg.index_dim));
             try c.ops.router(b.normed.ptr, D, ix.weights_proj.ptr, b.rpart.ptr, b.iw.ptr, R, D, @intCast(cfg.index_heads));
@@ -2197,6 +2329,14 @@ pub const Ctx = struct {
         const b = c.b;
         const width = m.gate.n;
         try c.lins(&.{ &m.gate, &m.up }, b.normed.ptr, R, &.{ b.g.ptr, b.u.ptr }, &.{ true, true });
+        // down next: swiglu2 writes the rotated input of act for it where it takes the shape
+        // 次は down: 形を受けられれば swiglu2 がその act の回転した入力も書く
+        var rots: [exl3.max_jobs]native_ops.Kernels.Rot = undefined;
+        if (c.rotFor(&.{&m.down}, R, &rots)) |rs| if (native_ops.Kernels.swiglu2RotOk(b.g.ptr, b.u.ptr, b.act.ptr, width, rs[0])) {
+            try c.ops.swiglu2Rot(b.g.ptr, b.u.ptr, b.act.ptr, R, width, rs[0]);
+            c.rotSet(&.{&m.down}, b.act.ptr, R);
+            return c.lin(&m.down, b.act.ptr, R, out, out_bf16);
+        };
         try c.ops.swiglu2(b.g.ptr, b.u.ptr, b.act.ptr, R, width);
         try c.lin(&m.down, b.act.ptr, R, out, out_bf16);
     }
@@ -2285,12 +2425,13 @@ pub const Ctx = struct {
     pub fn layerPrompt(c: *const Ctx, L: *const model.Layer, R: u32, kc: u64, ic: ?u64, pos: u64, t: ?u32) !void {
         const b = c.b;
         const D: u32 = @intCast(c.cfg.hidden);
-        try c.ops.rmsnorm(b.x.ptr, D, L.input_norm.ptr, b.normed.ptr, D, R, D, c.cfg.eps);
+        // q_a and kv_a next (attention's qaKva): the rotated input of normed for them
+        // 次は q_a と kv_a (attention の qaKva): その normed の回転した入力も
+        try c.normRot(b.x.ptr, L.input_norm.ptr, b.normed.ptr, R, D, &.{ &L.q_a, &L.kv_a });
         try c.attention(L, R, kc, ic, pos, t);
         const a = try c.gatherPf(R, c.pfFfn(L));
         try c.emit(L.index, "attn", R, a.ptr, @as(usize, R) * D * 4);
-        if (a.bf16) try c.ops.residualAddBf16(b.x.ptr, b.x.ptr, a.ptr, R, D) else try c.ops.residualAdd(b.x.ptr, b.x.ptr, a.ptr, R, D, a.world);
-        try c.ops.rmsnorm(b.x.ptr, D, L.post_attn_norm.ptr, b.normed.ptr, D, R, D, c.cfg.eps);
+        try c.resNorm(a, L.post_attn_norm.ptr, R);
         try c.ffnPart(L, R);
         const f = try c.gatherPf(R, c.pfNext());
         try c.emit(L.index, "ffn", R, f.ptr, @as(usize, R) * D * 4);

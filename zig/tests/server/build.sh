@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
 # Builds fake_serve and an engine-less tensorfold-native into zig-out/server/ (ZIG overrides the compiler, OPT the mode).
 set -euo pipefail
 zig="${ZIG:-zig}"
@@ -10,7 +11,10 @@ version="$(sed -n 's/^[[:space:]]*\.version = "\([0-9]*\.[0-9]*\.[0-9]*\)",$/\1/
 [ -n "$version" ] || { echo 'missing manifest version' >&2; exit 1; }
 options="$out/build_options.zig"
 printf 'pub const version = "%s";\n' "$version" > "$options"
-core=(--dep lanes "-Mengine_api=$root/zig/src/core/engine_api.zig" "-Mlanes=$root/zig/src/core/lanes/lanes.zig"
+# lanes with its keyed sampler in better C (sampling.cpp, zig/build/lanes.zig's flags; a module's C files come before
+# its -M)
+core=(--dep lanes "-Mengine_api=$root/zig/src/core/engine_api.zig"
+      -cflags -std=c++20 -nostdinc++ -fno-exceptions -fno-rtti -ffp-contract=off -fno-fast-math -Wall -Wextra -- "$root/zig/src/core/lanes/sampling.cpp" "-Mlanes=$root/zig/src/core/lanes/lanes.zig"
       "-Mtokenizer=$root/zig/src/core/tokenizer/tokenizer.zig" "-Mtemplate=$root/zig/src/core/template/template.zig")
 "$zig" build-exe -lc -O "${OPT:-ReleaseSafe}" --dep server --dep engine_api "-Mroot=$root/zig/tests/server/fake_serve.zig" \
   --dep engine_api --dep tokenizer --dep template "-Mserver=$root/zig/src/server/root.zig" "${core[@]}" \

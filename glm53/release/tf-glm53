@@ -295,7 +295,13 @@ if [ "$MULTI" -gt 0 ]; then
 fi
 drafter_line() { case $DRAFTER_KIND in mtp) echo "mtp (the checkpoint's MTP layer), $MTP_K drafts a round" ;; dflash2) echo "dflash2 ($DRAFTER)" ;; *) echo none ;; esac; }
 
-on() { ssh -n -o ConnectTimeout=8 -o BatchMode=yes "$1" "$2"; }
+# one connection to a node, kept 60 s after its last use and shared with the launcher (tf_launcher.py ssh_mux, the same
+# path): a node records a login once a connection, not once a command (the watch's every 5 s). None when ~/.ssh is not
+# a directory this user writes or the socket's path would pass 104 bytes; ServerAlive: a gone node's connection ends
+MUX=()
+[ -d ~/.ssh ] && [ -w ~/.ssh ] && [ $(( ${#HOME} + 75 )) -lt 104 ] &&
+  MUX=(-o ControlMaster=auto -o "ControlPath=$HOME/.ssh/expertatlas-%C" -o ControlPersist=60 -o ServerAliveInterval=5 -o ServerAliveCountMax=3)
+on() { ssh -n -o ConnectTimeout=8 -o BatchMode=yes ${MUX[@]+"${MUX[@]}"} "$1" "$2"; }
 # CHECK_ITEMS: "  item<TAB>RANK<TAB>KEY<TAB>ok|warn|fail<TAB>VALUE<TAB>FIX", one a check item of a node
 item() { if [ -n "$CHECK_ITEMS" ]; then printf '  item\t%s\t%s\t%s\t%s\t%s\n' "$@"; fi; }
 loopback() { case $1 in 127.*|localhost|::1) return 0 ;; *) return 1 ;; esac; }

@@ -37,6 +37,8 @@ const dattn_smem: u32 = 5 * 16384 + 8192 + 2 * 1024; // DR_SMEM
 const TopkArgs = extern struct { logits: u64, bias: u64, pick: u64, wts: u64, rows: c_int, scale: f32, log: u64 };
 const PickHistArgs = extern struct { pick: u64, hist: u64, n: c_int, experts: c_int };
 const RmsArgs = extern struct { x: u64, w: u64, out: u64, xs: u64, rows: c_int, d: c_int, x_stride: c_int, o_stride: c_int, vec: c_int, eps: f32, rd: f32 };
+const RmsRotArgs = extern struct { x: u64, xout: u64, g: u64, w: u64, out: u64, suh0: u64, suh1: u64, suh2: u64, xh0: u64, xh1: u64, xh2: u64, rows: c_int, d: c_int, world: c_int, rs: c_int, g_bf16: c_int, jobs: c_int, eps: f32, rd: f32 };
+const Swiglu2RotArgs = extern struct { g: u64, u: u64, out: u64, suh: u64, xh: u64, rows: c_int, width: c_int };
 
 comptime {
     std.debug.assert(@sizeOf(RouterSumArgs) == 32 and @sizeOf(ResidualArgs) == 48 and @sizeOf(EmbedB16Args) == 32 and @sizeOf(Swiglu2Args) == 32);
@@ -65,6 +67,11 @@ pub const Kernels = struct {
     // f_rmsnorm の 16 バイト経路を 1 つの形に限ったもの (sums なし)。分岐のないコード
     f_rmsnorm_d6144: cuda.Function,
     f_rmsnorm_d2048: cuda.Function,
+    // rmsnorm (optionally after the residual add) and swiglu2 that also write the next linears' rotated input (xh)
+    // rmsnorm (任意で残差加算の後) と swiglu2 で、次の linear の回転した入力 (xh) も書くもの
+    f_rmsrot_d6144: cuda.Function,
+    f_rmsrot_d2048: cuda.Function,
+    f_swiglu2_rot: cuda.Function,
     f_merge_lse_c8: cuda.Function, // f_merge_lse for 8 chunks / 8 チャンク用の f_merge_lse
     f_rmsnorm: cuda.Function,
     f_kv_write: cuda.Function,
@@ -157,6 +164,9 @@ pub const Kernels = struct {
             .f_iq_rope = try m.function("tf_glm53_n_iq_rope"),
             .f_rmsnorm_d6144 = try m.function("tf_glm53_n_rmsnorm_d6144"),
             .f_rmsnorm_d2048 = try m.function("tf_glm53_n_rmsnorm_d2048"),
+            .f_rmsrot_d6144 = try m.function("tf_glm53_n_rmsrot_d6144"),
+            .f_rmsrot_d2048 = try m.function("tf_glm53_n_rmsrot_d2048"),
+            .f_swiglu2_rot = try m.function("tf_glm53_n_swiglu2_rot"),
             .f_merge_lse_c8 = try m.function("tf_glm53_n_merge_lse_c8"),
             .f_rmsnorm = try m.function("tf_glm53_n_rmsnorm"),
             .f_kv_write = try m.function("tf_glm53_n_kv_write"),
@@ -236,6 +246,41 @@ pub const Kernels = struct {
         // モデルの 2 つの幅には専用の入口がある (16 バイト経路と同じ計算を展開したもの)
         const f = if (vec and d == 6144) k.f_rmsnorm_d6144 else if (vec and d == 2048) k.f_rmsnorm_d2048 else k.f_rmsnorm;
         try cuda.launch.launch(f, .{ .grid = .{ .x = rows, .y = 1, .z = 1 }, .block = .{ .x = threads, .y = 1, .z = 1 } }, s, &a);
+    }
+
+    /// The residual add's branch for rmsRot: `g` fp32 [world, rows, d] (summed rank 0 first) or one bf16 partial.
+    /// rmsRot の残差加算の枝: `g` は fp32 [world, rows, d] (rank 0 から順に足す) か bf16 の部分和 1 つ。
+    pub const Branch = struct { xout: u64, g: u64, world: u32, bf16: bool };
+    /// An EXL3 linear that reads rmsRot's / swiglu2Rot's output: its suh and the xh buffer rot_in would fill.
+    /// rmsRot / swiglu2Rot の出力を読む EXL3 linear: その suh と、rot_in が埋める xh のバッファ。
+    pub const Rot = struct { suh: u64, xh: u64 };
+
+    /// Whether rmsRot takes these rows: d 6144 or 2048, contiguous rows, every operand 16-byte aligned, 1 to 3 rotations.
+    /// rmsRot がこの行を受けられるか: d は 6144 か 2048、連続した行、全オペランドが 16 バイト境界、回転は 1〜3 個。
+    pub fn rmsRotOk(x: u64, w: u64, out: u64, d: u32, br: ?Branch, rots: []const Rot) bool {
+        if (d != 6144 and d != 2048) return false;
+        if (x % 16 != 0 or w % 16 != 0 or out % 16 != 0 or rots.len > 3) return false;
+        if (br) |b| if (b.xout % 16 != 0 or b.g % 16 != 0 or d != 6144) return false;
+        for (rots) |r| if (r.suh % 16 != 0 or r.xh % 16 != 0) return false;
+        return true;
+    }
+
+    /// rmsnorm (and, with `br`, the residual add before it: x -> br.xout) of contiguous rows of d (6144 or 2048) into
+    /// `out`, and each linear's rotated input of `out` into its xh: the same bytes as residual_add, rmsnorm and rot_in
+    /// in turn. The caller checks rmsRotOk.
+    /// 連続した d (6144 か 2048) の行の rmsnorm (`br` があれば、その前の残差加算 x -> br.xout も) を `out` に、`out` の
+    /// 各 linear の回転した入力をその xh に書く。residual_add・rmsnorm・rot_in を順に呼んだのと同じバイト。呼び出し側が
+    /// rmsRotOk を確かめる。
+    pub fn rmsRot(k: *const Kernels, s: cuda.Stream, x: u64, w: u64, out: u64, rows: u32, d: u32, eps: f32, br: ?Branch, rots: []const Rot) !void {
+        var r: [3]Rot = .{ .{ .suh = 0, .xh = 0 }, .{ .suh = 0, .xh = 0 }, .{ .suh = 0, .xh = 0 } };
+        for (rots, 0..) |q, i| r[i] = q;
+        var a: cuda.Args = .{};
+        a.add(RmsRotArgs{ .x = x, .xout = if (br) |b| b.xout else 0, .g = if (br) |b| b.g else 0, .w = w, .out = out, .suh0 = r[0].suh, .suh1 = r[1].suh, .suh2 = r[2].suh, .xh0 = r[0].xh, .xh1 = r[1].xh, .xh2 = r[2].xh, .rows = @intCast(rows), .d = @intCast(d), .world = if (br) |b| @intCast(b.world) else 0, .rs = @intCast(rows * d), .g_bf16 = if (br) |b| @intFromBool(b.bf16) else 0, .jobs = @intCast(rots.len), .eps = eps, .rd = 1.0 / @as(f32, @floatFromInt(d)) });
+        const f = if (d == 6144) k.f_rmsrot_d6144 else k.f_rmsrot_d2048;
+        // without the residual add, 2 or 3 rotations one a block (the kernel normalizes the row again in each)
+        // 残差加算なしで回転が 2〜3 個なら、ブロックに 1 つずつ (カーネルは各ブロックで行をもう一度正規化する)
+        const gy: u32 = if (br == null and rots.len >= 2) @intCast(rots.len) else 1;
+        try cuda.launch.launch(f, .{ .grid = .{ .x = rows, .y = gy, .z = 1 }, .block = .{ .x = if (d == 6144) 768 else 256, .y = 1, .z = 1 } }, s, &a);
     }
 
     /// `kv8`: 0 bf16 rows, 1 FP8, 2 FP4 (TF_GLM53_KV=fp4).
@@ -535,6 +580,23 @@ pub const Kernels = struct {
         var a: cuda.Args = .{};
         a.add(DattnArgs{ .q = q, .k = kc, .v = vc, .out = out, .pos = pos, .window = @intCast(window), .nh = @intCast(nh), .scale = scale });
         try cuda.launch.launch(k.f_dattn_ring, .{ .grid = .{ .x = kvh, .y = 1, .z = 1 }, .block = .{ .x = 128, .y = 1, .z = 1 }, .shared = dattn_smem }, s, &a);
+    }
+
+    /// Whether swiglu2Rot takes this shape: width a multiple of 128, every pointer 16-byte aligned.
+    /// swiglu2Rot がこの形を受けられるか: width は 128 の倍数、ポインタはすべて 16 バイト境界。
+    pub fn swiglu2RotOk(g: u64, u: u64, out: u64, width: u32, r: Rot) bool {
+        return width % 128 == 0 and g % 16 == 0 and u % 16 == 0 and out % 16 == 0 and r.suh % 16 == 0 and r.xh % 16 == 0;
+    }
+
+    /// swiglu2 into `out` and the down linear's rotated input of `out` into r.xh: the same bytes as swiglu2 then rot_in.
+    /// swiglu2 を `out` に、down linear の `out` の回転した入力を r.xh に書く。swiglu2 の後に rot_in を呼んだのと同じバイト。
+    pub fn swiglu2Rot(k: *const Kernels, s: cuda.Stream, g: u64, u: u64, out: u64, rows: u32, width: u32, r: Rot) !void {
+        var a: cuda.Args = .{};
+        a.add(Swiglu2RotArgs{ .g = g, .u = u, .out = out, .suh = r.suh, .xh = r.xh, .rows = @intCast(rows), .width = @intCast(width) });
+        // 4 groups a block when they divide the width, else 1
+        // 幅を割り切れるならブロックに 4 グループ、でなければ 1
+        const wpb: u32 = if ((width / 128) % 4 == 0) 4 else 1;
+        try cuda.launch.launch(k.f_swiglu2_rot, .{ .grid = .{ .x = width / 128 / wpb, .y = rows, .z = 1 }, .block = .{ .x = 32 * wpb, .y = 1, .z = 1 } }, s, &a);
     }
 
     pub fn swiglu2(k: *const Kernels, s: cuda.Stream, g: u64, u: u64, out: u64, rows: u32, width: u32) !void {

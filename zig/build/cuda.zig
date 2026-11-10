@@ -2,6 +2,7 @@
 //! The CUDA half of the root build: kernel fatbins with each Python extension's nvcc flags, the runtime, Nemotron, the CLI.
 
 const std = @import("std");
+const lanes_build = @import("lanes.zig");
 
 /// Each .cu in zig/kernels/cuda (`src`, else `name`) with the flags its Python extension passes in `extra_cuda_cflags`.
 const Kernel = struct { name: []const u8, flags: []const []const u8, src: ?[]const u8 = null, arch_specific: bool = false };
@@ -69,7 +70,7 @@ fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     core.addImport("tokenizer", tokenizer);
-    const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const lanes = lanes_build.module(b, target, optimize);
     const nemotron = b.createModule(.{ .root_source_file = b.path("zig/src/families/nemotron/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
     nemotron.addImport("cuda", cuda);
     nemotron.addImport("core", core);
@@ -144,6 +145,12 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const glm53_q4 = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/glm53_q4.zig"), .target = target, .optimize = optimize, .link_libc = true });
     glm53_q4.addImport("glm_moe_dsa", glm);
     b.installArtifact(b.addExecutable(.{ .name = "tf-glm53-q4", .root_module = glm53_q4 }));
+    // the keyed sampling's candidates picked on the GPU against the host pick (one GPU): `tf-glm53-sample-pick`
+    // GPU で選ぶキー付きサンプリングの候補をホストの選び方と比べる (GPU 1 つ): `tf-glm53-sample-pick`
+    const glm53_pick = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/glm53_sample_pick.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    glm53_pick.addImport("cuda", cuda);
+    glm53_pick.addImport("glm_moe_dsa", glm);
+    b.installArtifact(b.addExecutable(.{ .name = "tf-glm53-sample-pick", .root_module = glm53_pick }));
     // host-side tests of the glm_moe_dsa module (config, split, header words, ...): `zig build test-glm53`
     b.step("test-glm53", "glm_moe_dsa host-side unit tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm })).step);
     _ = nativeServer(b, target, optimize, cuda, mods.lanes, mods.nemotron, glm, mods.tokenizer, build_options, true);

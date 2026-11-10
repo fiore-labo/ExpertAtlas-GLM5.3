@@ -53,6 +53,10 @@ pub const seedFor = lanes.sampling.seedFor;
 /// Candidates read past top_k (past 256 when top_k is 0), so ties at the edge resolve exactly.
 /// top_k (top_k が 0 なら 256) を超えて読む候補の数。境界の同点を正確に扱うため。
 const sample_margin = 8;
+/// Fiore-lab, Expert Atlas: the most candidates a sampled row picks on the GPU (TF_GLM53_SAMPLE_PICK=gpu); a request
+/// whose top_k needs more is picked on the host.
+/// Fiore-lab, Expert Atlas: GPU で選ぶサンプル行の候補の上限。top_k がそれ以上を要る要求はホストで選ぶ。
+const sample_cap = 1024;
 
 /// TF_GLM53_EXPERT_LIVE (rank 0): a prompt chunk's pick counts on their way to the host (expert_live.recordPrompt):
 /// the pinned copy, the chunk's start and end on the main stream (timing events), and what the chunk was.
@@ -143,6 +147,12 @@ pub const Options = struct {
     /// TF_GLM53_TOPK_WORDS (既定 1): DCP の選択で、prompt 行の候補を int32 の順序語から作る。選ぶものは packed int64
     /// の経路と同じで、0 ならそちらを使う
     topk_words: bool = true,
+    /// Fiore-lab, Expert Atlas: TF_GLM53_SAMPLE_PICK=gpu (the default): a sampled row's candidates picked on each rank's
+    /// GPU and only those all-gathered (sampleRowsGpu), the same candidates and draws as `host`, which all-gathers the
+    /// whole logits row and picks on the host
+    /// Fiore-lab, Expert Atlas: TF_GLM53_SAMPLE_PICK=gpu (既定): サンプルする行の候補を各ランクの GPU で選び、それだけを
+    /// all-gather する。候補も抽選も `host` (logits の行全体を all-gather してホストで選ぶ) と同じ
+    sample_pick_gpu: bool = true,
     /// TF_GLM53_TOPK_ANY (default 1): sequence-parallel candidates from two passes in any order (forward.Ctx.topk_any)
     /// TF_GLM53_TOPK_ANY (既定 1): sequence-parallel の候補を、順不同の 2 パスで集める (forward.Ctx.topk_any)
     topk_any: bool = true,
@@ -181,6 +191,11 @@ pub const Options = struct {
     roce: bool = false,
     dcp_roce: bool = true,
     decode_bf16: bool = false,
+    /// TF_GLM53_ROT_PRE (default 1; 0 off): the rotation of an EXL3 linear's input done by the kernel that makes the
+    /// input (forward.Ctx.rot_pre), the same bits as rot_in
+    /// TF_GLM53_ROT_PRE (既定 1、0 でオフ): EXL3 linear の入力の回転を、入力を作るカーネルで行う (forward.Ctx.rot_pre)。
+    /// ビットは rot_in と同じ
+    rot_pre: bool = true,
     /// TF_GLM53_SPLIT_QA=1 (with TF_GLM53_ROCE): decode windows compute this rank's share of q_a's and kv_a's output
     /// blocks and all-gather them (forward.Ctx.split), instead of both whole on every rank
     /// TF_GLM53_SPLIT_QA=1 (TF_GLM53_ROCE と): decode ウィンドウで q_a と kv_a の出力ブロックのこのランクの分だけを
@@ -222,6 +237,7 @@ pub fn withEnv(o: Options) Options {
     r.dflash_head4 = std.mem.eql(u8, F.get("TF_GLM53_DFLASH_HEAD4") orelse "0", "1");
     r.ring = std.mem.eql(u8, F.get("TF_GLM53_PREFILL_REDUCE") orelse "ring", "ring");
     r.topk_words = !std.mem.eql(u8, F.get("TF_GLM53_TOPK_WORDS") orelse "1", "0");
+    r.sample_pick_gpu = !std.mem.eql(u8, F.get("TF_GLM53_SAMPLE_PICK") orelse "gpu", "host");
     r.topk_any = !std.mem.eql(u8, F.get("TF_GLM53_TOPK_ANY") orelse "1", "0");
     r.pe_f16 = !std.mem.eql(u8, F.get("TF_GLM53_PE_F16") orelse "1", "0");
     r.deterministic = std.mem.eql(u8, F.get("TF_GLM53_DETERMINISTIC") orelse "0", "1");
@@ -244,6 +260,7 @@ pub fn withEnv(o: Options) Options {
     r.roce = std.mem.eql(u8, F.get("TF_GLM53_ROCE") orelse "0", "1");
     r.dcp_roce = !std.mem.eql(u8, F.get("TF_GLM53_DCP_ROCE") orelse "1", "0");
     r.decode_bf16 = std.mem.eql(u8, F.get("TF_GLM53_DECODE_BF16") orelse "0", "1");
+    r.rot_pre = !std.mem.eql(u8, F.get("TF_GLM53_ROT_PRE") orelse "1", "0");
     r.split_qa = std.mem.eql(u8, F.get("TF_GLM53_SPLIT_QA") orelse "0", "1");
     r.kvb8 = std.mem.eql(u8, F.get("TF_GLM53_KVB") orelse "bf16", "fp8");
     r.l2pf = std.mem.eql(u8, F.get("TF_GLM53_L2PF") orelse "0", "1");
@@ -671,6 +688,7 @@ pub const Engine = struct {
     // TF_GLM53_L2PF: decode ウィンドウの RoCE の待ちで次の重みを先読みする (forward.Ctx.l2pf)
     l2pf: bool = false,
     decode_bf16: bool = false,
+    rot_pre: bool = true,
     // ring4 (tp.Group.topology): gatherRs's all-to-all relay area (forward.Ctx.relay)
     // ring4 (tp.Group.topology): gatherRs の all-to-all の中継の領域 (forward.Ctx.relay)
     relay: ?cuda.DeviceBuffer = null,
@@ -714,6 +732,15 @@ pub const Engine = struct {
     recording_shapes: bool = false,
     lgath: cuda.DeviceBuffer = undefined, // fp32 [world, rows, vshare]: every rank's logits / 全ランクの logits
     host_logits: []f32 = &.{},
+    // Fiore-lab, Expert Atlas: the sampled rows' candidates picked on the GPU (sampleRowsGpu): the selected indexes,
+    // this rank's candidates (packed int64) and every rank's on the host; the packed rows and the gathered candidates
+    // use lgath
+    // Fiore-lab, Expert Atlas: GPU で選ぶサンプル行の候補 (sampleRowsGpu): 選んだ index、このランクの候補 (packed
+    // int64)、ホストに全ランクの候補。パックした行と集めた候補は lgath を使う
+    sample_pick_gpu: bool = true,
+    sample_idx: cuda.DeviceBuffer = undefined,
+    sample_sel: cuda.DeviceBuffer = undefined,
+    sample_host: []i64 = &.{},
     // TF_GLM53_MULTI: conversations decoded together (multiSetup) / 一緒に decode する会話 (multiSetup)
     multi: ?*Multi = null,
     // TF_GLM53_MULTI: the other conversations' rounds inside a prefill (set around an admission's prefill)
@@ -1047,6 +1074,9 @@ pub const Engine = struct {
         }
         e.lgath = try cuda.DeviceBuffer.alloc(d, @as(usize, world) * vrows * e.vshare * 4);
         e.host_logits = try gpa.alloc(f32, @as(usize, world) * vrows * e.vshare);
+        e.sample_idx = try cuda.DeviceBuffer.alloc(d, vrows * sample_cap * 4);
+        e.sample_sel = try cuda.DeviceBuffer.alloc(d, vrows * sample_cap * 8);
+        e.sample_host = try gpa.alloc(i64, @as(usize, world) * vrows * sample_cap);
         e.chk_send = try cuda.DeviceBuffer.alloc(d, 64 * 4);
         e.chk_recv = try cuda.DeviceBuffer.alloc(d, 64 * 4 * world);
         memMark(ctx, rank, "DCP group + logits gather", &mt);
@@ -1092,6 +1122,8 @@ pub const Engine = struct {
         if (o.unpack_cache_mb > 0) e.ucache = try unpack_cache.Cache.init(gpa, d, e.layers, o.unpack_cache_mb << 20);
         memMark(ctx, rank, "unpack cache", &mt);
         if (o.roce) try e.initRoce(o);
+        e.rot_pre = o.rot_pre;
+        if (e.rank == 0 and !e.rot_pre) std.log.info("glm53: the producer-side rotation off (TF_GLM53_ROT_PRE=0)", .{});
         memMark(ctx, rank, "RoCE", &mt);
         e.prompt_rows = forward.max_rows;
         if (o.sp_parts > 0) try e.initSp(o, &inv, &had, keys, first_moe orelse return error.SpNeedsMoeLayer);
@@ -1243,6 +1275,7 @@ pub const Engine = struct {
         e.sp_want = o.sp_parts;
         e.ring = o.ring;
         e.topk_words = o.topk_words;
+        e.sample_pick_gpu = o.sample_pick_gpu;
         e.fuse = o.fuse;
         e.xgroup = o.xgroup;
         e.topk_any = o.topk_any;
@@ -1402,7 +1435,7 @@ pub const Engine = struct {
             .xs = xs, .tap_slot = e.tap_slot, .n_taps = e.n_taps,
             .dgroup = if (e.dgroup) |*g| g else null, .probe = e.probe, .probe_ctx = e.probe_ctx,
             .pek = if (e.pek) |*k| k else null, .pes = &e.pes, .pe_ok = e.pe_ok, .ring = e.ring, .topk_words = e.topk_words, .topk_any = e.topk_any, .pe_f16 = e.pe_f16, .topk16 = e.topk16, .fuse = e.fuse, .xgroup = e.xgroup, .peer_q = e.peer_q, .index_fp8 = e.index_fp8, .probe_select = e.probe_select,
-            .fast = if (e.fast) |*f| f else null, .dfast = if (e.dfast) |*f| f else null, .decode_bf16 = e.decode_bf16,
+            .fast = if (e.fast) |*f| f else null, .dfast = if (e.dfast) |*f| f else null, .decode_bf16 = e.decode_bf16, .rot_pre = e.rot_pre,
             .pick_log = if (b == &e.vbufs) e.pick_log_dev else 0,
             .relay = if (e.relay) |r| r.ptr else 0, .relay_bytes = if (e.relay) |r| r.len else 0,
             // the split front for decode windows only: one area, used by the decode stream alone
@@ -2240,6 +2273,11 @@ pub const Engine = struct {
         const W = e.world;
         const vs: usize = e.vshare;
         const n = @as(usize, R) * vs;
+        const want = @min(W * vs, (if (s.top_k != 0) @as(usize, s.top_k) else 256) + sample_margin);
+        // the packed rows and every rank's candidates must fit in lgath (it does at two ranks or more)
+        // パックした行と全ランクの候補が lgath に収まること (2 ランク以上なら収まる)
+        const fits = n * 8 + W * @as(usize, R) * @min(want, vs) * 8 <= e.lgath.len;
+        if (e.sample_pick_gpu and want <= sample_cap and fits) return e.sampleRowsGpu(lpart, R, pos0, s, drafts, out, want);
         const lib = e.group.lib;
         try lib.check(lib.api.ncclAllGather(lpart, e.lgath.ptr, n, .f32, e.group.comm, e.stream.handle), "ncclAllGather");
         try e.lgath.downloadAsync(0, std.mem.sliceAsBytes(e.host_logits[0 .. W * n]), e.stream.handle);
@@ -2300,6 +2338,51 @@ pub const Engine = struct {
                 d.* = c.id;
             }
             const tok = try sampler.choose(e.gpa, vals[0..len], ids[0..len], pos0 + i, s);
+            out[i] = @intCast(tok);
+            drawn += 1;
+            if (i >= drafts.len or drafts[i] != out[i]) break;
+        }
+        return drawn;
+    }
+
+    /// Fiore-lab, Expert Atlas: sampleRows with the candidates picked on the GPU: each rank packs its share of each row,
+    /// selects its k = min(m, vshare) best by (value, id) and all-gathers only those; the host keeps each row's m best of
+    /// the world's (every rank's k best hold them), so the candidates and the draws are the host pick's.
+    /// Fiore-lab, Expert Atlas: 候補を GPU で選ぶ sampleRows。各ランクは各行の分担をパックし、(値, id) で上位 k 個を
+    /// 選び、それだけを all-gather する。ホストは全ランク分から各行の上位 m 個を残す (各ランクの上位 k 個にすべて入る)
+    /// ので、候補も抽選もホストで選ぶときと同じ。
+    fn sampleRowsGpu(e: *Engine, lpart: u64, R: u32, pos0: usize, s: Sampling, drafts: []const u32, out: []u32, m: usize) !usize {
+        const W = e.world;
+        const vs: usize = e.vshare;
+        const k = @min(m, vs);
+        const lib = e.group.lib;
+        const packed_rows = e.lgath.ptr;
+        const gathered = try e.lgath.at(@as(usize, R) * vs * 8);
+        try e.glue.sampleCandidates(e.stream, lpart, packed_rows, e.sample_idx.ptr, e.sample_sel.ptr, R, @intCast(vs), @intCast(k), @intCast(e.rank * vs));
+        const n = @as(usize, R) * k;
+        try lib.check(lib.api.ncclAllGather(e.sample_sel.ptr, gathered, n, .i64, e.group.comm, e.stream.handle), "ncclAllGather");
+        const host = e.sample_host[0 .. W * n];
+        try e.lgath.downloadAsync(@as(usize, R) * vs * 8, std.mem.sliceAsBytes(host), e.stream.handle);
+        try e.stream.synchronize();
+        const row_keys = try e.gpa.alloc(i64, W * k);
+        defer e.gpa.free(row_keys);
+        const vals = try e.gpa.alloc(f64, m);
+        defer e.gpa.free(vals);
+        const ids = try e.gpa.alloc(u64, m);
+        defer e.gpa.free(ids);
+        var drawn: usize = 0;
+        for (0..R) |i| {
+            // the world's candidates of row i: rank r's are host[(r * R + i) * k ..][0..k]
+            // 行 i の全ランクの候補: ランク r のものは host[(r * R + i) * k ..][0..k]
+            for (0..W) |r| @memcpy(row_keys[r * k ..][0..k], host[(r * @as(usize, R) + i) * k ..][0..k]);
+            std.mem.sort(i64, row_keys, {}, std.sort.desc(i64));
+            for (row_keys[0..m], vals, ids) |key, *v, *id| {
+                const ord: i32 = @truncate(key >> 32);
+                const bits: i32 = if (ord >= 0) ord else ord ^ 0x7FFFFFFF;
+                v.* = @as(f32, @bitCast(bits));
+                id.* = @intCast(0x7FFFFFFF - (key & 0xFFFFFFFF));
+            }
+            const tok = try sampler.choose(e.gpa, vals, ids, pos0 + i, s);
             out[i] = @intCast(tok);
             drawn += 1;
             if (i >= drafts.len or drafts[i] != out[i]) break;

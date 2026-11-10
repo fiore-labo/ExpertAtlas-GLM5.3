@@ -1,9 +1,23 @@
-//! The keyed host sampler (Python exact_sampling.py) bit for bit: libm's exp and log, numpy's sum order.
+// Modified by Fiore-lab from TensorFold 1.0.2 (NOTICE lists the changed files).
+//! The keyed host sampler (Python exact_sampling.py) bit for bit: libm's exp and log, numpy's sum order. The code is
+//! better C in sampling.cpp and this file is its Zig face, with the API the engines, the drafters and the server use;
+//! sampling_match_test.zig checks it against TensorFold 1.0.2's Zig (sampling_ref.zig).
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-extern "c" fn exp(x: f64) f64;
-extern "c" fn log(x: f64) f64;
+/// sampling.cpp's FioreSampling
+const CSampling = extern struct { seed: u64, temperature: f64, top_k: u32, top_p: f64, min_p: f64 };
+
+comptime {
+    std.debug.assert(@sizeOf(CSampling) == 40 and @offsetOf(CSampling, "top_k") == 16 and @offsetOf(CSampling, "top_p") == 24 and @offsetOf(CSampling, "min_p") == 32);
+}
+
+extern fn fiore_sampling_seed_for(tokens: [*]const u32, n: usize, salt: i64) u64;
+extern fn fiore_sampling_key_bits(seed: u64, position: u64, id: u64) u64;
+extern fn fiore_sampling_uniform(seed: u64, position: u64, id: u64) f64;
+extern fn fiore_sampling_min_log(min_p: f64) f64;
+extern fn fiore_sampling_scratch_bytes(n: usize) usize;
+extern fn fiore_sampling_choose(values: [*]const f64, ids: [*]const u64, n: usize, position: u64, s: CSampling, scratch: *anyopaque) u64;
 
 pub const Sampling = struct {
     seed: u64,
@@ -14,123 +28,48 @@ pub const Sampling = struct {
 
     /// ln(min_p), -inf when off.
     pub fn minLog(s: Sampling) f64 {
-        return if (s.min_p > 0.0) log(s.min_p) else -std.math.inf(f64);
+        return fiore_sampling_min_log(s.min_p);
+    }
+
+    fn c(s: Sampling) CSampling {
+        return .{ .seed = s.seed, .temperature = s.temperature, .top_k = s.top_k, .top_p = s.top_p, .min_p = s.min_p };
     }
 };
 
 /// A reproducible seed from the prompt: sha256 of the ids joined by commas and "|salt", first 8 bytes, 63 bits.
 pub fn seedFor(tokens: []const u32, salt: i64) u64 {
-    var h = std.crypto.hash.sha2.Sha256.init(.{});
-    var buf: [32]u8 = undefined;
-    for (tokens, 0..) |t, i| {
-        if (i > 0) h.update(",");
-        h.update(std.fmt.bufPrint(&buf, "{d}", .{t}) catch unreachable);
-    }
-    h.update(std.fmt.bufPrint(&buf, "|{d}", .{salt}) catch unreachable);
-    const digest = h.finalResult();
-    return std.mem.readInt(u64, digest[0..8], .little) & ((@as(u64, 1) << 63) - 1);
-}
-
-pub fn mix(v: u64) u64 {
-    var x = v;
-    x ^= x >> 30;
-    x *%= 0xBF58476D1CE4E5B9;
-    x ^= x >> 27;
-    x *%= 0x94D049BB133111EB;
-    return x ^ (x >> 31);
+    return fiore_sampling_seed_for(tokens.ptr, tokens.len, salt);
 }
 
 /// splitmix64 of (seed, position, id): the bits every keyed sampler starts from.
 pub fn keyBits(seed: u64, position: u64, id: u64) u64 {
-    var x = mix(seed +% 0x9E3779B97F4A7C15);
-    x = mix(x ^ (position *% 0xD1B54A32D192ED03));
-    return mix(x ^ id);
+    return fiore_sampling_key_bits(seed, position, id);
 }
 
 /// Uniform (0, 1] double from the key's top 53 bits (Python `uniform`).
 pub fn uniform(seed: u64, position: u64, id: u64) f64 {
-    const x = keyBits(seed, position, id);
-    return @as(f64, @floatFromInt(x >> 11)) * 0x1p-53 + 0x1p-54;
-}
-
-/// numpy's float64 pairwise sum (`np.add.reduce` on a contiguous row).
-pub fn pairwiseSum(a: []const f64) f64 {
-    if (a.len < 8) {
-        var res: f64 = -0.0;
-        for (a) |v| res += v;
-        return res;
-    }
-    if (a.len <= 128) {
-        var r: [8]f64 = a[0..8].*;
-        var i: usize = 8;
-        while (i < a.len - (a.len % 8)) : (i += 8) {
-            inline for (0..8) |j| r[j] += a[i + j];
-        }
-        var res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
-        while (i < a.len) : (i += 1) res += a[i];
-        return res;
-    }
-    var n2 = a.len / 2;
-    n2 -= n2 % 8;
-    return pairwiseSum(a[0..n2]) + pairwiseSum(a[n2..]);
-}
-
-const Candidate = struct { value: f64, id: u64 };
-
-fn byValueThenId(_: void, a: Candidate, b: Candidate) bool {
-    return a.value > b.value or (a.value == b.value and a.id < b.id);
+    return fiore_sampling_uniform(seed, position, id);
 }
 
 /// The id drawn among candidates `ids` with float64 logits `values` (Python `choose`, and `choose_rows` row by row).
 pub fn choose(gpa: Allocator, values: []const f64, ids: []const u64, position: u64, s: Sampling) !u64 {
-    const width = ids.len;
-    const order = try gpa.alloc(Candidate, width);
-    defer gpa.free(order);
-    for (order, values, ids) |*o, v, id| o.* = .{ .value = v, .id = id };
-    std.mem.sort(Candidate, order, {}, byValueThenId);
-    const k = @max(1, @min(if (s.top_k != 0) @as(usize, s.top_k) else width, width));
-    const scaled = try gpa.alloc(f64, k);
-    defer gpa.free(scaled);
-    const t = @max(s.temperature, 1e-6);
-    for (scaled, order[0..k]) |*x, o| x.* = o.value / t;
-    var keep = k;
-    if (s.top_p > 0.0 and s.top_p < 1.0) {
-        const probs = try gpa.alloc(f64, k);
-        defer gpa.free(probs);
-        for (probs, scaled) |*p, x| p.* = exp(x - scaled[0]);
-        const total = pairwiseSum(probs);
-        var cum: f64 = 0.0;
-        var below: usize = 0;
-        for (probs) |*p| {
-            p.* /= total;
-            cum += p.*;
-            if (cum < s.top_p) below += 1;
-        }
-        keep = @min(keep, below + 1);
-    }
-    if (s.min_p > 0.0) {
-        const floor = scaled[0] + s.minLog();
-        var n: usize = 0;
-        for (scaled[0..keep]) |x| {
-            if (x >= floor) n += 1;
-        }
-        keep = n;
-    }
-    var best: usize = 0;
-    var best_score = -std.math.inf(f64);
-    for (0..keep) |j| {
-        const gumbel = -log(-log(uniform(s.seed, position, order[j].id)));
-        const score = scaled[j] + gumbel;
-        if (j == 0 or score > best_score) {
-            best = j;
-            best_score = score;
-        }
-    }
-    return order[best].id;
+    std.debug.assert(values.len == ids.len and ids.len > 0);
+    const scratch = try gpa.alloc(u64, (fiore_sampling_scratch_bytes(ids.len) + 7) / 8);
+    defer gpa.free(scratch);
+    return fiore_sampling_choose(values.ptr, ids.ptr, ids.len, position, s.c(), scratch.ptr);
 }
 
 test "seeds keep 63 bits and uniforms fall in (0, 1]" {
     try std.testing.expect(seedFor(&.{ 1, 2, 3 }, 0) < (@as(u64, 1) << 63));
     const u = uniform(7, 11, 13);
     try std.testing.expect(u > 0.0 and u <= 1.0);
+}
+
+test "top_k 1 takes the best logit, the smaller id on a tie" {
+    const s: Sampling = .{ .seed = 1, .top_k = 1 };
+    try std.testing.expectEqual(@as(u64, 9), try choose(std.testing.allocator, &.{ 0.5, 2.0, 2.0 }, &.{ 4, 9, 12 }, 0, s));
+}
+
+test {
+    _ = @import("sampling_match_test.zig");
 }

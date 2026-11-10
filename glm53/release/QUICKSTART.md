@@ -128,7 +128,7 @@ On the first node, as the user who will run it:
 docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 ```
 
-`IMAGE` is the release's image, `ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.4-102`. The line writes the release to `~/expertatlas`, finds the nodes (a ring or a switch), checks
+`IMAGE` is the release's image, `ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.5-102`. The line writes the release to `~/expertatlas`, finds the nodes (a ring or a switch), checks
 them, looks for the weights, starts the engine and sends one request. The first start takes a few minutes.
 
 It ends in one of two ways.

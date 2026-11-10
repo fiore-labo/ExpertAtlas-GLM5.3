@@ -153,6 +153,10 @@ pub const Scratch = struct {
     }
 };
 
+// the kernels' load options: bits 1 and 2 (the one load walk built), 32 (PDL)
+// カーネルの読み込み設定: bit 1 と 2 (実装した唯一の読み込み方)、32 (PDL)
+const loads: u32 = 35;
+
 /// outs[j] (fp32 / bf16 [M, N_j], `out_dtypes`) = x [M, K] @ W_j for 1 to 3 groupable layers in one rot_in and one
 /// linear launch, M up to 128 rows.
 /// まとめられる 1〜3 層について outs[j] = x [M, K] @ W_j (fp32 / bf16 [M, N_j]、`out_dtypes`) を、rot_in 1 回と
@@ -165,14 +169,20 @@ pub fn call(k: *const exl3.Kernels, stream: cuda.Stream, s: *const Scratch, ls: 
         suh[i] = l.suh.ptr;
         xh[i] = s.xh[i].ptr;
     }
-    // the kernels' load options: bits 1 and 2 (the one load walk built), 32 (PDL)
-    // カーネルの読み込み設定: bit 1 と 2 (実装した唯一の読み込み方)、32 (PDL)
-    const loads: u32 = 35;
     try k.rotIn(stream, x, x_dtype, suh[0..ls.len], xh[0..ls.len], m, ls[0].k, loads & 32 != 0);
+    return callRotated(k, stream, s, ls, m, outs, out_dtypes);
+}
+
+/// `call` without its rot_in: layer j's rotated input already in s.xh[j] (written by the kernel that made the input,
+/// native_ops rmsRot / swiglu2Rot, with rot_in's bytes).
+/// rot_in を除いた `call`: 層 j の回転した入力はすでに s.xh[j] にある (入力を作ったカーネル native_ops の rmsRot /
+/// swiglu2Rot が、rot_in と同じバイトで書いたもの)。
+pub fn callRotated(k: *const exl3.Kernels, stream: cuda.Stream, s: *const Scratch, ls: []const *const Linear, m: u32, outs: []const u64, out_dtypes: []const exl3.DType) !void {
+    if (!groupable(ls) or m < 1 or m > 128) return error.NotGroupable;
     var jobs: exl3.Jobs = .{ .n = @intCast(ls.len) };
     for (ls, 0..) |l, i| {
         const st = l.strides();
-        jobs.j[i] = .{ .xh = xh[i], .T = l.words.ptr, .stride_k = st.k, .stride_nb = st.nb, .svh = l.svh.ptr, .y = outs[i], .Z = if (l.sk > 1) s.z[i].ptr else 0, .counters = l.counters.ptr, .y_dtype = @intFromEnum(out_dtypes[i]), .N = @intCast(l.n), .SK = @intCast(l.sk) };
+        jobs.j[i] = .{ .xh = s.xh[i].ptr, .T = l.words.ptr, .stride_k = st.k, .stride_nb = st.nb, .svh = l.svh.ptr, .y = outs[i], .Z = if (l.sk > 1) s.z[i].ptr else 0, .counters = l.counters.ptr, .y_dtype = @intFromEnum(out_dtypes[i]), .N = @intCast(l.n), .SK = @intCast(l.sk) };
     }
     try k.linear(stream, jobs, m, ls[0].k, ls[0].k2, ls[0].cb, ls[0].wk, loads);
 }

@@ -37,6 +37,13 @@
 - 确定性模式（`DETERMINISTIC=1`）：按相同顺序发送相同的请求，每次重新启动都得到相同的 token。
 - `/metrics`（Prometheus 文本格式）和 `/health` 也统计正在运行的请求，因此监控程序在请求运行期间也能读取 prefill 与解码速度、缓存命中和草稿接受情况。设置 `METRICS_LISTEN` 后，这两个端点会在单独的地址上以只读方式开放，供其他主机上的监控程序使用。
 
+## r3.3.5-102 的变化
+
+- **decode 更快，token 不变：** 旋转线性层之前的 Hadamard 旋转改由生成其输入的 kernel（rmsnorm、SwiGLU）一并完成，attention 之后的残差加法和 rmsnorm 合并为一个 kernel；温度大于 0 时，各 rank 在 GPU 上选出每行的候选，只汇集这些候选（以前汇集整个词表的 logits）。在环上，decode 每轮因前者缩短 0.3–0.4 %，因后者再缩短 0.4–0.8 %，token 和 KV 缓存与之前相同（在确定性模式下比较）。
+- **采样器改为 Expert Atlas 自己的代码：** 由 prompt 得到的 seed、随机数、`top_k` / `top_p` / `min_p` 和抽取改用 C 编写，算法与 TensorFold 1.0.2 相同，抽取结果逐位相同。
+- **启动器的 ssh：** 启动器的巡检和 `tf-glm53` 的监视对每个节点复用一条 ssh 连接，节点的 `auth.log` 和 journal 中的登录从每 5 秒一次变为每次启动一次。
+- **修复：** 启动设置页面向下滚动后，不再每 5 秒跳回顶部（在 Safari 中出现）。
+
 ## r3.3.4-102 的变化
 
 - **确定性模式（`DETERMINISTIC=1`，默认关闭）：** 在相同的发布版、节点和设置下，从启动起按相同顺序发送相同的请求，每次重新启动都得到相同的 token，任何温度都一样（没有 `seed` 的请求由 prompt 决定 seed）。EXL3 的 linear 使用固定的 tile 而不是计时选出的 tile，prompt 专家按固定顺序相加 slot，启动时各 rank 比对设置。一次一个对话（`MULTI=0`），上下文长度和 KV 大小按设置使用；prefill 约慢 20 %，解码大致相同（[FEATURES](glm53/release/FEATURES.zh-CN.md#14-确定性模式)）。
@@ -152,12 +159,12 @@ python3 -m venv ~/hf-cli && ~/hf-cli/bin/pip install -U huggingface_hub
 发布以容器镜像和内容相同的归档两种形式提供；推荐使用镜像。权重就位后，在第一个节点上运行一行命令即可启动引擎：
 
 ```sh
-docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.4-102 up
+docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.5-102 up
 ```
 
 最后输出 `READY` 和地址：API 在 `http://FIRST-NODE:8000/v1`，控制面板在 `http://FIRST-NODE:8010/panel`。如果缺少什么，则以 `STOP` 结束，并说明要做什么以及接下来要运行的一行。步骤和所有选项见 [QUICKSTART](glm53/release/QUICKSTART.zh-CN.md)。
 
-手动完成同样的事：使用镜像时，在每个节点上 `docker pull` 它，运行 `mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out`，并在 `glm53.conf` 中设置 `RUNTIME=docker` 和 `IMAGE`（[packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)“在容器中运行”）。不使用 Docker 时：下载发布归档 `tensorfold-r3.3.4-102-linux-aarch64.tar.gz`，并按照其中的 `RUNTIME.md`（本仓库中为 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)）操作。两种方式都要将 `glm53.conf.example`（八个节点）或 `glm53.t4.conf.example`（四个节点，见 [glm53/release/T4.zh-CN.md](glm53/release/T4.zh-CN.md)）复制为 `glm53.conf`，填写其中要求的内容，然后执行 `./tf-glm53 deploy` 和 `./tf-glm53 up`（启动控制面板），再在那里启动引擎。`./tf-glm53 start` 按上一次启动的计划启动，`./tf-glm53 down` 停止。
+手动完成同样的事：使用镜像时，在每个节点上 `docker pull` 它，运行 `mkdir glm53 && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/glm53":/out IMAGE install /out`，并在 `glm53.conf` 中设置 `RUNTIME=docker` 和 `IMAGE`（[packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)“在容器中运行”）。不使用 Docker 时：下载发布归档 `tensorfold-r3.3.5-102-linux-aarch64.tar.gz`，并按照其中的 `RUNTIME.md`（本仓库中为 [packaging/RUNTIME.zh-CN.md](packaging/RUNTIME.zh-CN.md)）操作。两种方式都要将 `glm53.conf.example`（八个节点）或 `glm53.t4.conf.example`（四个节点，见 [glm53/release/T4.zh-CN.md](glm53/release/T4.zh-CN.md)）复制为 `glm53.conf`，填写其中要求的内容，然后执行 `./tf-glm53 deploy` 和 `./tf-glm53 up`（启动控制面板），再在那里启动引擎。`./tf-glm53 start` 按上一次启动的计划启动，`./tf-glm53 down` 停止。
 
 服务器默认在所有地址（`HOST=0.0.0.0`）上提供 OpenAI chat API，以及供 Claude Code 使用的 Anthropic Messages API。API 和控制面板都没有密钥，任何能访问到它们的人都可以使用：请把节点放在封闭网络中，或在其前面加一层 TLS 和访问控制（设置 `HOST=127.0.0.1` 和 `LAUNCHER_HOST=127.0.0.1` 后只能从第一个节点访问）。
 
@@ -200,7 +207,7 @@ docker run --rm --network host -e USER="$USER" -v "$HOME":/host ghcr.io/fiore-la
 ```sh
 zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 --prefix /tmp/fatbins
 sh glm53/tools/release/build_libs.sh /tmp/lib        # lib/libroce_proxy.so, lib/libllguidance.so
-zig build dist -Dversion=r3.3.4-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
+zig build dist -Dversion=r3.3.5-102 -Ddist-commit=$(git rev-parse HEAD) -Ddist-platforms=linux-aarch64 \
     -Ddist-fatbins=/tmp/fatbins/fatbin -Ddist-lib=/tmp/lib -Ddist-extra=glm53/release
 ```
 

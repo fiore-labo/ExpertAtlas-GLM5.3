@@ -1,6 +1,6 @@
 English | [日本語](AI-GUIDE.ja.md) | [简体中文](AI-GUIDE.zh-CN.md)
 
-# A guide for AI assistants: full GLM-5.3 on DGX Spark (release r3.3.4-102)
+# A guide for AI assistants: full GLM-5.3 on DGX Spark (release r3.3.5-102)
 
 This page describes the whole system in one place: what it is, what each part does, how it is used, what it can do
 and what it cannot. It is written for AI assistants that help someone understand, install, run or troubleshoot this

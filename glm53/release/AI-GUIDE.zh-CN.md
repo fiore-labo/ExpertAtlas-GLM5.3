@@ -1,6 +1,6 @@
 [English](AI-GUIDE.md) | [日本語](AI-GUIDE.ja.md) | 简体中文
 
-# 面向 AI 助手的指南：在 DGX Spark 上运行完整版 GLM-5.3（发布版本 r3.3.4-102）
+# 面向 AI 助手的指南：在 DGX Spark 上运行完整版 GLM-5.3（发布版本 r3.3.5-102）
 
 本页在一处说明整个系统：它是什么、各部分做什么、如何使用、能做什么、不能做什么。本页是为帮助他人理解、安装、运行本发布版本或排查其故障的 AI 助手而写的，人来读也是同样的内容。其中的数字来自其他页面，那些页面有完整的细节，本页简略之处在那里有更多说明：`QUICKSTART.zh-CN.md`（首次启动）、`BEFORE-START.zh-CN.md`（启动前要决定的事项）、`RUNTIME.zh-CN.md`（运行，两种节点数）、`CONFIG.zh-CN.md`（所有设置）、`T4.zh-CN.md`（四个节点）、`RING.zh-CN.md`（连成环的四个节点）、`PANEL-GUIDE.zh-CN.md`（控制面板的各个界面）、`AGENT-API.zh-CN.md`（不用仪表板的控制 API）和 `ATLAS-TESTS.zh-CN.md`（专家重排的测量）。在源代码仓库中，`RUNTIME.md` 是 `packaging/RUNTIME.md`，其他页面在 `glm53/release/` 中。每个页面也有日语版（`.ja.md`）和简体中文版（`.zh-CN.md`）。
 

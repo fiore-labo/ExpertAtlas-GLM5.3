@@ -439,6 +439,212 @@ __global__ void tf_glm53_n_swiglu2(Swiglu2Args a) {
     }
 }
 
+// The input rotation of an EXL3 linear (exl3_linear.cu rot_in_kernel) done by the kernel that makes the input, the
+// same bits as rot_in: per 128-value group, xh = fp16(((y * suh) @ H) / sqrt(128)). The butterflies run over the
+// value's bits 0, 1, 2 .. 6 in that order, each (lower + upper, lower - upper); the first level as rot_in is compiled
+// (exl3_linear builds without --fmad=false; its SASS: a = fma(y0, s0, y1 s1), b = fma(y0, s0, -(y1 s1)), the same for
+// y2, y3), the rest additions, then * 1 / sqrt(128) rounded to fp16 (nearest). This file builds with --fmad=false, so
+// the fused products are written as fmaf and the others stay products.
+// EXL3 linear の入力の回転 (exl3_linear.cu の rot_in_kernel) を、入力を作るカーネルで行う。ビットは rot_in と同じ:
+// 128 値のグループごとに xh = fp16(((y * suh) @ H) / sqrt(128))。butterfly は値のビット 0, 1, 2 .. 6 の順で、それぞれ
+// (下 + 上、下 - 上)。最初の段は rot_in のコンパイル結果と同じ形 (exl3_linear は --fmad=false なしでビルドする。SASS は
+// a = fma(y0, s0, y1 s1)、b = fma(y0, s0, -(y1 s1))、y2, y3 も同じ)、残りは加算、最後に 1 / sqrt(128) を掛けて fp16 へ
+// 最近接で丸める。このファイルは --fmad=false でビルドするので、融合する積は fmaf で書き、他は積のままにする。
+#define ROT_SCALE 0.08838834764831845f   // exl3 HAD_SCALE, 1 / sqrt(128)
+
+// bits 0 and 1 of four consecutive values (rot_in's in-lane levels)
+// 連続する 4 値のビット 0 と 1 (rot_in の lane の中の段)
+static __device__ __forceinline__ void rot_lo4(const float* y, const float* s, float* v) {
+    const float p1 = y[1] * s[1], p3 = y[3] * s[3];
+    const float a = fmaf(y[0], s[0], p1), b = fmaf(y[0], s[0], -p1), c = fmaf(y[2], s[2], p3), d = fmaf(y[2], s[2], -p3);
+    v[0] = a + c;
+    v[1] = b + d;
+    v[2] = a - c;
+    v[3] = b - d;
+}
+static __device__ __forceinline__ void ld8_f16(const void* p, float* f) {
+    const uint4 u = *(const uint4*)p;
+    const unsigned w[4] = {u.x, u.y, u.z, u.w};
+#pragma unroll
+    for (int j = 0; j < 4; j++) {
+        const float2 t = __half22float2(*reinterpret_cast<const __half2*>(&w[j]));
+        f[2 * j] = t.x;
+        f[2 * j + 1] = t.y;
+    }
+}
+static __device__ __forceinline__ unsigned f32_f16x2(float lo, float hi) {
+    const __half2 h = __floats2half2_rn(lo, hi);
+    return *reinterpret_cast<const unsigned*>(&h);
+}
+
+// A thread's 8 consecutive values y (at k = 8 t + 128 g of the row), 16 consecutive threads a 128-value group (t & 15
+// its place in the group): bits 0-2 in the thread, bits 3-6 by shuffles (xor 1, 2, 4, 8). Every lane of the warp calls.
+// スレッドの連続 8 値 y (行の k = 8 t + 128 g)、連続 16 スレッドで 128 値のグループ (t & 15 がグループの中の位置):
+// ビット 0-2 はスレッドの中、3-6 は shuffle (xor 1, 2, 4, 8)。warp の全 lane が呼ぶ。
+static __device__ __forceinline__ void rot8_store(const float* y, const void* suh, void* xh) {
+    float s[8], v[8];
+    ld8_f16(suh, s);
+    rot_lo4(y, s, v);
+    rot_lo4(y + 4, s + 4, v + 4);
+#pragma unroll
+    for (int j = 0; j < 4; j++) {
+        const float lo = v[j], hi = v[j + 4];
+        v[j] = lo + hi;
+        v[j + 4] = lo - hi;
+    }
+    const int t = threadIdx.x;
+#pragma unroll
+    for (int m = 1; m < 16; m <<= 1) {
+#pragma unroll
+        for (int j = 0; j < 8; j++) {
+            const float o = __shfl_xor_sync(0xffffffffu, v[j], m);
+            v[j] = (t & m) ? o - v[j] : v[j] + o;
+        }
+    }
+    *(uint4*)xh = make_uint4(f32_f16x2(v[0] * ROT_SCALE, v[1] * ROT_SCALE), f32_f16x2(v[2] * ROT_SCALE, v[3] * ROT_SCALE),
+                             f32_f16x2(v[4] * ROT_SCALE, v[5] * ROT_SCALE), f32_f16x2(v[6] * ROT_SCALE, v[7] * ROT_SCALE));
+}
+
+// RMSNorm with rms_fixed's arithmetic (d = 256 WARPS REPS, contiguous rows, no sums), with optionally before it the
+// residual add of tf_glm53_n_residual_add (g != 0: XOUT = bf16(X + bf16(the fp32 partials summed rank 0 first)), or
+// + the bf16 partial; normed from the rounded sum, as rmsnorm reads it back) and after it the input rotation of up to
+// 3 EXL3 linears that read OUT (`jobs`; rot8_store, the same bits as rot_in; XH_j [rows, d] fp16). A block a row of
+// 32 WARPS REPS threads, thread T on values [8 T, 8 T + 8): the residual add, the output and the rotations spread
+// over all of them; the squares summed by the first 32 WARPS threads alone, each over rms_fixed's values in
+// rms_fixed's order (8 t + rep * 256 WARPS, rep 0 .. REPS - 1; the residual's rounded sums handed over in shared
+// memory), then t_block_sum_last over those WARPS warps.
+// Without the residual add the rotations may go one a block (grid.y = jobs): each block normalizes the row again (the
+// same bits) and does its own; with it, never (XOUT may be X: another block would read the updated row).
+// rms_fixed と同じ計算の RMSNorm (d = 256 WARPS REPS、連続した行、和なし)。前に任意で tf_glm53_n_residual_add の残差
+// 加算 (g != 0: XOUT = bf16(X + bf16(rank 0 から順に足した fp32 部分和))、または bf16 の部分和を足す。normed は丸めた
+// 和から、rmsnorm が読み直すのと同じ値で)、後に OUT を読む EXL3 linear 3 つまでの入力の回転 (`jobs`。rot8_store、
+// ビットは rot_in と同じ。XH_j は [rows, d] の fp16)。1 行 1 ブロック、32 WARPS REPS スレッドで、スレッド T は値
+// [8 T, 8 T + 8) を持つ: 残差加算・出力・回転は全スレッドで分け、二乗の和だけは先頭の 32 WARPS スレッドが、それぞれ
+// rms_fixed と同じ値 (8 t + rep * 256 WARPS、rep 0 .. REPS - 1) を rms_fixed と同じ順に足す (残差の丸めた和は共有メモリで
+// 渡す)。その後、その WARPS 個の warp で t_block_sum_last。
+// 残差加算なしでは回転をブロックに 1 つずつ分けてよい (grid.y = jobs): 各ブロックが行をもう一度正規化し (同じビット)、自分の
+// 回転を行う。残差加算ありでは分けない (XOUT は X でもよく、別のブロックが更新後の行を読んでしまう)。
+typedef struct { Dev x, xout, g, w, out, suh0, suh1, suh2, xh0, xh1, xh2; int rows, d, world, rs, g_bf16, jobs; float eps, rd; } RmsRotArgs;
+// sh: WARPS REPS floats, xs: D bf16 (16-byte aligned) of shared memory
+// sh は共有メモリの float WARPS REPS 個、xs は bf16 D 個 (16 バイト境界)
+static __device__ __forceinline__ void rms_rot_wide(const RmsRotArgs& a, float* sh, uint16_t* xs, const int WARPS, const int REPS) {
+    const int D = 256 * WARPS * REPS, SUMT = 32 * WARPS;
+    const long long row = (long long)blockIdx.x * D;
+    const uint16_t* x = (const uint16_t*)a.x + row;
+    const int T = threadIdx.x, c = 8 * T;
+    float xv[8];
+    ld8_bf16v(x + c, xv);
+    if (a.g) {
+        float br[8];
+        if (a.g_bf16) {
+            ld8_bf16v((const uint16_t*)a.g + row + c, br);
+        } else {
+            const float* g = (const float*)a.g + row + c;
+            float4 s0 = *(const float4*)g, s1 = *(const float4*)(g + 4);
+            for (int k = 1; k < a.world; k++) {
+                const float4 v0 = *(const float4*)(g + (long long)k * a.rs), v1 = *(const float4*)(g + (long long)k * a.rs + 4);
+                s0.x = s0.x + v0.x; s0.y = s0.y + v0.y; s0.z = s0.z + v0.z; s0.w = s0.w + v0.w;
+                s1.x = s1.x + v1.x; s1.y = s1.y + v1.y; s1.z = s1.z + v1.z; s1.w = s1.w + v1.w;
+            }
+            const float sv[8] = {s0.x, s0.y, s0.z, s0.w, s1.x, s1.y, s1.z, s1.w};
+#pragma unroll
+            for (int j = 0; j < 8; j++) br[j] = bf16_f32(f32_bf16(sv[j]));
+        }
+        unsigned o[4];
+#pragma unroll
+        for (int j = 0; j < 4; j++) o[j] = f32_bf16x2(xv[2 * j] + br[2 * j], xv[2 * j + 1] + br[2 * j + 1]);
+        const uint4 ov = make_uint4(o[0], o[1], o[2], o[3]);
+        *(uint4*)((uint16_t*)a.xout + row + c) = ov;
+        *(uint4*)(xs + c) = ov;
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            xv[2 * j] = __uint_as_float(o[j] << 16);
+            xv[2 * j + 1] = __uint_as_float(o[j] & 0xffff0000u);
+        }
+        __syncthreads();
+    }
+    float acc = 0.0f;
+    if (T < SUMT) {
+#pragma unroll
+        for (int rep = 0; rep < REPS; rep++) {
+            float v[8];
+            const int cc = 8 * T + rep * 8 * SUMT;
+            ld8_bf16v(a.g ? xs + cc : x + cc, v);
+#pragma unroll
+            for (int j = 0; j < 8; j++) acc = (rep == 0 && j == 0) ? v[j] * v[j] : fmaf(v[j], v[j], acc);
+        }
+    }
+    const float sum = t_block_sum_last(acc, sh, WARPS);
+    const float rinv = t_div(1.0f, t_sqrt(fmaf(sum, a.rd, a.eps)));
+    float wv[8], y[8];
+    unsigned yp[4];
+    ld8_bf16v((const uint16_t*)a.w + c, wv);
+#pragma unroll
+    for (int j = 0; j < 4; j++) {
+        const unsigned xp = f32_bf16x2(xv[2 * j] * rinv, xv[2 * j + 1] * rinv);
+        yp[j] = f32_bf16x2(wv[2 * j] * __uint_as_float(xp << 16), wv[2 * j + 1] * __uint_as_float(xp & 0xffff0000u));
+        y[2 * j] = __uint_as_float(yp[j] << 16);
+        y[2 * j + 1] = __uint_as_float(yp[j] & 0xffff0000u);
+    }
+    // grid.y > 1 (no residual add): block y does rotation y alone, block 0 writes OUT; else one block all of them
+    // grid.y > 1 (残差加算なし): ブロック y は回転 y だけ、OUT はブロック 0 が書く。それ以外は 1 ブロックで全部
+    const int j0 = gridDim.y > 1 ? (int)blockIdx.y : 0, j1 = gridDim.y > 1 ? j0 + 1 : a.jobs;
+    if (blockIdx.y == 0) *(uint4*)((uint16_t*)a.out + row + c) = make_uint4(yp[0], yp[1], yp[2], yp[3]);
+    if (j0 <= 0 && 0 < j1 && a.jobs > 0) rot8_store(y, (const uint16_t*)a.suh0 + c, (uint16_t*)a.xh0 + row + c);
+    if (j0 <= 1 && 1 < j1 && a.jobs > 1) rot8_store(y, (const uint16_t*)a.suh1 + c, (uint16_t*)a.xh1 + row + c);
+    if (j0 <= 2 && 2 < j1 && a.jobs > 2) rot8_store(y, (const uint16_t*)a.suh2 + c, (uint16_t*)a.xh2 + row + c);
+}
+__global__ void __launch_bounds__(768) tf_glm53_n_rmsrot_d6144(RmsRotArgs a) {   // 768 threads (squares: the first 256) / 768 スレッド (二乗の和は先頭 256)
+    __shared__ float sh[24];
+    __shared__ __align__(16) uint16_t xs[6144];
+    rms_rot_wide(a, sh, xs, 8, 3);
+}
+__global__ void __launch_bounds__(256) tf_glm53_n_rmsrot_d2048(RmsRotArgs a) {   // 256 threads (squares: the first 128) / 256 スレッド (二乗の和は先頭 128)
+    __shared__ float sh[8];
+    __shared__ __align__(16) uint16_t xs[2048];
+    rms_rot_wide(a, sh, xs, 4, 2);
+}
+
+// tf_glm53_n_swiglu2 (OUT = bf16(bf16(silu(G)) * U), the same expressions) with the input rotation of the linear that
+// reads OUT: XH [rows, width] fp16, rot_in's lane layout (4 consecutive values a lane, a warp a 128-value group, its
+// butterflies in rot_in's order: rot_lo4, then xor 1 .. 16). A warp a group: grid (width / 128 / warps, rows), 32
+// warps threads; width a multiple of 128, pointers 16-byte aligned.
+// tf_glm53_n_swiglu2 (OUT = bf16(bf16(silu(G)) * U)、同じ式) に、OUT を読む linear の入力の回転を足したもの:
+// XH [rows, width] の fp16。rot_in と同じ lane の割り当て (lane に連続 4 値、warp で 128 値のグループ、butterfly は
+// rot_in の順: rot_lo4 の後に xor 1 .. 16)。warp ごとに 1 グループ: grid (width / 128 / warps, rows)、32 warps スレッド。
+// width は 128 の倍数、ポインタは 16 バイト境界。
+typedef struct { Dev g, u, out, suh, xh; int rows, width; } Swiglu2RotArgs;
+__global__ void tf_glm53_n_swiglu2_rot(Swiglu2RotArgs a) {
+    const long long row = (long long)blockIdx.y * a.width;
+    const int lane = threadIdx.x & 31;
+    const int c = (blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5)) * 128 + 4 * lane;
+    float gv[4], uv[4], y[4], s[4], v[4];
+    ld4_bf16v((const uint16_t*)a.g + row + c, gv);
+    ld4_bf16v((const uint16_t*)a.u + row + c, uv);
+    unsigned long long o = 0;
+#pragma unroll
+    for (int j = 0; j < 4; j++) {
+        const float sg = bf16_f32(f32_bf16(t_div(gv[j], t_exp(0.0f - gv[j]) + 1.0f)));
+        const uint16_t r = f32_bf16(sg * uv[j]);
+        o |= (unsigned long long)r << (16 * j);
+        y[j] = bf16_f32(r);
+    }
+    *(unsigned long long*)((uint16_t*)a.out + row + c) = o;
+    const uint2 sw = *(const uint2*)((const uint16_t*)a.suh + c);
+    const float2 s01 = __half22float2(*reinterpret_cast<const __half2*>(&sw.x)), s23 = __half22float2(*reinterpret_cast<const __half2*>(&sw.y));
+    s[0] = s01.x; s[1] = s01.y; s[2] = s23.x; s[3] = s23.y;
+    rot_lo4(y, s, v);
+#pragma unroll
+    for (int m = 1; m < 32; m <<= 1) {
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            const float t = __shfl_xor_sync(0xffffffffu, v[j], m);
+            v[j] = (lane & m) ? t - v[j] : v[j] + t;
+        }
+    }
+    *(uint2*)((uint16_t*)a.xh + row + c) = make_uint2(f32_f16x2(v[0] * ROT_SCALE, v[1] * ROT_SCALE), f32_f16x2(v[2] * ROT_SCALE, v[3] * ROT_SCALE));
+}
+
 // A RoPE pair rotated as the original does it: ra = fma(a, cos, -(b sin)), rb = fma(b, cos, a sin) - the sin product
 // rounded, the cos product fused. cos / sin are libdevice's.
 // 元と同じ RoPE ペアの回転: ra = fma(a, cos, -(b sin))、rb = fma(b, cos, a sin)。sin との積は丸め、cos との積は

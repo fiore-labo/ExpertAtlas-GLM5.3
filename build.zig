@@ -3,6 +3,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const cuda_build = @import("zig/build/cuda.zig");
 const dist_build = @import("zig/build/dist.zig");
+const lanes_build = @import("zig/build/lanes.zig");
 
 comptime {
     const required = std.mem.trim(u8, @embedFile(".zig-version"), "\r\n");
@@ -493,7 +494,7 @@ fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
     metal.linkFramework("Metal", .{});
     metal.linkFramework("Foundation", .{});
     metal.linkSystemLibrary("objc", .{});
-    const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const lanes = lanes_build.module(b, target, optimize);
     const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
     const engine = b.createModule(.{

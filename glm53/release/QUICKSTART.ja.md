@@ -114,7 +114,7 @@ done
 docker run --rm --network host -e USER="$USER" -v "$HOME":/host IMAGE up
 ```
 
-`IMAGE` はリリースのイメージ `ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.4-102` です。リリースを `~/expertatlas` に書き、ノード (リングかスイッチか) を見つけて確認し、ウェイトを探し、エンジンを起動して、1 回推論します。初回は数分かかります。
+`IMAGE` はリリースのイメージ `ghcr.io/fiore-labo/expertatlas-glm5.3:r3.3.5-102` です。リリースを `~/expertatlas` に書き、ノード (リングかスイッチか) を見つけて確認し、ウェイトを探し、エンジンを起動して、1 回推論します。初回は数分かかります。
 
 最後は次のどちらかになります。
 
